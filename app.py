@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from openai import OpenAI
 import requests
 import json
@@ -18,11 +19,13 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Enable CORS for all routes (needed for web frontend)
+CORS(app)
+
 # Connect to OpenAI API (configurable for different providers)
 # Default to local model, but allow override via environment variables
-#hello
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "key")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "keyy")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://10.75.176.49:1234/v1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "lm-studio")
 
 client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
@@ -614,6 +617,89 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
         "menu_data": menu_data,
         "ai_prompt": user_context
     }
+
+@app.route('/', methods=['GET'])
+def api_info():
+    """Base route - API information"""
+    return jsonify({
+        "name": "DormDish Backend API",
+        "version": "1.0.0",
+        "description": "AI-powered meal planning API for university dining halls",
+        "status": "active",
+        "endpoints": {
+            "health": {
+                "path": "/health",
+                "method": "GET",
+                "description": "Health check endpoint"
+            },
+            "auth": {
+                "register": {
+                    "path": "/auth/register",
+                    "method": "POST",
+                    "description": "Register a new user account"
+                },
+                "login": {
+                    "path": "/auth/login",
+                    "method": "POST",
+                    "description": "User login"
+                },
+                "logout": {
+                    "path": "/auth/logout",
+                    "method": "POST",
+                    "description": "User logout"
+                },
+                "profile": {
+                    "path": "/auth/profile",
+                    "methods": ["GET", "PUT"],
+                    "description": "Get or update user profile"
+                }
+            },
+            "meal_planning": {
+                "generate": {
+                    "path": "/generate-meal-plan",
+                    "method": "POST",
+                    "description": "Generate AI-powered meal plan (supports both authenticated users and guests)"
+                }
+            },
+            "dining": {
+                "halls": {
+                    "path": "/dining-halls",
+                    "method": "GET",
+                    "description": "Get list of supported dining halls"
+                },
+                "menu": {
+                    "path": "/menu/<dining_hall>/<date>",
+                    "method": "GET",
+                    "description": "Get menu for specific dining hall and date"
+                }
+            },
+            "cache": {
+                "status": {
+                    "path": "/cache/status",
+                    "method": "GET",
+                    "description": "Get cache status"
+                },
+                "clear": {
+                    "path": "/cache/clear/<dining_hall>/<date>",
+                    "method": "DELETE",
+                    "description": "Clear specific cache entry"
+                }
+            }
+        },
+        "supported_universities": [
+            "Rutgers University",
+            "Johns Hopkins University"
+        ],
+        "features": [
+            "AI-powered meal planning",
+            "User authentication and profiles",
+            "Nutritional targeting based on BMR/TDEE",
+            "Real-time dining hall menus",
+            "Guest and authenticated user support",
+            "Menu caching for performance"
+        ],
+        "timestamp": datetime.now().isoformat()
+    })
 
 @app.route('/health', methods=['GET'])
 def health_check():
