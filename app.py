@@ -679,98 +679,98 @@ async def get_current_user(authorization: str = Header(None)):
     
     return user_data
 
-@app.get("/", summary="API Information")
-async def api_info():
-    """Base route - API information"""
-    return {
-        "name": "DormDish Backend API",
-        "version": "1.0.0",
-        "description": "AI-powered meal planning API for university dining halls",
-        "status": "active",
-        "endpoints": {
-            "health": {
-                "path": "/health",
-                "method": "GET",
-                "description": "Health check endpoint"
-            },
-            "auth": {
-                "register": {
-                    "path": "/auth/register",
-                    "method": "POST",
-                    "description": "Register a new user account"
-                },
-                "login": {
-                    "path": "/auth/login",
-                    "method": "POST",
-                    "description": "User login"
-                },
-                "logout": {
-                    "path": "/auth/logout",
-                    "method": "POST",
-                    "description": "User logout"
-                },
-                "profile": {
-                    "path": "/auth/profile",
-                    "methods": ["GET", "PUT"],
-                    "description": "Get or update user profile"
-                }
-            },
-            "meal_planning": {
-                "generate": {
-                    "path": "/generate-meal-plan",
-                    "method": "POST",
-                    "description": "Generate AI-powered meal plan (supports both authenticated users and guests)"
-                }
-            },
-            "dining": {
-                "halls": {
-                    "path": "/dining-halls",
-                    "method": "GET",
-                    "description": "Get list of supported dining halls"
-                },
-                "menu": {
-                    "path": "/menu/<dining_hall>/<date>",
-                    "method": "GET",
-                    "description": "Get menu for specific dining hall and date"
-                }
-            },
-            "cache": {
-                "status": {
-                    "path": "/cache/status",
-                    "method": "GET",
-                    "description": "Get cache status"
-                },
-                "clear": {
-                    "path": "/cache/clear/<dining_hall>/<date>",
-                    "method": "DELETE",
-                    "description": "Clear specific cache entry"
-                }
-            }
-        },
-        "supported_universities": [
-            "Rutgers University",
-            "Johns Hopkins University"
-        ],
-        "features": [
-            "AI-powered meal planning",
-            "User authentication and profiles",
-            "Nutritional targeting based on BMR/TDEE",
-            "Real-time dining hall menus",
-            "Guest and authenticated user support",
-            "Menu caching for performance"
-        ],
-        "timestamp": datetime.now().isoformat()
-    }
+# @app.get("/", summary="API Information")
+# async def api_info():
+#     """Base route - API information"""
+#     return {
+#         "name": "DormDish Backend API",
+#         "version": "1.0.0",
+#         "description": "AI-powered meal planning API for university dining halls",
+#         "status": "active",
+#         "endpoints": {
+#             "health": {
+#                 "path": "/health",
+#                 "method": "GET",
+#                 "description": "Health check endpoint"
+#             },
+#             "auth": {
+#                 "register": {
+#                     "path": "/auth/register",
+#                     "method": "POST",
+#                     "description": "Register a new user account"
+#                 },
+#                 "login": {
+#                     "path": "/auth/login",
+#                     "method": "POST",
+#                     "description": "User login"
+#                 },
+#                 "logout": {
+#                     "path": "/auth/logout",
+#                     "method": "POST",
+#                     "description": "User logout"
+#                 },
+#                 "profile": {
+#                     "path": "/auth/profile",
+#                     "methods": ["GET", "PUT"],
+#                     "description": "Get or update user profile"
+#                 }
+#             },
+#             "meal_planning": {
+#                 "generate": {
+#                     "path": "/generate-meal-plan",
+#                     "method": "POST",
+#                     "description": "Generate AI-powered meal plan (supports both authenticated users and guests)"
+#                 }
+#             },
+#             "dining": {
+#                 "halls": {
+#                     "path": "/dining-halls",
+#                     "method": "GET",
+#                     "description": "Get list of supported dining halls"
+#                 },
+#                 "menu": {
+#                     "path": "/menu/<dining_hall>/<date>",
+#                     "method": "GET",
+#                     "description": "Get menu for specific dining hall and date"
+#                 }
+#             },
+#             "cache": {
+#                 "status": {
+#                     "path": "/cache/status",
+#                     "method": "GET",
+#                     "description": "Get cache status"
+#                 },
+#                 "clear": {
+#                     "path": "/cache/clear/<dining_hall>/<date>",
+#                     "method": "DELETE",
+#                     "description": "Clear specific cache entry"
+#                 }
+#             }
+#         },
+#         "supported_universities": [
+#             "Rutgers University",
+#             "Johns Hopkins University"
+#         ],
+#         "features": [
+#             "AI-powered meal planning",
+#             "User authentication and profiles",
+#             "Nutritional targeting based on BMR/TDEE",
+#             "Real-time dining hall menus",
+#             "Guest and authenticated user support",
+#             "Menu caching for performance"
+#         ],
+#         "timestamp": datetime.now().isoformat()
+#     }
 
-@app.get("/", summary="Root Endpoint")
-async def root():
-    """Root endpoint for the DormDish API"""
-    return {
-        "message": "Welcome to DormDish API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health"
-    }
+# @app.get("/", summary="Root Endpoint")
+# async def root():
+#     """Root endpoint for the DormDish API"""
+#     return {
+#         "message": "Welcome to DormDish API",
+#         "version": "1.0.0",
+#         "docs": "/docs",
+#         "health": "/health"
+#     }
 
 @app.get("/health", summary="Health Check")
 async def health_check():
