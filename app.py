@@ -20,6 +20,7 @@ app = Flask(__name__)
 
 # Connect to OpenAI API (configurable for different providers)
 # Default to local model, but allow override via environment variables
+#hello
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "key")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "keyy")
 
