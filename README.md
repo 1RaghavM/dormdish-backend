@@ -213,6 +213,38 @@ curl -X POST http://localhost:5000/generate-meal-plan -H "Content-Type: applicat
 - `SUPABASE_URL`: Your Supabase project URL
 - `SUPABASE_SERVICE_KEY`: Service role key for database access
 
+## Automation
+
+### Daily Menu Cleanup
+
+The project includes automated cleanup of old menu data to keep the database optimized:
+
+**GitHub Actions (Automatic)**
+- Runs daily at 4:00 AM EST
+- Automatically deletes menu records from the previous day
+- Requires `SUPABASE_URL` and `SUPABASE_KEY` secrets in your GitHub repository
+
+**Manual Cleanup Script**
+```bash
+# Clean up yesterday's menus (dry run)
+python cleanup_menus.py --dry-run
+
+# Actually delete yesterday's menus
+python cleanup_menus.py
+
+# Clean up specific date
+python cleanup_menus.py --date 2025-09-18
+
+# Dry run for specific date
+python cleanup_menus.py --date 2025-09-18 --dry-run
+```
+
+**Setting up GitHub Secrets:**
+1. Go to your repository → Settings → Secrets and variables → Actions
+2. Add the following secrets:
+   - `SUPABASE_URL`: Your Supabase project URL
+   - `SUPABASE_KEY`: Your Supabase service role key
+
 ## Troubleshooting
 
 ### Common Issues
