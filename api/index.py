@@ -6,12 +6,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
 
-# This is the main entry point for Vercel
-def handler(request):
-    return app(request.environ, request.start_response)
+# For Vercel with FastAPI, we export the FastAPI app directly
+# Vercel expects the ASGI app to be available as a variable
+app = app
 
-# For Vercel, we need to export the app
+# Also export as 'application' for compatibility
 application = app
 
 if __name__ == "__main__":
-    app.run()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

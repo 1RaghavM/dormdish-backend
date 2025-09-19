@@ -1,5 +1,7 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from openai import OpenAI
 import requests
 import json
@@ -17,10 +19,16 @@ import bcrypt
 # Load environment variables from .env file
 load_dotenv()
 
-app = Flask(__name__)
+app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
 
 # Enable CORS for all routes (needed for web frontend)
-CORS(app)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with your frontend domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Connect to OpenAI API (configurable for different providers)
 # Default to local model, but allow override via environment variables
@@ -618,10 +626,63 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
         "ai_prompt": user_context
     }
 
-@app.route('/', methods=['GET'])
-def api_info():
+# Pydantic models for request/response validation
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    age: int
+    height_feet: int
+    height_inches: int
+    weight_lbs: float
+    gender: str
+    activity_level: str
+    goal: str
+    university: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UpdateProfileRequest(BaseModel):
+    age: Optional[int] = None
+    height_feet: Optional[int] = None
+    height_inches: Optional[int] = None
+    weight_lbs: Optional[float] = None
+    gender: Optional[str] = None
+    activity_level: Optional[str] = None
+    goal: Optional[str] = None
+    university: Optional[str] = None
+
+class MealPlanRequest(BaseModel):
+    dining_hall: str
+    date: str
+
+class TokenData(BaseModel):
+    user_id: str
+
+# Dependency for authentication
+from fastapi import Header
+
+async def get_current_user(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization token required")
+    
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
+    
+    token = authorization.replace("Bearer ", "")
+    user_data = verify_session_token(token)
+    
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    return user_data
+
+@app.get("/", summary="API Information")
+async def api_info():
     """Base route - API information"""
-    return jsonify({
+    return {
         "name": "DormDish Backend API",
         "version": "1.0.0",
         "description": "AI-powered meal planning API for university dining halls",
@@ -699,89 +760,88 @@ def api_info():
             "Menu caching for performance"
         ],
         "timestamp": datetime.now().isoformat()
-    })
+    }
 
-@app.route('/health', methods=['GET'])
-def health_check():
+@app.get("/", summary="Root Endpoint")
+async def root():
+    """Root endpoint for the DormDish API"""
+    return {
+        "message": "Welcome to DormDish API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+@app.get("/health", summary="Health Check")
+async def health_check():
     """Health check endpoint"""
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 # Authentication Routes
-@app.route('/auth/register', methods=['POST'])
-def register():
+@app.post("/auth/register", summary="Register New User")
+async def register(user_data: RegisterRequest):
     """Register a new user"""
     try:
-        data = request.get_json()
-        
-        # Validate required fields
-        required_fields = [
-            'username', 'email', 'password', 'age', 'height_feet', 'height_inches', 
-            'weight_lbs', 'gender', 'activity_level', 'university', 'preferred_dining_hall', 'goal'
-        ]
-        
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"Missing required field: {field}"}), 400
-        
         # Validate activity level
         valid_activity_levels = [
             'sedentary', 'lightly_active', 'moderately_active', 
             'very_active', 'extremely_active', 'super_active'
         ]
         
-        if data['activity_level'] not in valid_activity_levels:
-            return jsonify({
-                "error": f"Invalid activity level. Must be one of: {', '.join(valid_activity_levels)}"
-            }), 400
+        if user_data.activity_level not in valid_activity_levels:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid activity level. Must be one of: {', '.join(valid_activity_levels)}"
+            )
         
         # Validate goal
         valid_goals = ['cut', 'maintain', 'bulk']
-        if data['goal'] not in valid_goals:
-            return jsonify({
-                "error": f"Invalid goal. Must be one of: {', '.join(valid_goals)}"
-            }), 400
+        if user_data.goal not in valid_goals:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid goal. Must be one of: {', '.join(valid_goals)}"
+            )
         
         # Validate gender
-        if data['gender'].lower() not in ['male', 'female', 'other']:
-            return jsonify({"error": "Gender must be 'male', 'female', or 'other'"}), 400
+        if user_data.gender.lower() not in ['male', 'female', 'other']:
+            raise HTTPException(status_code=400, detail="Gender must be 'male', 'female', or 'other'")
         
         # Check if user already exists
         existing_user = supabase.table("users")\
             .select("id")\
-            .or_(f"email.eq.{data['email']},username.eq.{data['username']}")\
+            .or_(f"email.eq.{user_data.email},username.eq.{user_data.username}")\
             .execute()
         
         if existing_user.data:
-            return jsonify({"error": "User with this email or username already exists"}), 409
+            raise HTTPException(status_code=409, detail="User with this email or username already exists")
         
         # Hash password
-        password_hash = hash_password(data['password'])
+        password_hash = hash_password(user_data.password)
         
         # Calculate BMR and TDEE
         bmr_data = calculate_bmr_tdee(
-            data['age'], data['height_feet'], data['height_inches'],
-            data['weight_lbs'], data['gender'], data['activity_level']
+            user_data.age, user_data.height_feet, user_data.height_inches,
+            user_data.weight_lbs, user_data.gender, user_data.activity_level
         )
         
         # Create user
-        user_data = {
-            'username': data['username'],
-            'email': data['email'],
+        db_user_data = {
+            'username': user_data.username,
+            'email': user_data.email,
             'password_hash': password_hash,
-            'age': data['age'],
-            'height_feet': data['height_feet'],
-            'height_inches': data['height_inches'],
-            'weight_lbs': data['weight_lbs'],
-            'gender': data['gender'].lower(),
-            'activity_level': data['activity_level'],
-            'goal': data['goal'],
-            'university': data['university'],
-            'preferred_dining_hall': data['preferred_dining_hall'],
+            'age': user_data.age,
+            'height_feet': user_data.height_feet,
+            'height_inches': user_data.height_inches,
+            'weight_lbs': user_data.weight_lbs,
+            'gender': user_data.gender.lower(),
+            'activity_level': user_data.activity_level,
+            'goal': user_data.goal,
+            'university': user_data.university,
             'bmr': bmr_data['bmr'],
             'tdee': bmr_data['tdee']
         }
         
-        response = supabase.table("users").insert(user_data).execute()
+        response = supabase.table("users").insert(db_user_data).execute()
         
         if response.data:
             user = response.data[0]
@@ -791,70 +851,68 @@ def register():
             # Remove sensitive data from response
             user.pop('password_hash', None)
             
-            return jsonify({
+            return {
                 "success": True,
                 "message": "User registered successfully",
                 "user": user,
                 "session_token": session_token
-            }), 201
+            }
         else:
-            return jsonify({"error": "Failed to create user"}), 500
+            raise HTTPException(status_code=500, detail="Failed to create user")
             
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Registration failed: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
-@app.route('/auth/login', methods=['POST'])
-def login():
+@app.post("/auth/login", summary="User Login")
+async def login(login_data: LoginRequest):
     """User login"""
     try:
-        data = request.get_json()
-        
-        if not data.get('email') or not data.get('password'):
-            return jsonify({"error": "Email and password are required"}), 400
-        
         # Get user by email
         response = supabase.table("users")\
             .select("*")\
-            .eq("email", data['email'])\
+            .eq("email", login_data.email)\
             .execute()
         
         if not response.data:
-            return jsonify({"error": "Invalid email or password"}), 401
+            raise HTTPException(status_code=401, detail="Invalid email or password")
         
         user = response.data[0]
         
         # Verify password
-        if not verify_password(data['password'], user['password_hash']):
-            return jsonify({"error": "Invalid email or password"}), 401
+        if not verify_password(login_data.password, user['password_hash']):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
         
         # Create session token
         session_token = create_user_session(user['id'])
         
         if not session_token:
-            return jsonify({"error": "Failed to create session"}), 500
+            raise HTTPException(status_code=500, detail="Failed to create session")
         
         # Remove sensitive data
         user.pop('password_hash', None)
         
-        return jsonify({
+        return {
             "success": True,
             "message": "Login successful",
             "user": user,
             "session_token": session_token
-        })
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Login failed: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
-@app.route('/auth/logout', methods=['POST'])
-def logout():
+@app.post("/auth/logout", summary="User Logout")
+async def logout(authorization: str = Header(...)):
     """User logout"""
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({"error": "Authorization token required"}), 401
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Invalid authorization format")
         
-        token = auth_header.split(' ')[1]
+        token = authorization.replace("Bearer ", "")
         
         # Delete session
         supabase.table("user_sessions")\
@@ -862,72 +920,48 @@ def logout():
             .eq("session_token", token)\
             .execute()
         
-        return jsonify({"success": True, "message": "Logged out successfully"})
+        return {"success": True, "message": "Logged out successfully"}
         
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Logout failed: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
 
-@app.route('/auth/profile', methods=['GET'])
-def get_profile():
+@app.get("/auth/profile", summary="Get User Profile")
+async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get user profile"""
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({"error": "Authorization token required"}), 401
-        
-        token = auth_header.split(' ')[1]
-        user = verify_session_token(token)
-        
-        if not user:
-            return jsonify({"error": "Invalid or expired session"}), 401
-        
         # Remove sensitive data
-        user.pop('password_hash', None)
+        current_user.pop('password_hash', None)
         
-        return jsonify({"success": True, "user": user})
+        return {"success": True, "user": current_user}
         
     except Exception as e:
-        return jsonify({"error": f"Failed to get profile: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
 
-@app.route('/auth/profile', methods=['PUT'])
-def update_profile():
+@app.put("/auth/profile", summary="Update User Profile")
+async def update_profile(profile_data: UpdateProfileRequest, current_user: dict = Depends(get_current_user)):
     """Update user profile"""
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({"error": "Authorization token required"}), 401
-        
-        token = auth_header.split(' ')[1]
-        user = verify_session_token(token)
-        
-        if not user:
-            return jsonify({"error": "Invalid or expired session"}), 401
-        
-        data = request.get_json()
-        
-        # Fields that can be updated
-        updatable_fields = [
-            'age', 'height_feet', 'height_inches', 'weight_lbs', 'gender',
-            'activity_level', 'goal', 'university', 'preferred_dining_hall'
-        ]
-        
+        # Build update data from provided fields
         update_data = {}
-        for field in updatable_fields:
-            if field in data:
+        
+        for field, value in profile_data.dict(exclude_unset=True).items():
+            if value is not None:
                 # Validate goal if being updated
-                if field == 'goal' and data[field] not in ['cut', 'maintain', 'bulk']:
-                    return jsonify({"error": "Invalid goal. Must be 'cut', 'maintain', or 'bulk'"}), 400
-                update_data[field] = data[field]
+                if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
+                    raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
+                update_data[field] = value
         
         # Recalculate BMR/TDEE if physical stats changed
         if any(field in update_data for field in ['age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level']):
             # Get current values or use provided ones
-            current_age = update_data.get('age', user['age'])
-            current_height_feet = update_data.get('height_feet', user['height_feet'])
-            current_height_inches = update_data.get('height_inches', user['height_inches'])
-            current_weight = update_data.get('weight_lbs', user['weight_lbs'])
-            current_gender = update_data.get('gender', user['gender'])
-            current_activity = update_data.get('activity_level', user['activity_level'])
+            current_age = update_data.get('age', current_user['age'])
+            current_height_feet = update_data.get('height_feet', current_user['height_feet'])
+            current_height_inches = update_data.get('height_inches', current_user['height_inches'])
+            current_weight = update_data.get('weight_lbs', current_user['weight_lbs'])
+            current_gender = update_data.get('gender', current_user['gender'])
+            current_activity = update_data.get('activity_level', current_user['activity_level'])
             
             bmr_data = calculate_bmr_tdee(
                 current_age, current_height_feet, current_height_inches,
@@ -940,42 +974,43 @@ def update_profile():
         if update_data:
             response = supabase.table("users")\
                 .update(update_data)\
-                .eq("id", user['id'])\
+                .eq("id", current_user['id'])\
                 .execute()
             
             if response.data:
                 updated_user = response.data[0]
                 updated_user.pop('password_hash', None)
                 
-                return jsonify({
+                return {
                     "success": True,
                     "message": "Profile updated successfully",
                     "user": updated_user
-                })
+                }
             else:
-                return jsonify({"error": "Failed to update profile"}), 500
+                raise HTTPException(status_code=500, detail="Failed to update profile")
         else:
-            return jsonify({"error": "No valid fields to update"}), 400
+            raise HTTPException(status_code=400, detail="No valid fields to update")
             
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Failed to update profile: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
 
-@app.route('/generate-meal-plan', methods=['POST'])
-def generate_meal_plan_route():
+@app.post("/generate-meal-plan", summary="Generate Meal Plan")
+async def generate_meal_plan_route(
+    meal_plan_request: MealPlanRequest,
+    authorization: str = Header(None)
+):
     """Generate a meal plan for a user (authenticated or guest)"""
     try:
-        # Get request data
-        data = request.get_json()
-        
         # Check for authentication token
-        auth_header = request.headers.get('Authorization')
         authenticated_user = None
         
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header.split(' ')[1]
+        if authorization and authorization.startswith('Bearer '):
+            token = authorization.replace('Bearer ', '')
             authenticated_user = verify_session_token(token)
         
-        # If authenticated, use user profile; otherwise require all fields
+        # If authenticated, use user profile; otherwise require all fields in request body
         if authenticated_user:
             # Use authenticated user's profile
             user = User(
@@ -984,8 +1019,8 @@ def generate_meal_plan_route():
                 height_inches=authenticated_user['height_inches'],
                 weight_lbs=float(authenticated_user['weight_lbs']),
                 activity_level=authenticated_user['activity_level'],
-                goal=data.get('goal', authenticated_user['goal']),  # Use user's stored goal as default
-                preferred_dining_hall=data.get('preferred_dining_hall', authenticated_user['preferred_dining_hall'])
+                goal=authenticated_user['goal'],
+                preferred_dining_hall=meal_plan_request.dining_hall
             )
             
             # Include BMR/TDEE from user profile
@@ -993,41 +1028,18 @@ def generate_meal_plan_route():
             user_tdee = float(authenticated_user['tdee'])
             
         else:
-            # Guest user - require all fields
-            required_fields = ['age', 'height_feet', 'height_inches', 'weight_lbs', 
-                              'activity_level', 'goal', 'preferred_dining_hall']
-            
-            for field in required_fields:
-                if field not in data:
-                    return jsonify({"error": f"Missing required field: {field}"}), 400
-            
-            # Create user object from request data
-            user = User(
-                age=data['age'],
-                height_feet=data['height_feet'],
-                height_inches=data['height_inches'],
-                weight_lbs=data['weight_lbs'],
-                activity_level=data['activity_level'],
-                goal=data['goal'],
-                preferred_dining_hall=data['preferred_dining_hall']
+            # Guest user - use default values (this would need to be expanded for guest support)
+            # For now, return error requiring authentication
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required. Guest users not yet supported in FastAPI version."
             )
-            
-            # Calculate BMR/TDEE for guest user
-            bmr_data = calculate_bmr_tdee(
-                user.age, user.height_feet, user.height_inches,
-                user.weight_lbs, data.get('gender', 'male'), user.activity_level
-            )
-            user_bmr = bmr_data['bmr']
-            user_tdee = bmr_data['tdee']
-        
-        # Get date (use provided date or today)
-        date = data.get('date', datetime.now().strftime("%Y-%m-%d"))
         
         # Fetch menu for user's preferred dining hall
-        menu_data = get_dining_hall_menu(user.preferred_dining_hall, date)
+        menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         
         if "error" in menu_data and menu_data["error"] is not None:
-            return jsonify({"error": f"Failed to fetch menu: {menu_data['error']}"}), 500
+            raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {menu_data['error']}")
         
         # Generate meal plan context with BMR/TDEE information
         meal_plan_context = generate_meal_plan_with_bmr(user, menu_data, user_bmr, user_tdee)
@@ -1168,7 +1180,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
         total_time = time.time() - ai_start_time
         
         # Return the complete meal plan
-        return jsonify({
+        return {
             "success": True,
             "user_profile": meal_plan_context["user_profile"],
             "nutrition_targets": meal_plan_context["nutritional_targets"],
@@ -1184,42 +1196,46 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 "total_time_seconds": round(total_time, 2)
             },
             "meta": {
-                "dining_hall": user.preferred_dining_hall,
-                "date": date,
+                "dining_hall": meal_plan_request.dining_hall,
+                "date": meal_plan_request.date,
                 "ai_model": "openai/gpt-oss-20b",
                 "authenticated": authenticated_user is not None,
                 "raw_ai_response_length": len(ai_response_raw)
             }
-        })
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.route('/dining-halls', methods=['GET'])
-def get_supported_dining_halls():
+@app.get("/dining-halls", summary="Get Supported Dining Halls")
+async def get_supported_dining_halls():
     """Get list of supported dining halls"""
     try:
         response = requests.get("https://dormdish-mcp.vercel.app/universities")
         response.raise_for_status()
-        return jsonify(response.json())
+        return response.json()
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch dining halls: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to fetch dining halls: {str(e)}")
 
-@app.route('/menu/<dining_hall>/<date>', methods=['GET'])
-def get_menu(dining_hall: str, date: str):
+@app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
+async def get_menu(dining_hall: str, date: str):
     """Get menu for a specific dining hall and date (with Supabase caching)"""
     try:
         menu_data = get_dining_hall_menu(dining_hall, date)
         
         if "error" in menu_data and menu_data["error"] is not None:
-            return jsonify({"error": menu_data["error"]}), 500
+            raise HTTPException(status_code=500, detail=menu_data["error"])
             
-        return jsonify(menu_data)
+        return menu_data
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch menu: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
 
-@app.route('/cache/clear/<dining_hall>/<date>', methods=['DELETE'])
-def clear_menu_cache(dining_hall: str, date: str):
+@app.delete("/cache/clear/{dining_hall}/{date}", summary="Clear Menu Cache")
+async def clear_menu_cache(dining_hall: str, date: str):
     """Clear cached menu for a specific dining hall and date"""
     try:
         university = "hopkins" if "hopkins" in dining_hall or "nolans" in dining_hall or "peabody" in dining_hall else "rutgers"
@@ -1227,30 +1243,31 @@ def clear_menu_cache(dining_hall: str, date: str):
         
         response = supabase.table("menus").delete().eq("id", menu_id).execute()
         
-        return jsonify({
+        return {
             "success": True,
             "message": f"Cache cleared for {menu_id}",
             "deleted_count": len(response.data) if response.data else 0
-        })
+        }
         
     except Exception as e:
-        return jsonify({"error": f"Failed to clear cache: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
 
-@app.route('/cache/status', methods=['GET'])
-def cache_status():
+@app.get("/cache/status", summary="Get Cache Status")
+async def cache_status():
     """Get cache statistics"""
     try:
         response = supabase.table("menus").select("id, university, dining_hall, date, created_at").execute()
         
         cached_menus = response.data if response.data else []
         
-        return jsonify({
+        return {
             "total_cached_menus": len(cached_menus),
             "cached_menus": cached_menus
-        })
+        }
         
     except Exception as e:
-        return jsonify({"error": f"Failed to get cache status: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to get cache status: {str(e)}")
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=5000)
