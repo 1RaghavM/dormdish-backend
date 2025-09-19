@@ -18,8 +18,12 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Connect to LM Studio
-client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="lm-studio")
+# Connect to OpenAI API (configurable for different providers)
+# Default to local model, but allow override via environment variables
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "key")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "keyy")
+
+client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
 # Initialize Supabase client
 # You'll need to set these environment variables or replace with your actual values
@@ -596,7 +600,7 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     - Fat: {nutritional_needs['fat_grams']}g
     
     Available Menu Items: {len(menu_data.get('items', []))} items available
-    {json.dumps(menu_data.get('items', [])[:10], indent=2)}...
+    {json.dumps(menu_data.get('items', []), indent=2)}
     
     Please create an optimized meal plan that meets the user's nutritional targets using only items from the available menu. 
     The plan should align with their {user.goal} goal and stay within ±5% of the target calories.
