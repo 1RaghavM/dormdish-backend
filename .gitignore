@@ -297,3 +297,6 @@ settings.local.py
 docs/build/
 
 supabase_setup.md
+supabase_auth_schema.sql
+test_commands.sh
+test_flow.sh

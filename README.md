@@ -35,7 +35,22 @@ GET /health
 POST /generate-meal-plan
 ```
 
-**Request Body:**
+**Authenticated Request (minimal):**
+```json
+{
+  "date": "2025-09-19"
+}
+```
+
+**Authenticated Request (with goal override):**
+```json
+{
+  "goal": "cut",
+  "date": "2025-09-19"
+}
+```
+
+**Guest Request (full profile required):**
 ```json
 {
   "age": 18,
@@ -53,24 +68,92 @@ POST /generate-meal-plan
 ```json
 {
   "success": true,
-  "data": {
-    "user_profile": {...},
-    "nutritional_targets": {
-      "calories": 3000,
-      "protein_grams": 175,
-      "carb_grams": 375,
-      "fat_grams": 90
-    },
-    "dining_hall": "busch",
-    "date": "2025-09-19",
-    "menu_available": {
-      "items": [...],
-      "university": "rutgers",
-      "hall_slug": "busch-dining-hall"
-    },
-    "ai_meal_plan": "..."
+  "user_profile": {...},
+  "nutrition_targets": {
+    "calories": 3000,
+    "protein_grams": 175,
+    "carb_grams": 375,
+    "fat_grams": 90
+  },
+  "bmr_tdee": {
+    "bmr": 1800,
+    "tdee": 2600
+  },
+  "meal_plan": {...},
+  "meta": {
+    "authenticated": true,
+    "dining_hall": "busch"
   }
 }
+```
+
+## Authentication
+
+### Register User
+```
+POST /auth/register
+```
+
+**Request Body:**
+```json
+{
+  "username": "johndoe",
+  "email": "john@example.com",
+  "password": "securepassword",
+  "age": 20,
+  "height_feet": 5,
+  "height_inches": 10,
+  "weight_lbs": 175,
+  "gender": "male",
+  "activity_level": "moderately_active",
+  "goal": "bulk",
+  "university": "rutgers",
+  "preferred_dining_hall": "busch"
+}
+```
+
+**Fitness Goals:**
+- `cut` - Weight loss with calorie deficit
+- `maintain` - Maintain current weight
+- `bulk` - Muscle gain with calorie surplus
+
+**Activity Levels:**
+- `sedentary` - Little/no exercise
+- `lightly_active` - Exercise 1-3 times/week
+- `moderately_active` - Exercise 4-5/week
+- `very_active` - Daily or intense 3-4
+- `extremely_active` - Intense 6-7
+- `super_active` - Very intense
+
+### Login
+```
+POST /auth/login
+```
+
+**Request Body:**
+```json
+{
+  "email": "john@example.com",
+  "password": "securepassword"
+}
+```
+
+### Get Profile
+```
+GET /auth/profile
+Authorization: Bearer <session_token>
+```
+
+### Update Profile
+```
+PUT /auth/profile
+Authorization: Bearer <session_token>
+```
+
+### Logout
+```
+POST /auth/logout
+Authorization: Bearer <session_token>
 ```
 
 ### Get Menu
