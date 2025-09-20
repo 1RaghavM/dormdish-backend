@@ -1213,11 +1213,35 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
 async def get_supported_dining_halls():
     """Get list of supported dining halls"""
     try:
-        response = requests.get("https://dormdish-mcp.vercel.app/universities")
+        response = requests.get("https://dormdish-mcp.vercel.app/universities", timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch dining halls: {str(e)}")
+        # Fallback to hardcoded list if external service is down
+        fallback_dining_halls = [
+            {
+                "university": "rutgers",
+                "name": "Rutgers University",
+                "dining_halls": [
+                    {"id": "busch", "name": "Busch Dining Hall"},
+                    {"id": "livingston", "name": "Livingston Dining Commons"},
+                    {"id": "brower", "name": "Brower Commons"},
+                    {"id": "neilson", "name": "Neilson Dining Hall"}
+                ]
+            },
+            {
+                "university": "hopkins",
+                "name": "Johns Hopkins University", 
+                "dining_halls": [
+                    {"id": "hopkins-cafe", "name": "Hopkins Cafe"},
+                    {"id": "nolans-on-33rd", "name": "Nolan's on 33rd"},
+                    {"id": "peabody-institute", "name": "Peabody Institute"}
+                ]
+            }
+        ]
+        
+        print(f"⚠️ External dining halls service unavailable, using fallback: {str(e)}")
+        return fallback_dining_halls
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
 async def get_menu(dining_hall: str, date: str):
