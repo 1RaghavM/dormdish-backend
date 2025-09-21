@@ -6,6 +6,13 @@ from openai import OpenAI
 import requests
 import json
 import os
+import re
+import time
+import secrets
+import bcrypt
+import requests
+import json
+import os
 import time
 import hashlib
 import secrets
@@ -15,6 +22,8 @@ from typing import Dict, List, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import bcrypt
+import csv
+from functools import lru_cache
 
 # Load environment variables from .env file
 load_dotenv()
@@ -679,99 +688,6 @@ async def get_current_user(authorization: str = Header(None)):
     
     return user_data
 
-# @app.get("/", summary="API Information")
-# async def api_info():
-#     """Base route - API information"""
-#     return {
-#         "name": "DormDish Backend API",
-#         "version": "1.0.0",
-#         "description": "AI-powered meal planning API for university dining halls",
-#         "status": "active",
-#         "endpoints": {
-#             "health": {
-#                 "path": "/health",
-#                 "method": "GET",
-#                 "description": "Health check endpoint"
-#             },
-#             "auth": {
-#                 "register": {
-#                     "path": "/auth/register",
-#                     "method": "POST",
-#                     "description": "Register a new user account"
-#                 },
-#                 "login": {
-#                     "path": "/auth/login",
-#                     "method": "POST",
-#                     "description": "User login"
-#                 },
-#                 "logout": {
-#                     "path": "/auth/logout",
-#                     "method": "POST",
-#                     "description": "User logout"
-#                 },
-#                 "profile": {
-#                     "path": "/auth/profile",
-#                     "methods": ["GET", "PUT"],
-#                     "description": "Get or update user profile"
-#                 }
-#             },
-#             "meal_planning": {
-#                 "generate": {
-#                     "path": "/generate-meal-plan",
-#                     "method": "POST",
-#                     "description": "Generate AI-powered meal plan (supports both authenticated users and guests)"
-#                 }
-#             },
-#             "dining": {
-#                 "halls": {
-#                     "path": "/dining-halls",
-#                     "method": "GET",
-#                     "description": "Get list of supported dining halls"
-#                 },
-#                 "menu": {
-#                     "path": "/menu/<dining_hall>/<date>",
-#                     "method": "GET",
-#                     "description": "Get menu for specific dining hall and date"
-#                 }
-#             },
-#             "cache": {
-#                 "status": {
-#                     "path": "/cache/status",
-#                     "method": "GET",
-#                     "description": "Get cache status"
-#                 },
-#                 "clear": {
-#                     "path": "/cache/clear/<dining_hall>/<date>",
-#                     "method": "DELETE",
-#                     "description": "Clear specific cache entry"
-#                 }
-#             }
-#         },
-#         "supported_universities": [
-#             "Rutgers University",
-#             "Johns Hopkins University"
-#         ],
-#         "features": [
-#             "AI-powered meal planning",
-#             "User authentication and profiles",
-#             "Nutritional targeting based on BMR/TDEE",
-#             "Real-time dining hall menus",
-#             "Guest and authenticated user support",
-#             "Menu caching for performance"
-#         ],
-#         "timestamp": datetime.now().isoformat()
-#     }
-
-# @app.get("/", summary="Root Endpoint")
-# async def root():
-#     """Root endpoint for the DormDish API"""
-#     return {
-#         "message": "Welcome to DormDish API",
-#         "version": "1.0.0",
-#         "docs": "/docs",
-#         "health": "/health"
-#     }
-
 @app.get("/health", summary="Health Check")
 async def health_check():
     """Health check endpoint"""
@@ -807,12 +723,17 @@ async def register(user_data: RegisterRequest):
             raise HTTPException(status_code=400, detail="Gender must be 'male', 'female', or 'other'")
         
         # Check if user already exists
-        existing_user = supabase.table("users")\
+        existing_user_email = supabase.table("users")\
             .select("id")\
-            .or_(f"email.eq.{user_data.email},username.eq.{user_data.username}")\
+            .eq("email", user_data.email)\
             .execute()
         
-        if existing_user.data:
+        existing_user_username = supabase.table("users")\
+            .select("id")\
+            .eq("username", user_data.username)\
+            .execute()
+        
+        if existing_user_email.data or existing_user_username.data:
             raise HTTPException(status_code=409, detail="User with this email or username already exists")
         
         # Hash password
@@ -1174,6 +1095,22 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
         # Parse the meal plan
         meal_plan = extract_json_from_response(ai_response_raw)
         
+        # Persist meal plan for the user (upsert by user_id + date)
+        if authenticated_user:
+            try:
+                totals = meal_plan.get("totals", {}) if isinstance(meal_plan, dict) else {}
+                supabase.table("user_meal_plans").upsert({
+                    "user_id": authenticated_user["id"],
+                    "date": meal_plan_request.date,
+                    "dining_hall": meal_plan_request.dining_hall,
+                    "plan": meal_plan,
+                    "calories": totals.get("calories"),
+                    "protein_g": totals.get("protein_g"),
+                    "updated_at": datetime.now().isoformat()
+                }, on_conflict="user_id,date").execute()
+            except Exception as e:
+                print(f"⚠️ Failed to save meal plan: {e}")
+        
         # Calculate processing times
         menu_fetch_time = getattr(menu_data, 'fetch_time', 0)
         ai_generation_time = ai_end_time - ai_start_time
@@ -1291,6 +1228,107 @@ async def cache_status():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get cache status: {str(e)}")
+
+# ---------------------------
+# Universities list endpoint
+# ---------------------------
+UNIVERSITIES_CSV_PATH = os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv') if os.path.exists(os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv')) else os.path.join(os.getcwd(), 'us-colleges-and-universities.csv')
+
+@lru_cache(maxsize=1)
+def load_universities_list() -> List[str]:
+    universities: List[str] = []
+    try:
+        path = UNIVERSITIES_CSV_PATH
+        if not os.path.isfile(path):
+            print(f"⚠️ Universities CSV not found at {path}")
+            return universities
+        with open(path, 'r', encoding='utf-8') as f:
+            # Detect delimiter (supports ';', ',', '|', tabs)
+            sample = f.read(2048)
+            f.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=',;|\t')
+                delim = dialect.delimiter
+            except Exception:
+                # Heuristic fallback
+                first_line = sample.splitlines()[0] if sample else ''
+                delim = ';' if ';' in first_line else ("\t" if '\t' in first_line else ',')
+
+            reader = csv.DictReader(f, delimiter=delim)
+            header_lower = [h.lower() for h in (reader.fieldnames or [])]
+            name_key = None
+            for key in ['name', 'university', 'school', 'institution']:
+                if key in header_lower:
+                    name_key = reader.fieldnames[header_lower.index(key)]
+                    break
+            if name_key:
+                for row in reader:
+                    val = (row.get(name_key) or '').strip()
+                    if val:
+                        universities.append(val)
+            else:
+                # Fallback: try simple CSV without reliable headers
+                f.seek(0)
+                reader2 = csv.reader(f, delimiter=delim)
+                first_row = True
+                for row in reader2:
+                    if first_row:
+                        first_row = False
+                        # Skip header row if it contains a 'name' column
+                        if any((col or '').strip().lower() == 'name' for col in row):
+                            continue
+                    if row:
+                        name = (row[0] or '').strip()
+                        if name:
+                            universities.append(name)
+    except Exception as e:
+        print(f"⚠️ Failed to load universities CSV: {e}")
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for u in universities:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
+
+@app.get('/universities')
+def get_universities():
+    return {"universities": load_universities_list()}
+
+# ---------------------------
+# Waitlist endpoints
+# ---------------------------
+class WaitlistJoinRequest(BaseModel):
+    firstName: str
+    lastName: str
+    email: str
+    university: str
+    graduationYear: Optional[str] = None
+    notifications: Optional[bool] = True
+
+@app.post('/waitlist/join')
+def join_waitlist(data: WaitlistJoinRequest):
+    try:
+        # Upsert by email (only one per email)
+        payload = {
+            "first_name": data.firstName.strip(),
+            "last_name": data.lastName.strip(),
+            "email": data.email.strip().lower(),
+            "university": data.university.strip(),
+            "graduation_year": data.graduationYear,
+            "notifications": bool(data.notifications),
+            "updated_at": datetime.now().isoformat()
+        }
+        # If record exists, update; else insert
+        supabase.table('waitlist_users').upsert(payload, on_conflict='email').execute()
+        # Count people on the same university waitlist
+        count_resp = supabase.table('waitlist_users').select('id', count='exact').eq('university', data.university.strip()).execute()
+        uni_count = getattr(count_resp, 'count', None)
+        return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0}
+    except Exception as e:
+        print(f"⚠️ Waitlist join failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to join waitlist")
 
 if __name__ == '__main__':
     import uvicorn

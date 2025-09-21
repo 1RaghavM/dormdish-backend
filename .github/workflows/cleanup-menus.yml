@@ -8,6 +8,8 @@ on:
 
 jobs:
   cleanup-menus:
+    # Deprecated in favor of .github/workflows/daily-cleanup.yml
+    if: ${{ false }}
     runs-on: ubuntu-latest
     
     steps:

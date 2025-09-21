@@ -28,59 +28,60 @@ except ImportError:
     exit(1)
 
 def cleanup_menus(target_date: str, dry_run: bool = False) -> None:
-    """Delete menu records for the specified date."""
-    
+    """Delete menu records for the specified date and associated user meal plans."""
+
     # Load environment variables
     load_dotenv()
-    
-    # Get Supabase credentials
+
+    # Get Supabase credentials (support both SUPABASE_KEY and SUPABASE_SERVICE_KEY)
     supabase_url = os.getenv('SUPABASE_URL')
-    supabase_key = os.getenv('SUPABASE_KEY')
-    
+    supabase_key = os.getenv('SUPABASE_KEY') or os.getenv('SUPABASE_SERVICE_KEY')
+
     if not supabase_url or not supabase_key:
         print('❌ Supabase credentials not found in environment variables')
-        print('   Make sure SUPABASE_URL and SUPABASE_KEY are set in your .env file')
+        print('   Make sure SUPABASE_URL and SUPABASE_KEY or SUPABASE_SERVICE_KEY are set in your .env file / GitHub Secrets')
         exit(1)
-    
+
     try:
         # Initialize Supabase client
         supabase = create_client(supabase_url, supabase_key)
-        
+
         if dry_run:
             print(f"🔍 DRY RUN: Checking what would be deleted for date {target_date}")
-            
-            # Query to see what would be deleted
-            result = supabase.table('menus').select('*').eq('date', target_date).execute()
-            
-            if result.data:
-                print(f"📋 Found {len(result.data)} menu records that would be deleted:")
-                for record in result.data:
-                    print(f"   - {record['university']}/{record['dining_hall']} ({record['item_count']} items)")
-            else:
-                print(f"ℹ️  No menu records found for {target_date}")
+
+            # Menus to delete
+            menus = supabase.table('menus').select('id, university, dining_hall, date').eq('date', target_date).execute()
+            menu_count = len(menus.data or [])
+            print(f"📋 Menus that would be deleted: {menu_count}")
+            for record in menus.data or []:
+                print(f"   - {record['university']}/{record['dining_hall']}")
+
+            # User meal plans to delete
+            plans = supabase.table('user_meal_plans').select('user_id, date, calories, protein_g').eq('date', target_date).execute()
+            plans_count = len(plans.data or [])
+            print(f"📋 User meal plans that would be deleted: {plans_count}")
+            for record in plans.data or []:
+                print(f"   - user_id={record['user_id']} calories={record.get('calories')} protein_g={record.get('protein_g')}")
         else:
             print(f"🗑️  Deleting menu records for date {target_date}")
-            
-            # Delete records for the target date
-            result = supabase.table('menus').delete().eq('date', target_date).execute()
-            
-            if result.data:
-                deleted_count = len(result.data)
-                total_items = sum(record.get('item_count', 0) for record in result.data)
-                print(f"✅ Successfully deleted {deleted_count} menu records ({total_items} total items) from {target_date}")
-                
-                # Show what was deleted
-                for record in result.data:
-                    print(f"   - {record['university']}/{record['dining_hall']} ({record['item_count']} items)")
-            else:
-                print(f"ℹ️  No menu records found for {target_date}")
-                
+
+            # Delete menus
+            deleted_menus = supabase.table('menus').delete().eq('date', target_date).execute()
+            deleted_menu_count = len(deleted_menus.data or [])
+            print(f"✅ Deleted {deleted_menu_count} menu records from {target_date}")
+
+            # Delete user meal plans
+            print(f"🗑️  Deleting user meal plans for date {target_date}")
+            deleted_plans = supabase.table('user_meal_plans').delete().eq('date', target_date).execute()
+            deleted_plan_count = len(deleted_plans.data or [])
+            print(f"✅ Deleted {deleted_plan_count} user meal plans from {target_date}")
+
     except Exception as e:
         print(f"❌ Error during cleanup: {e}")
         exit(1)
 
 def main():
-    parser = argparse.ArgumentParser(description="Clean up old menu records from Supabase")
+    parser = argparse.ArgumentParser(description="Clean up old menu records and user meal plans from Supabase")
     parser.add_argument(
         '--date', 
         type=str, 
@@ -107,7 +108,7 @@ def main():
         # Default to yesterday
         target_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    print(f"🧹 Menu Cleanup Script")
+    print(f"🧹 Cleanup Script")
     print(f"📅 Target date: {target_date}")
     print(f"🔄 Mode: {'DRY RUN' if args.dry_run else 'LIVE'}")
     print("-" * 50)

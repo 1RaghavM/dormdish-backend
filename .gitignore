@@ -26,6 +26,15 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+test-api.js
+
+sql/
+.test_token
+
+tos.txt
+privacy.txt
+
+
 # Vercel
 .vercel
 TESTING.md

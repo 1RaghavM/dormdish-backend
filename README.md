@@ -238,6 +238,17 @@ GET /cache/status
         }'
    ```
 
+## Frontend routing and hosting
+
+Path-based SPA routing is enabled in the frontend. For production hosting, add a fallback so deep links like /login or /dashboard resolve to index.html:
+
+- Netlify: a `_redirects` file is included at `DormDish Website Design/public/_redirects` with:
+  `/* /index.html 200`
+- Vercel (separate frontend project): add a rewrite to serve `/index.html` for all non-asset routes in the frontend project settings or `vercel.json` there. Do not change the root `vercel.json` used by the backend API.
+- Nginx: `try_files $uri /index.html;`
+
+`/dashboard` is protected in-app and requires a valid token. `/dashboard-test` is currently unprotected (optional to guard similarly).
+
 ## Architecture
 
 ### Data Flow
@@ -274,6 +285,10 @@ The system accepts multiple name formats:
 - `hopkins`, `hopkins-cafe`, `hopkins cafe`
 - `nolans`, `nolans-on-33rd`, `nolan`
 
+## Database SQL
+
+Run `sql/user_meal_plans.sql` in the Supabase SQL editor to create the `public.user_meal_plans` table with constraints, indexes, and an `updated_at` trigger.
+
 ## Development
 
 ### Adding New Universities
@@ -298,35 +313,29 @@ curl -X POST http://localhost:5000/generate-meal-plan -H "Content-Type: applicat
 
 ## Automation
 
-### Daily Menu Cleanup
+### Daily Menu and User Meal Plan Cleanup
 
-The project includes automated cleanup of old menu data to keep the database optimized:
+The project includes automated cleanup of old data to keep the database optimized:
 
 **GitHub Actions (Automatic)**
-- Runs daily at 4:00 AM EST
-- Automatically deletes menu records from the previous day
-- Requires `SUPABASE_URL` and `SUPABASE_KEY` secrets in your GitHub repository
+- Runs daily at 06:00 UTC (`.github/workflows/daily-cleanup.yml`)
+- Deletes previous day's records from both `menus` and `user_meal_plans`
+- Requires repository secrets:
+  - `SUPABASE_URL`
+  - `SUPABASE_SERVICE_KEY` (service role key)
+- You can also trigger it manually via the Actions tab (workflow_dispatch)
+
+Note: A legacy workflow (`cleanup-menus.yml`) is disabled to prevent duplicate runs.
 
 **Manual Cleanup Script**
 ```bash
-# Clean up yesterday's menus (dry run)
+# Dry run
 python cleanup_menus.py --dry-run
-
-# Actually delete yesterday's menus
+# Live - defaults to yesterday
 python cleanup_menus.py
-
-# Clean up specific date
+# Specific date
 python cleanup_menus.py --date 2025-09-18
-
-# Dry run for specific date
-python cleanup_menus.py --date 2025-09-18 --dry-run
 ```
-
-**Setting up GitHub Secrets:**
-1. Go to your repository → Settings → Secrets and variables → Actions
-2. Add the following secrets:
-   - `SUPABASE_URL`: Your Supabase project URL
-   - `SUPABASE_KEY`: Your Supabase service role key
 
 ## Troubleshooting
 
