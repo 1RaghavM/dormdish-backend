@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 import bcrypt
 import csv
 from functools import lru_cache
+from pydantic import EmailStr
 
 # Load environment variables from .env file
 load_dotenv()
@@ -670,6 +671,15 @@ class MealPlanRequest(BaseModel):
 class TokenData(BaseModel):
     user_id: str
 
+class SubscribeRequest(BaseModel):
+    email: EmailStr
+
+class SubscribeResponse(BaseModel):
+    success: bool
+    message: str
+    mc_contact_id: Optional[str] = None
+    mc_status: Optional[str] = None
+
 # Dependency for authentication
 from fastapi import Header
 
@@ -1307,6 +1317,49 @@ class WaitlistJoinRequest(BaseModel):
     graduationYear: Optional[str] = None
     notifications: Optional[bool] = True
 
+def mailchimp_request(method: str, path: str, json_body: Optional[dict] = None):
+    cfg = get_mailchimp_config()
+    url = f"https://{cfg['server']}.api.mailchimp.com/3.0{path}"
+    auth = ("anystring", cfg["api_key"])  # Mailchimp uses HTTP Basic; username can be anything
+    headers = {"Content-Type": "application/json"}
+    resp = requests.request(method, url, auth=auth, headers=headers, json=json_body, timeout=15)
+    if resp.status_code >= 400:
+        try:
+            details = resp.json()
+        except Exception:
+            details = {"detail": resp.text}
+        raise HTTPException(status_code=resp.status_code, detail={"mailchimp_error": details})
+    return resp.json() if resp.content else {}
+
+
+def set_mailchimp_tags(email: str, tags: List[str]):
+    cfg = get_mailchimp_config()
+    subscriber_hash = hashlib.md5(email.lower().encode('utf-8')).hexdigest()
+    if not tags:
+        return {}
+    body = {"tags": [{"name": t, "status": "active"} for t in tags]}
+    return mailchimp_request("POST", f"/lists/{cfg['list_id']}/members/{subscriber_hash}/tags", json_body=body)
+
+
+def upsert_mailchimp_member(email: str, *, merge_fields: Optional[dict] = None, tags: Optional[List[str]] = None, status_if_new: Optional[str] = None) -> dict:
+    cfg = get_mailchimp_config()
+    subscriber_hash = hashlib.md5(email.lower().encode('utf-8')).hexdigest()
+    body = {
+        "email_address": email,
+        "status_if_new": (status_if_new or "subscribed"),  # set to "pending" for double opt-in
+        "status": "subscribed",
+    }
+    if merge_fields:
+        body["merge_fields"] = merge_fields
+    member = mailchimp_request("PUT", f"/lists/{cfg['list_id']}/members/{subscriber_hash}", json_body=body)
+    if tags:
+        try:
+            set_mailchimp_tags(email, tags)
+        except HTTPException:
+            # Tagging failure shouldn't break subscription; log and continue
+            pass
+    return member
+
 @app.post('/waitlist/join')
 def join_waitlist(data: WaitlistJoinRequest):
     try:
@@ -1322,13 +1375,145 @@ def join_waitlist(data: WaitlistJoinRequest):
         }
         # If record exists, update; else insert
         supabase.table('waitlist_users').upsert(payload, on_conflict='email').execute()
+
+        # Push to Mailchimp if notifications allowed
+        mc_status = None
+        if bool(data.notifications):
+            try:
+                merge_fields = {
+                    "FNAME": data.firstName.strip(),
+                    "LNAME": data.lastName.strip(),
+                    "UNIVERSITY": data.university.strip(),
+                    "GRADYEAR": (data.graduationYear or ""),
+                }
+                member = upsert_mailchimp_member(
+                    data.email.strip().lower(),
+                    merge_fields=merge_fields,
+                    tags=["waitlist"],
+                    # set to "pending" to require double opt-in
+                    status_if_new=os.getenv("MAILCHIMP_DOUBLE_OPT_IN", "false").lower() == "true" and "pending" or "subscribed",
+                )
+                mc_status = member.get("status")
+                # If subscribed immediately, send the welcome template now
+                if (mc_status or "").lower() == "subscribed":
+                    try:
+                        send_mailchimp_template(data.email.strip().lower())
+                    except HTTPException:
+                        pass
+            except HTTPException as e:
+                # Surface Mailchimp error but do not fail the waitlist join
+                print(f"⚠️ Mailchimp sync failed: {e.detail}")
+
         # Count people on the same university waitlist
         count_resp = supabase.table('waitlist_users').select('id', count='exact').eq('university', data.university.strip()).execute()
         uni_count = getattr(count_resp, 'count', None)
-        return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0}
+        return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0, "mailchimp_status": mc_status}
     except Exception as e:
         print(f"⚠️ Waitlist join failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to join waitlist")
+
+def get_mailchimp_config():
+    api_key = os.getenv("MAILCHIMP_API_KEY")
+    server_prefix = os.getenv("MAILCHIMP_SERVER_PREFIX")  # e.g., us21
+    list_id = os.getenv("MAILCHIMP_LIST_ID")
+    template_id = os.getenv("MAILCHIMP_TEMPLATE_ID")  # numeric string
+    from_email = os.getenv("MAILCHIMP_FROM_EMAIL")
+    from_name = os.getenv("MAILCHIMP_FROM_NAME", "DormDish")
+
+    # Derive server prefix from API key if not provided (keys look like key-us21)
+    if api_key and not server_prefix and "-" in api_key:
+        try:
+            server_prefix = api_key.split("-")[-1]
+        except Exception:
+            server_prefix = None
+
+    if not api_key or not server_prefix or not list_id:
+        raise HTTPException(status_code=500, detail="Mailchimp configuration missing (API key, server prefix, or list id)")
+
+    return {
+        "api_key": api_key,
+        "server": server_prefix,
+        "list_id": list_id,
+        "template_id": template_id,
+        "from_email": from_email,
+        "from_name": from_name,
+    }
+
+def send_mailchimp_template(email: str) -> dict:
+    cfg = get_mailchimp_config()
+    if not cfg.get("template_id"):
+        # If no template configured, skip sending but report success of subscription
+        return {"skipped": True, "reason": "No MAILCHIMP_TEMPLATE_ID configured"}
+
+    if not cfg.get("from_email"):
+        raise HTTPException(status_code=500, detail="MAILCHIMP_FROM_EMAIL is required to send templates")
+
+    # Mailchimp "messages/send-template" style is for Mandrill (deprecated separate product).
+    # In Mailchimp Marketing API, to send a template you create a Campaign and then send it.
+    # We'll create a single-send campaign to this email and immediately send.
+
+    # 1) Create a campaign
+    campaign_body = {
+        "type": "regular",
+        "recipients": {
+            "list_id": cfg["list_id"],
+            "segment_opts": {
+                "match": "all",
+                "conditions": [
+                    {
+                        "condition_type": "EmailAddress",
+                        "field": "EMAIL",
+                        "op": "is",
+                        "value": email
+                    }
+                ]
+            }
+        },
+        "settings": {
+            "subject_line": "Welcome to DormDish",
+            "title": f"DormDish Welcome – {email}",
+            "from_name": cfg["from_name"],
+            "reply_to": cfg["from_email"],
+            "to_name": "",
+            "template_id": int(cfg["template_id"])  # use prebuilt template
+        }
+    }
+    campaign = mailchimp_request("POST", "/campaigns", json_body=campaign_body)
+    campaign_id = campaign.get("id")
+
+    # 2) Send the campaign immediately
+    mailchimp_request("POST", f"/campaigns/{campaign_id}/actions/send")
+    return {"campaign_id": campaign_id}
+
+@app.post("/subscribe", response_model=SubscribeResponse, summary="Subscribe email to list and send welcome template")
+async def subscribe(req: SubscribeRequest):
+    try:
+        email = req.email.strip().lower()
+        # Upsert member in Mailchimp
+        member = upsert_mailchimp_member(email)
+        status = (member.get("status") or "").lower()
+
+        if status != "subscribed":
+            # Likely pending if double opt-in is enabled
+            return SubscribeResponse(
+                success=True,
+                message="Please confirm your subscription via the email we just sent you.",
+                mc_contact_id=member.get("id"),
+                mc_status=status
+            )
+
+        # Attempt to send template immediately for subscribed users
+        send_result = send_mailchimp_template(email)
+        return SubscribeResponse(
+            success=True,
+            message="Subscribed successfully",
+            mc_contact_id=member.get("id"),
+            mc_status=status
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Subscription failed: {str(e)}")
 
 if __name__ == '__main__':
     import uvicorn
