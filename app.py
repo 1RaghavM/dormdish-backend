@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
@@ -500,6 +500,165 @@ def join_waitlist(data: WaitlistJoinRequest):
     except Exception as e:
         print(f"⚠️ Waitlist join failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to join waitlist")
+
+# ---------------------------
+# Auth endpoints
+# ---------------------------
+authorization_header_prefix = "Bearer "
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    age: int
+    height_feet: int
+    height_inches: int
+    weight_lbs: float
+    gender: str
+    activity_level: str
+    goal: str
+    university: str
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+def get_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    if authorization.startswith(authorization_header_prefix):
+        return authorization[len(authorization_header_prefix):].strip()
+    return None
+
+
+def get_current_user(authorization: Optional[str] = Header(None)):
+    token = get_bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid authorization header")
+    user = verify_session_token(token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+    return user
+
+
+@app.post('/auth/register')
+def auth_register(data: RegisterRequest):
+    try:
+        # Check for existing user
+        existing = supabase.table("users").select("id").eq("email", str(data.email).lower()).execute()
+        if existing.data and len(existing.data) > 0:
+            raise HTTPException(status_code=400, detail="An account with this email already exists")
+
+        # Hash password
+        pwd_hash = hash_password(data.password)
+
+        # Calculate BMR/TDEE
+        metrics = calculate_bmr_tdee(
+            age=int(data.age),
+            height_feet=int(data.height_feet),
+            height_inches=int(data.height_inches),
+            weight_lbs=float(data.weight_lbs),
+            gender=data.gender,
+            activity_level=data.activity_level,
+        )
+
+        payload = {
+            "username": data.username,
+            "email": str(data.email).lower(),
+            "password_hash": pwd_hash,
+            "age": int(data.age),
+            "height_feet": int(data.height_feet),
+            "height_inches": int(data.height_inches),
+            "weight_lbs": float(data.weight_lbs),
+            "gender": data.gender,
+            "activity_level": data.activity_level,
+            "goal": data.goal,
+            "university": data.university,
+            "bmr": metrics.get("bmr"),
+            "tdee": metrics.get("tdee"),
+            "created_at": datetime.now().isoformat(),
+        }
+
+        inserted = supabase.table("users").insert(payload).execute()
+        if not inserted.data:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        user_row = inserted.data[0]
+
+        # Create session
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        # Return response format expected by frontend
+        # Match types in src/services/api.ts: { success, message, user, session_token }
+        user_row["session_token"] = token  # not persisted, for response convenience
+        return {
+            "success": True,
+            "message": "Registration successful",
+            "user": user_row,
+            "session_token": token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"⚠️ Register failed: {e}")
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+
+@app.post('/auth/login')
+def auth_login(data: LoginRequest):
+    try:
+        # Fetch user by email
+        res = supabase.table("users").select("*").eq("email", str(data.email).lower()).execute()
+        if not res.data:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        user_row = res.data[0]
+
+        # Verify password
+        hashed = user_row.get("password_hash")
+        if not hashed or not verify_password(data.password, hashed):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        # Create session
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        # Update last_login is handled in verify_session_token during profile fetch, but set here too for immediacy
+        try:
+            supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "message": "Login successful",
+            "user": user_row,
+            "session_token": token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"⚠️ Login failed: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+
+@app.get('/auth/profile')
+def auth_profile(current_user=Depends(get_current_user)):
+    return {"success": True, "user": current_user}
+
+
+@app.post('/auth/logout')
+def auth_logout(authorization: Optional[str] = Header(None)):
+    token = get_bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid authorization header")
+    try:
+        supabase.table("user_sessions").delete().eq("session_token", token).execute()
+    except Exception as e:
+        print(f"⚠️ Logout cleanup failed: {e}")
+    return {"success": True, "message": "Logged out"}
 
 if __name__ == '__main__':
     import uvicorn
