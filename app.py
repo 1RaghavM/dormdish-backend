@@ -164,7 +164,7 @@ class User:
         return self.weight_lbs * 0.453592
 
 # ---------------------------
-# Mailchimp helpers
+# Brevo (Sendinblue) helpers
 # ---------------------------
 class SubscribeRequest(BaseModel):
     email: EmailStr
@@ -172,48 +172,19 @@ class SubscribeRequest(BaseModel):
     lastName: Optional[str] = None
 
 
-def _mc_datacenter() -> str:
-    dc = os.getenv("MAILCHIMP_SERVER_PREFIX")
-    if dc:
-        return dc
-    key = os.getenv("MAILCHIMP_API_KEY", "")
-    return key.split("-")[-1] if "-" in key else "us1"
+def _brevo_base_url() -> str:
+    return "https://api.brevo.com/v3"
 
 
-def _mc_base_url() -> str:
-    return f"https://{_mc_datacenter()}.api.mailchimp.com/3.0"
-
-
-def _mc_headers() -> Dict[str, str]:
-    api_key = os.getenv("MAILCHIMP_API_KEY")
+def _brevo_headers() -> Dict[str, str]:
+    api_key = os.getenv("BREVO_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="MAILCHIMP_API_KEY not configured")
-    token = base64.b64encode(f"anystring:{api_key}".encode()).decode()
+        raise HTTPException(status_code=500, detail="BREVO_API_KEY not configured")
     return {
-        "Authorization": f"Basic {token}",
+        "api-key": api_key,
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
-
-
-def _subscriber_hash(email: str) -> str:
-    return hashlib.md5(email.lower().encode("utf-8")).hexdigest()
-
-
-def _parse_template_id() -> Optional[int]:
-    raw = os.getenv("MAILCHIMP_TEMPLATE_ID", "").strip()
-    if not raw:
-        return None
-    # Accept formats like "244405234_..." or plain integer
-    m = re.match(r"(\d+)", raw)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-    try:
-        return int(raw)
-    except Exception:
-        return None
 
 
 def _guess_name_from_email(email: str) -> Dict[str, str]:
@@ -228,134 +199,109 @@ def _guess_name_from_email(email: str) -> Dict[str, str]:
     return {"first": parts[0].capitalize(), "last": parts[-1].capitalize()}
 
 
-def upsert_mailchimp_member(email: str, merge_fields: Optional[Dict[str, str]] = None, tags: Optional[List[str]] = None, status_if_new: str = "subscribed") -> Dict:
-    list_id = os.getenv("MAILCHIMP_LIST_ID")
-    if not list_id:
-        raise HTTPException(status_code=500, detail="MAILCHIMP_LIST_ID not configured")
-
-    url = f"{_mc_base_url()}/lists/{list_id}/members/{_subscriber_hash(email)}"
-    payload = {
-        "email_address": email,
-        "status_if_new": status_if_new,
-        "merge_fields": merge_fields or {},
+def upsert_brevo_contact(
+    email: str,
+    attributes: Optional[Dict[str, str]] = None,
+    list_ids: Optional[List[int]] = None,
+) -> Dict:
+    """Create or update a Brevo contact and optionally add to lists."""
+    url = f"{_brevo_base_url()}/contacts"
+    payload: Dict = {
+        "email": email,
+        "updateEnabled": True,
     }
+    if attributes:
+        payload["attributes"] = attributes
+    # If a single list id provided via env, use it by default
+    env_list_id = os.getenv("BREVO_LIST_ID")
+    resolved_list_ids: List[int] = []
+    if env_list_id:
+        try:
+            resolved_list_ids.append(int(env_list_id))
+        except Exception:
+            pass
+    if list_ids:
+        for lid in list_ids:
+            if isinstance(lid, int):
+                resolved_list_ids.append(lid)
+    if resolved_list_ids:
+        payload["listIds"] = list(dict.fromkeys(resolved_list_ids))  # dedupe, preserve order
+
     try:
-        resp = requests.put(url, headers=_mc_headers(), data=json.dumps(payload), timeout=12)
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=502, detail=f"Mailchimp member upsert failed: {resp.text}")
-        member = resp.json()
-        # Apply tags if provided
-        if tags:
-            tags_url = f"{_mc_base_url()}/lists/{list_id}/members/{_subscriber_hash(email)}/tags"
-            tags_payload = {"tags": [{"name": t, "status": "active"} for t in tags]}
-            tr = requests.post(tags_url, headers=_mc_headers(), data=json.dumps(tags_payload), timeout=12)
-            if tr.status_code >= 400:
-                # Log but don't fail subscription on tag error
-                print(f"⚠️ Mailchimp tag apply failed: {tr.text}")
-        return member
+        resp = requests.post(url, headers=_brevo_headers(), data=json.dumps(payload), timeout=12)
+        # 201 created or 200 updated
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Brevo contact upsert failed: {resp.text}")
+        return resp.json()
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Mailchimp error: {e}")
+        raise HTTPException(status_code=500, detail=f"Brevo error: {e}")
 
 
-def _create_static_segment_for_email(list_id: str, email: str) -> Optional[int]:
-    url = f"{_mc_base_url()}/lists/{list_id}/segments"
-    name = f"api-single-{int(time.time())}-{_subscriber_hash(email)[:8]}"
-    payload = {"name": name, "static_segment": [email]}
-    r = requests.post(url, headers=_mc_headers(), data=json.dumps(payload), timeout=12)
-    if r.status_code >= 400:
-        print(f"⚠️ Failed to create static segment: {r.text}")
-        return None
-    return r.json().get("id")
+def send_brevo_template(
+    email: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    subject: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+) -> Dict:
+    """Send a Brevo transactional email using a stored template to a single recipient."""
+    from_email = os.getenv("BREVO_FROM_EMAIL")
+    from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
+    template_raw = os.getenv("BREVO_TEMPLATE_ID", "").strip()
+    template_id: Optional[int] = None
+    if template_raw:
+        m = re.match(r"(\d+)", template_raw)
+        if m:
+            try:
+                template_id = int(m.group(1))
+            except Exception:
+                template_id = None
+    if not (from_email and template_id):
+        raise HTTPException(status_code=500, detail="Brevo env vars missing (FROM_EMAIL, TEMPLATE_ID)")
 
-
-def _delete_segment(list_id: str, segment_id: int):
-    try:
-        url = f"{_mc_base_url()}/lists/{list_id}/segments/{segment_id}"
-        requests.delete(url, headers=_mc_headers(), timeout=10)
-    except Exception as e:
-        print(f"⚠️ Failed to delete static segment {segment_id}: {e}")
-
-
-def send_mailchimp_template(email: str, first_name: Optional[str] = None, last_name: Optional[str] = None, subject: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict:
-    """Send a one-off campaign using a saved Mailchimp template to a single recipient.
-    Note: This uses Marketing API via a temporary static segment.
-    """
-    list_id = os.getenv("MAILCHIMP_LIST_ID")
-    from_email = os.getenv("MAILCHIMP_FROM_EMAIL")
-    from_name = os.getenv("MAILCHIMP_FROM_NAME", "DormDish")
-    template_id = _parse_template_id()
-
-    if not (list_id and from_email and template_id):
-        raise HTTPException(status_code=500, detail="Mailchimp env vars missing (LIST_ID, FROM_EMAIL, TEMPLATE_ID)")
-
-    # Ensure contact exists with merge fields
+    # Ensure contact exists (optionally add to default list)
     if not first_name or not last_name:
         guess = _guess_name_from_email(email)
         first_name = first_name or guess["first"]
         last_name = last_name or guess["last"]
 
-    merge_fields = {"FNAME": first_name or "", "LNAME": last_name or ""}
-    upsert_mailchimp_member(
-        email,
-        merge_fields=merge_fields,
-        tags=tags or ["newsletter"],
-        status_if_new=os.getenv("MAILCHIMP_DOUBLE_OPT_IN", "false").lower() == "true" and "pending" or "subscribed",
-    )
+    attributes = {
+        "FIRSTNAME": first_name or "",
+        "LASTNAME": last_name or "",
+    }
+    upsert_brevo_contact(email, attributes=attributes)
 
-    # Create a static segment targeting only this email
-    seg_id = _create_static_segment_for_email(list_id, email)
-    if not seg_id:
-        raise HTTPException(status_code=502, detail="Failed to create Mailchimp segment")
+    payload: Dict = {
+        "templateId": template_id,
+        "to": [{"email": email, "name": f"{first_name or ''} {last_name or ''}".strip()}],
+        "sender": {"email": from_email, "name": from_name},
+    }
+    if subject:
+        payload["subject"] = subject
+    if tags:
+        payload["tags"] = tags
 
     try:
-        # Create a campaign
-        camp_url = f"{_mc_base_url()}/campaigns"
-        subject = subject or "Welcome to DormDish!"
-        payload = {
-            "type": "regular",
-            "recipients": {"list_id": list_id, "segment_opts": {"saved_segment_id": seg_id}},
-            "settings": {
-                "subject_line": subject,
-                "title": f"API Send to {email}",
-                "from_name": from_name,
-                "reply_to": from_email,
-            },
-        }
-        cr = requests.post(camp_url, headers=_mc_headers(), data=json.dumps(payload), timeout=12)
-        if cr.status_code >= 400:
-            raise HTTPException(status_code=502, detail=f"Failed to create campaign: {cr.text}")
-        campaign = cr.json()
-        campaign_id = campaign.get("id")
-
-        # Set campaign content from template
-        content_url = f"{_mc_base_url()}/campaigns/{campaign_id}/content"
-        content_payload = {"template": {"id": template_id}}
-        conr = requests.put(content_url, headers=_mc_headers(), data=json.dumps(content_payload), timeout=12)
-        if conr.status_code >= 400:
-            raise HTTPException(status_code=502, detail=f"Failed to set campaign content: {conr.text}")
-
-        # Send campaign
-        send_url = f"{_mc_base_url()}/campaigns/{campaign_id}/actions/send"
-        sr = requests.post(send_url, headers=_mc_headers(), timeout=12)
-        if sr.status_code not in (200, 204):
-            raise HTTPException(status_code=502, detail=f"Failed to send campaign: {sr.text}")
-
-        return {"success": True, "campaign_id": campaign_id}
-    finally:
-        # Best-effort cleanup
-        if seg_id:
-            _delete_segment(list_id, seg_id)
+        url = f"{_brevo_base_url()}/smtp/email"
+        r = requests.post(url, headers=_brevo_headers(), data=json.dumps(payload), timeout=12)
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Failed to send Brevo email: {r.text}")
+        return {"success": True, **r.json()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Brevo error: {e}")
 
 
 @app.post('/subscribe', summary='Subscribe to newsletter and send welcome email')
 def subscribe(req: SubscribeRequest):
     try:
-        # Upsert member and send template email
+        # Upsert contact and send template email
         fn = (req.firstName or "").strip()
         ln = (req.lastName or "").strip()
-        res = send_mailchimp_template(req.email.strip().lower(), first_name=fn or None, last_name=ln or None)
+        res = send_brevo_template(req.email.strip().lower(), first_name=fn or None, last_name=ln or None)
         return {"success": True, "message": "Subscription successful. Email sent.", **res}
     except HTTPException as e:
         raise e
@@ -456,41 +402,39 @@ def join_waitlist(data: WaitlistJoinRequest):
         }
         supabase.table('waitlist_users').upsert(payload, on_conflict='email').execute()
 
-        # Push to Mailchimp if notifications allowed
-        mc_status = None
+        # Push to Brevo if notifications allowed
+        brevo_status = None
         if bool(data.notifications):
             try:
-                merge_fields = {
-                    "FNAME": data.firstName.strip(),
-                    "LNAME": data.lastName.strip(),
+                attributes = {
+                    "FIRSTNAME": data.firstName.strip(),
+                    "LASTNAME": data.lastName.strip(),
                     "UNIVERSITY": data.university.strip(),
                     "GRADYEAR": (data.graduationYear or ""),
                 }
-                member = upsert_mailchimp_member(
+                upsert_brevo_contact(
                     data.email.strip().lower(),
-                    merge_fields=merge_fields,
-                    tags=["waitlist"],
-                    status_if_new=os.getenv("MAILCHIMP_DOUBLE_OPT_IN", "false").lower() == "true" and "pending" or "subscribed",
+                    attributes=attributes,
                 )
-                mc_status = member.get("status")
-                if (mc_status or "").lower() == "subscribed":
-                    try:
-                        send_mailchimp_template(
-                            data.email.strip().lower(),
-                            first_name=data.firstName.strip(),
-                            last_name=data.lastName.strip(),
-                            subject="You're on the DormDish waitlist!",
-                            tags=["waitlist"],
-                        )
-                    except HTTPException:
-                        pass
+                # Try sending a confirmation/welcome email
+                try:
+                    send_brevo_template(
+                        data.email.strip().lower(),
+                        first_name=data.firstName.strip(),
+                        last_name=data.lastName.strip(),
+                        subject="You're on the DormDish waitlist!",
+                        tags=["waitlist"],
+                    )
+                    brevo_status = "sent"
+                except HTTPException:
+                    brevo_status = "queued"
             except HTTPException as e:
-                print(f"⚠️ Mailchimp sync failed: {e.detail}")
+                print(f"⚠️ Brevo sync failed: {e.detail}")
 
         # Count people on the same university waitlist
         count_resp = supabase.table('waitlist_users').select('id', count='exact').eq('university', data.university.strip()).execute()
         uni_count = getattr(count_resp, 'count', None)
-        return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0, "mailchimp_status": mc_status}
+        return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0, "brevo_status": brevo_status}
     except Exception as e:
         print(f"⚠️ Waitlist join failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to join waitlist")

@@ -210,6 +210,38 @@ GET /cache/status
    - Load a compatible model
    - The app will connect to `http://127.0.0.1:1234/v1`
 
+## Email (Brevo) setup
+
+The backend now uses Brevo (Sendinblue) for contacts and transactional emails. Configure these environment variables in `.env`:
+
+```
+BREVO_API_KEY=...           # API key with Contacts and SMTP/Transactional scopes
+BREVO_FROM_EMAIL=...        # Verified sender email in Brevo
+BREVO_FROM_NAME=DormDish    # Display name
+BREVO_TEMPLATE_ID=2         # Numeric ID of an Active transactional template
+BREVO_LIST_ID=5             # Optional default numeric list ID (e.g., "Waitlist")
+```
+
+Notes
+- BREVO_LIST_ID must be the numeric ID, not the list name.
+- Verify your sender/domain in Brevo before sending.
+- If you personalize emails, create Brevo attributes used by the code: FIRSTNAME, LASTNAME, UNIVERSITY, GRADYEAR.
+
+Endpoints using Brevo
+- POST /subscribe → Sends the template email to the provided address (also upserts contact).
+- POST /waitlist/join → Upserts a contact (with attributes) and, if notifications=true, sends a welcome/confirmation email.
+
+Testing
+- Use a real inbox you control. After calling the endpoint, check Brevo → Transactional → Logs for status/details.
+- If no email:
+  - Ensure BREVO_TEMPLATE_ID is a valid numeric template ID in Active status.
+  - Ensure BREVO_FROM_EMAIL is a verified sender.
+  - Ensure BREVO_API_KEY has required scopes.
+  - Confirm BREVO_LIST_ID is numeric and exists (if provided).
+
+Cleanup
+- Once Brevo is confirmed live, you can remove the legacy Mailchimp variables from `.env` as they are no longer used in code.
+
 ## Usage
 
 1. **Start the server**
