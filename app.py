@@ -151,6 +151,8 @@ class User:
     activity_level: str  # "sedentary", "active", "very_active"
     goal: str  # "bulk", "cut", "maintain"
     preferred_dining_hall: str
+    # New: optional dietary preference
+    dietary_preference: Optional[str] = None
     
     @property
     def height_cm(self) -> float:
@@ -518,6 +520,8 @@ class RegisterRequest(BaseModel):
     activity_level: str
     goal: str
     university: str
+    # New: optional dietary preference
+    dietary_preference: Optional[str] = None
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -575,6 +579,8 @@ def auth_register(data: RegisterRequest):
             "activity_level": data.activity_level,
             "goal": data.goal,
             "university": data.university,
+            # New: store dietary preference (nullable)
+            "dietary_preference": (data.dietary_preference or None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
@@ -672,6 +678,8 @@ class UpdateProfileRequest(BaseModel):
     activity_level: Optional[str] = None
     goal: Optional[str] = None
     university: Optional[str] = None
+    # New: optional dietary preference
+    dietary_preference: Optional[str] = None
 
 class MealPlanRequest(BaseModel):
     dining_hall: str
@@ -980,18 +988,18 @@ def generate_meal_plan(user: User, menu_data: dict) -> dict:
     - Age: {user.age}, Height: {user.height_feet}'{user.height_inches}", Weight: {user.weight_lbs}lbs
     - Activity Level: {user.activity_level}
     - Goal: {user.goal}
+    {f"- Dietary Preference: {user.dietary_preference}" if user.dietary_preference else ""}
 
     Nutritional Targets:
     - Calories: {nutritional_needs['calories']}
     - Protein: {nutritional_needs['protein_grams']}g
-    - Carbs: {nutritional_needs['carb_grams']}g  
-    - Fat: {nutritional_needs['fat_grams']}g
 
     Available Menu: {json.dumps(menu_data, indent=2)}
 
     Please create an optimized meal plan that meets the user's nutritional targets using only items from the available menu. 
     Focus on high-quality protein sources and nutrient-dense foods that support their {user.goal} goal.
     Provide specific portion recommendations and explain how the plan meets their macronutrient needs.
+    {"Additionally, strictly ensure all items comply with the user's dietary preference (use only vegan items if vegan; only vegetarian items if vegetarian)." if user.dietary_preference else ""}
     """
     return {
         "user_profile": asdict(user),
@@ -1021,8 +1029,6 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     nutritional_needs = {
         "calories": round(target_calories),
         "protein_grams": round(protein_grams),
-        "carb_grams": round(carb_grams),
-        "fat_grams": round(fat_grams),
         "bmr": bmr,
         "tdee": tdee,
     }
@@ -1031,6 +1037,7 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     - Age: {user.age}, Height: {user.height_feet}'{user.height_inches}", Weight: {user.weight_lbs}lbs
     - Activity Level: {user.activity_level}
     - Goal: {user.goal}
+    {f"- Dietary Preference: {user.dietary_preference}" if user.dietary_preference else ""}
 
     Metabolic Information:
     - BMR (Basal Metabolic Rate): {bmr} calories
@@ -1039,8 +1046,7 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     Nutritional Targets (based on TDEE and goal):
     - Target Calories: {nutritional_needs['calories']} (TDEE {'+' if user.goal == 'bulk' else '-' if user.goal == 'cut' else '='} adjustment for {user.goal})
     - Protein: {nutritional_needs['protein_grams']}g
-    - Carbs: {nutritional_needs['carb_grams']}g  
-    - Fat: {nutritional_needs['fat_grams']}g
+
 
     Available Menu Items: {len(menu_data.get('items', []))} items available
     {json.dumps(menu_data.get('items', []), indent=2)}
@@ -1048,6 +1054,7 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     Please create an optimized meal plan that meets the user's nutritional targets using only items from the available menu. 
     The plan should align with their {user.goal} goal and stay within ±5% of the target calories.
     Focus on high-quality protein sources and nutrient-dense foods.
+    {"Additionally, strictly ensure all items comply with the user's dietary preference (use only vegan items if vegan; only vegetarian items if vegetarian)." if user.dietary_preference else ""}
     """
     return {
         "user_profile": asdict(user),
@@ -1066,6 +1073,8 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
+                if field == 'dietary_preference' and value not in ['vegan', 'vegetarian']:
+                    raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan' or 'vegetarian'")
                 update_data[field] = value
         if any(field in update_data for field in ['age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level']):
             current_age = update_data.get('age', current_user['age'])  # type: ignore
@@ -1112,6 +1121,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 activity_level=authenticated_user['activity_level'],
                 goal=authenticated_user['goal'],
                 preferred_dining_hall=meal_plan_request.dining_hall,
+                dietary_preference=authenticated_user.get('dietary_preference'),
             )
             user_bmr = float(authenticated_user['bmr'])
             user_tdee = float(authenticated_user['tdee'])
@@ -1150,6 +1160,8 @@ Prioritize protein targets first, then balance calories.
 
 Avoid repeating the exact same dish within a single day. Variety is preferred.
 
+Respect dietary constraints when provided: if the user is vegan or vegetarian, only select items compliant with that diet.
+
 Always output strictly in JSON format WITHOUT any markdown code blocks or additional text.
 
 Output Format:
@@ -1159,7 +1171,8 @@ Output Format:
   "user_stats": {
     "bmr": <float>,
     "tdee": <float>,
-    "goal": "<goal>"
+    "goal": "<goal>",
+    "dietary_preference": "<vegan|vegetarian|null>"
   },
   "goals": {
     "calories": <int>,
@@ -1194,6 +1207,7 @@ Exclude foods where calories or protein are null.
 Meals should feel natural, varied, and student-friendly.
 JSON must always be valid and parseable.
 YOU MUST ONLY USE THE MENU ITEMS FROM THE ATTACHED ITEMS.
+IF THE DIET TYPE IS VEGETARIAN OR VEGAN, THERE IS ADDED LEEWAY TO USE ITEMS THAT FIT THE DIET TYPE. YOU MUST RETURN A MEAL PLAN REGARDLESS OF THE GOAL REQUIREMENTS.
 IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, no additional text."""},
                 {"role": "user", "content": meal_plan_context["ai_prompt"]},
             ],
@@ -1245,6 +1259,8 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 "ai_model": "openai/gpt-oss-20b",
                 "authenticated": authenticated_user is not None,
                 "raw_ai_response_length": len(ai_response_raw),
+                # New: echo dietary preference if set
+                "dietary_preference": user.dietary_preference,
             },
         }
     except HTTPException:
