@@ -187,6 +187,23 @@ def _brevo_headers() -> Dict[str, str]:
     }
 
 
+# New: simple Brevo health helpers
+def _brevo_get_account() -> Dict:
+    try:
+        r = requests.get(f"{_brevo_base_url()}/account", headers=_brevo_headers(), timeout=10)
+        return {"status": r.status_code, "body": r.json() if r.content else None}
+    except Exception as e:
+        return {"status": 0, "error": str(e)}
+
+
+def _brevo_get_template(template_id: int) -> Dict:
+    try:
+        r = requests.get(f"{_brevo_base_url()}/smtp/templates/{template_id}", headers=_brevo_headers(), timeout=10)
+        return {"status": r.status_code, "body": r.json() if r.content else None}
+    except Exception as e:
+        return {"status": 0, "error": str(e)}
+
+
 def _guess_name_from_email(email: str) -> Dict[str, str]:
     local = email.split("@")[0]
     # split by common delimiters
@@ -308,6 +325,51 @@ def subscribe(req: SubscribeRequest):
     except Exception as e:
         print(f"⚠️ Subscribe failed: {e}")
         raise HTTPException(status_code=500, detail="Subscription failed")
+
+
+# New: Brevo health endpoints (non-breaking additions)
+@app.get('/health/brevo', summary='Brevo configuration and template health check')
+def brevo_health():
+    try:
+        from_email = os.getenv("BREVO_FROM_EMAIL")
+        from_name = os.getenv("BREVO_FROM_NAME")
+        template_raw = os.getenv("BREVO_TEMPLATE_ID", "").strip()
+        list_id = os.getenv("BREVO_LIST_ID")
+        template_id: Optional[int] = None
+        if template_raw:
+            m = re.match(r"(\d+)", template_raw)
+            if m:
+                try:
+                    template_id = int(m.group(1))
+                except Exception:
+                    template_id = None
+
+        account = _brevo_get_account()
+        template_info = _brevo_get_template(template_id) if template_id else None
+        return {
+            "ok": bool(account and account.get("status") in (200, 201)),
+            "env": {
+                "BREVO_FROM_EMAIL": bool(from_email),
+                "BREVO_FROM_NAME": bool(from_name),
+                "BREVO_TEMPLATE_ID": template_id,
+                "BREVO_LIST_ID": list_id,
+            },
+            "account": account,
+            "template": template_info,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get('/email/test', summary='Send a Brevo test email using the configured template')
+def email_test(email: EmailStr):
+    try:
+        res = send_brevo_template(str(email))
+        return {"success": True, **res}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test email failed: {e}")
 
 # ---------------------------
 # Universities list endpoint
