@@ -27,6 +27,14 @@ from functools import lru_cache
 import base64
 from fastapi import Request
 
+# New: import FoodPro scraping helpers
+try:
+    from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
+except Exception:
+    fp_build_menu_url = None  # type: ignore
+    fp_fetch = None  # type: ignore
+    fp_parse_menu = None  # type: ignore
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -828,6 +836,10 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook-douglass": ("rutgers", "neilson-dining-hall"),
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
+        # New: The Atrium (Rutgers Livingston)
+        "the-atrium": ("rutgers", "the-atrium"),
+        "the atrium": ("rutgers", "the-atrium"),
+        "atrium": ("rutgers", "the-atrium"),
     }
     mapping = dining_hall_mapping.get(dining_hall.lower())
     if not mapping:
@@ -837,6 +849,17 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
+    # Route Rutgers halls to FoodPro when applicable
+    if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
+        print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
+        try:
+            menu_data = fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
+            save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
+            print(f"💾 Save to Supabase result: {save_result}")
+            return menu_data
+        except Exception as e:
+            print(f"❌ FoodPro fetch failed, falling back to Nutrislice if available: {e}")
+            # Fallback to Nutrislice path
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
@@ -845,6 +868,62 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         return menu_data
     except Exception as e:
         return {"error": f"Failed to fetch menu: {str(e)}"}
+
+
+def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> dict:
+    """Fetch menu from Rutgers FoodPro pickmenu pages and format like Nutrislice output."""
+    if not (fp_build_menu_url and fp_fetch and fp_parse_menu):
+        raise RuntimeError("FoodPro scraper not available")
+
+    # Map hall slug to FoodPro location params
+    # Known/assumed mappings: Livingston=03, Neilson=04. Atrium best-effort mapping using location name.
+    location_map = {
+        "livingston-dining-commons": {"locationNum": "03", "locationName": "Livingston Dining Commons"},
+        "neilson-dining-hall": {"locationNum": "04", "locationName": "Neilson Dining Hall"},
+        # Atrium is a retail at Livingston; try common FoodPro name
+        "the-atrium": {"locationNum": "07", "locationName": "The Atrium"},
+    }
+    params = location_map.get(hall_slug)
+    if not params:
+        raise ValueError(f"Unsupported Rutgers FoodPro hall: {hall_slug}")
+
+    url = fp_build_menu_url(date, params["locationNum"], params["locationName"])  # type: ignore
+    print(f"🔗 FoodPro URL: {url}")
+    soup = fp_fetch(url)  # type: ignore
+    parsed = fp_parse_menu(str(soup), meal_type="breakfast", date=date, base_url=url)  # type: ignore
+
+    # Build items list compatible with the rest of the app
+    items: List[dict] = []
+    for it in parsed.get("items", []):
+        if not isinstance(it, dict):
+            continue
+        name = it.get("name")
+        if not name:
+            continue
+        out_item: Dict[str, object] = {"name": name}
+        if it.get("protein_g") is not None:
+            out_item["protein_g"] = it.get("protein_g")
+        if it.get("calories") is not None:
+            out_item["calories"] = it.get("calories")
+        if it.get("serving_size"):
+            out_item["serving_size"] = it.get("serving_size")
+        items.append(out_item)
+
+    warnings: List[str] = []
+    if not items:
+        warnings.append("No items parsed from FoodPro")
+
+    return {
+        "university": "rutgers",
+        "hall": dining_hall,
+        "hall_slug": hall_slug,
+        "date": date,
+        "fetched_at": datetime.now().isoformat(),
+        "items": items,
+        "menu": {"items": items, "meal_sources": ["foodpro"]},
+        "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
+        "error": None,
+    }
 
 
 def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, date: str) -> dict:
@@ -1338,6 +1417,7 @@ async def get_supported_dining_halls():
                     {"id": "livingston", "name": "Livingston Dining Commons"},
                     {"id": "brower", "name": "Brower Commons"},
                     {"id": "neilson", "name": "Neilson Dining Hall"},
+                    {"id": "the-atrium", "name": "The Atrium"},
                 ],
             },
             {
