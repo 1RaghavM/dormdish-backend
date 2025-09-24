@@ -21,6 +21,8 @@ async function post(path, body) {
     email: 'waitlist.tester@example.com',
     university: 'Test University',
     graduationYear: '2027',
-    notifications: true
+    notifications: true,
+    // Provide a captcha token via env TURNSTILE_TEST_TOKEN when server verification is enabled
+    captchaToken: process.env.TURNSTILE_TEST_TOKEN || undefined,
   });
 })();
