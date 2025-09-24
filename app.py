@@ -25,6 +25,7 @@ import bcrypt
 import csv
 from functools import lru_cache
 import base64
+from fastapi import Request
 
 # Load environment variables from .env file
 load_dotenv()
@@ -448,10 +449,61 @@ class WaitlistJoinRequest(BaseModel):
     university: str
     graduationYear: Optional[str] = None
     notifications: Optional[bool] = True
+    # New: Turnstile captcha token (optional in dev if server secret not set)
+    captchaToken: Optional[str] = None
+
+
+def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None) -> bool:
+    """Verify Cloudflare Turnstile token. If TURNSTILE_SECRET_KEY is not set, skip verification (dev mode)."""
+    secret = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
+    # Dev bypass if no secret configured
+    if not secret:
+        print("[Turnstile] No TURNSTILE_SECRET_KEY configured; skipping captcha verification (dev mode)")
+        return True
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Captcha token missing")
+
+    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    data = {
+        "secret": secret,
+        "response": token,
+    }
+    if remoteip:
+        data["remoteip"] = remoteip
+
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Captcha verification error: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Captcha verification failed: HTTP {resp.status_code}")
+
+    try:
+        result = resp.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Captcha verification failed: invalid response")
+
+    if not result.get("success"):
+        errs = result.get("error-codes") or result.get("error_codes") or []
+        raise HTTPException(status_code=400, detail=f"Captcha verification failed: {errs}")
+
+    return True
+
 
 @app.post('/waitlist/join')
-def join_waitlist(data: WaitlistJoinRequest):
+def join_waitlist(data: WaitlistJoinRequest, request: Request):
     try:
+        # Verify captcha (skipped in dev if no TURNSTILE_SECRET_KEY)
+        # Extract client IP from headers or connection
+        client_ip = (
+            request.headers.get('CF-Connecting-IP')
+            or (request.headers.get('X-Forwarded-For', '').split(',')[0].strip() if request.headers.get('X-Forwarded-For') else None)
+            or (request.client.host if request.client else None)
+        )
+        verify_turnstile_token(data.captchaToken, client_ip)
+
         # Upsert by email (only one per email)
         payload = {
             "first_name": data.firstName.strip(),
