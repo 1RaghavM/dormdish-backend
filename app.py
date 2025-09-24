@@ -35,6 +35,9 @@ except Exception:
     fp_fetch = None  # type: ignore
     fp_parse_menu = None  # type: ignore
 
+# Add URL helpers for adjusting FoodPro params (mealName)
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -871,7 +874,9 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
 
 
 def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> dict:
-    """Fetch menu from Rutgers FoodPro pickmenu pages and format like Nutrislice output."""
+    """Fetch menu from Rutgers FoodPro pickmenu pages and format like Nutrislice output.
+    Now aggregates breakfast, lunch, and dinner by invoking the scraper per meal.
+    """
     if not (fp_build_menu_url and fp_fetch and fp_parse_menu):
         raise RuntimeError("FoodPro scraper not available")
 
@@ -887,31 +892,140 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     if not params:
         raise ValueError(f"Unsupported Rutgers FoodPro hall: {hall_slug}")
 
-    url = fp_build_menu_url(date, params["locationNum"], params["locationName"])  # type: ignore
-    print(f"🔗 FoodPro URL: {url}")
-    soup = fp_fetch(url)  # type: ignore
-    parsed = fp_parse_menu(str(soup), meal_type="breakfast", date=date, base_url=url)  # type: ignore
+    def _set_meal_in_url(url: str, meal: str) -> str:
+        # FoodPro typically accepts mealName=Breakfast|Lunch|Dinner
+        try:
+            u = urlparse(url)
+            qs = parse_qs(u.query)
+            qs["mealName"] = [meal.capitalize()]
+            new_q = urlencode(qs, doseq=True)
+            return urlunparse(u._replace(query=new_q))
+        except Exception:
+            return url
 
-    # Build items list compatible with the rest of the app
-    items: List[dict] = []
-    for it in parsed.get("items", []):
-        if not isinstance(it, dict):
-            continue
-        name = it.get("name")
+    def _add_food_obj_from_new_schema(food: dict, items: List[dict]):
+        if not isinstance(food, dict):
+            return
+        name = food.get("name")
         if not name:
-            continue
+            return
         out_item: Dict[str, object] = {"name": name}
-        if it.get("protein_g") is not None:
-            out_item["protein_g"] = it.get("protein_g")
-        if it.get("calories") is not None:
-            out_item["calories"] = it.get("calories")
-        if it.get("serving_size"):
-            out_item["serving_size"] = it.get("serving_size")
+        prot = food.get("g_protein")
+        if prot is None:
+            prot = food.get("protein_g")
+        if prot is not None:
+            out_item["protein_g"] = prot
+        cals = food.get("calories")
+        if cals is not None:
+            out_item["calories"] = cals
+        sv = food.get("serving_size")
+        if isinstance(sv, dict):
+            amt = sv.get("serving_size_amount")
+            unit = sv.get("serving_size_unit")
+            parts = []
+            if amt not in (None, ""):
+                parts.append(str(amt))
+            if unit not in (None, ""):
+                parts.append(str(unit))
+            if parts:
+                out_item["serving_size"] = " ".join(parts)
+        elif isinstance(sv, str) and sv:
+            out_item["serving_size"] = sv
         items.append(out_item)
 
-    warnings: List[str] = []
-    if not items:
+    def _attempt_all_meals(location_num: str, location_name: str) -> dict:
+        base_url = fp_build_menu_url(date, location_num, location_name)  # type: ignore
+        print(f"🔗 FoodPro base URL: {base_url}")
+        all_items: List[dict] = []
+        meal_sources: List[str] = []
+        warnings: List[str] = []
+
+        for meal in ("breakfast", "lunch", "dinner"):
+            meal_url = _set_meal_in_url(base_url, meal)
+            print(f"   ↳ Fetching meal '{meal}' with URL: {meal_url}")
+            try:
+                soup = fp_fetch(meal_url)  # type: ignore
+            except Exception as e:
+                warnings.append(f"Failed to fetch {meal}: {e}")
+                continue
+            try:
+                parsed = fp_parse_menu(str(soup), meal_type=meal, date=date, base_url=meal_url)  # type: ignore
+            except Exception as e:
+                warnings.append(f"Failed to parse {meal}: {e}")
+                continue
+
+            # Collect items from either old or new schema
+            items: List[dict] = []
+            if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+                # Old shape
+                for it in parsed.get("items", []):
+                    if not isinstance(it, dict):
+                        continue
+                    name = it.get("name")
+                    if not name:
+                        continue
+                    out_item: Dict[str, object] = {"name": name}
+                    if it.get("protein_g") is not None:
+                        out_item["protein_g"] = it.get("protein_g")
+                    if it.get("calories") is not None:
+                        out_item["calories"] = it.get("calories")
+                    if it.get("serving_size"):
+                        out_item["serving_size"] = it.get("serving_size")
+                    items.append(out_item)
+            else:
+                # New meals_trimmed-style
+                if isinstance(parsed, dict):
+                    meal_map = parsed.get(meal) or {}
+                    blocks = meal_map.get(date) or [] if isinstance(meal_map, dict) else []
+                    if isinstance(blocks, list):
+                        for block in blocks:
+                            if not isinstance(block, dict):
+                                continue
+                            foods = block.get("foods") or []
+                            if isinstance(foods, list):
+                                for food in foods:
+                                    _add_food_obj_from_new_schema(food, items)
+
+            if items:
+                meal_sources.append(meal)
+                all_items.extend(items)
+            else:
+                warnings.append(f"No items found for {meal}")
+
+        return {"items": all_items, "meal_sources": meal_sources, "warnings": warnings, "url": base_url}
+
+    attempt = _attempt_all_meals(params["locationNum"], params["locationName"])  # type: ignore
+
+    # If Atrium returned no items across all meals, try alternative naming variants
+    if hall_slug == "the-atrium" and not attempt["items"]:
+        for alt_name in [
+            "Atrium",  # shorter variant
+            "The Atrium at Livingston",  # descriptive variant
+            "The Atrium at Livingston Campus",
+        ]:
+            try:
+                print(f"🔁 Retrying The Atrium with locationName='{alt_name}'")
+                attempt = _attempt_all_meals(params["locationNum"], alt_name)
+                if attempt["items"]:
+                    break
+            except Exception as e:
+                print(f"⚠️ Retry failed for Atrium alt name '{alt_name}': {e}")
+
+    # Deduplicate by name to mirror Nutrislice behavior
+    all_items = attempt["items"]
+    seen = set()
+    unique_items: List[dict] = []
+    for it in all_items:
+        nm = (it.get("name") or "").strip()
+        if nm and nm not in seen:
+            seen.add(nm)
+            unique_items.append(it)
+
+    warnings: List[str] = attempt.get("warnings", [])
+    if not unique_items:
         warnings.append("No items parsed from FoodPro")
+
+    meal_sources = attempt.get("meal_sources", [])
 
     return {
         "university": "rutgers",
@@ -919,8 +1033,8 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
         "hall_slug": hall_slug,
         "date": date,
         "fetched_at": datetime.now().isoformat(),
-        "items": items,
-        "menu": {"items": items, "meal_sources": ["foodpro"]},
+        "items": unique_items,
+        "menu": {"items": unique_items, "meal_sources": meal_sources or ["foodpro"]},
         "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
         "error": None,
     }
@@ -1338,6 +1452,7 @@ Exclude foods where calories or protein are null.
 Meals should feel natural, varied, and student-friendly.
 JSON must always be valid and parseable.
 YOU MUST ONLY USE THE MENU ITEMS FROM THE ATTACHED ITEMS.
+YOU ARE ALLOWED TO RETURN MORE THAN THE STANDARD SERVIING SIZE IF NEEDED TO FIT THE MACRO TARGETS.
 IF THE DIET TYPE IS VEGETARIAN OR VEGAN, THERE IS ADDED LEEWAY TO USE ITEMS THAT FIT THE DIET TYPE. YOU MUST RETURN A MEAL PLAN REGARDLESS OF THE GOAL REQUIREMENTS.
 IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, no additional text."""},
                 {"role": "user", "content": meal_plan_context["ai_prompt"]},
