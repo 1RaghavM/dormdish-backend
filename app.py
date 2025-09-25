@@ -26,6 +26,7 @@ import csv
 from functools import lru_cache
 import base64
 from fastapi import Request
+from uuid import UUID
 
 # New: import FoodPro scraping helpers
 try:
@@ -748,6 +749,10 @@ class MealPlanRequest(BaseModel):
     dining_hall: str
     date: str
 
+class MealPlanFeedbackRequest(BaseModel):
+    generation_id: str
+    liked: bool
+
 class TokenData(BaseModel):
     user_id: str
 
@@ -964,6 +969,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
                     name = it.get("name")
                     if not name:
                         continue
+                    # Fixed type annotation syntax
                     out_item: Dict[str, object] = {"name": name}
                     if it.get("protein_g") is not None:
                         out_item["protein_g"] = it.get("protein_g")
@@ -1554,6 +1560,9 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
             ],
             temperature=0.7,
         )
+        # Capture prompts for storage
+        system_prompt = "You are an AI meal planner. Your role is to generate complete daily meal plans using the provided dataset of foods. (truncated)"
+        user_prompt = meal_plan_context["ai_prompt"]
         ai_end_time = time.time()
         ai_response_raw = response.choices[0].message.content.strip()
 
@@ -1595,6 +1604,29 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 meal_plan.setdefault("meta", {})
                 meal_plan["meta"]["server_totals_error"] = str(_e)
 
+        # Store generation in meal_plan_generations
+        generation_id = None
+        try:
+            insert_payload = {
+                "user_id": authenticated_user.get("id"),
+                "date": meal_plan_request.date,
+                "dining_hall": meal_plan_request.dining_hall,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "full_messages": json.dumps([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]),
+                "model_raw_response": ai_response_raw,
+                "meal_plan": meal_plan,
+                # Removed calories/protein_g columns (not in table). Totals remain inside meal_plan JSON.
+            }
+            inserted = supabase.table("meal_plan_generations").insert(insert_payload).execute()
+            if inserted.data:
+                generation_id = inserted.data[0]["id"]
+        except Exception as e:
+            print(f"⚠️ Failed to insert meal_plan_generation: {e}")
+
         menu_fetch_time = getattr(menu_data, 'fetch_time', 0)
         ai_generation_time = ai_end_time - ai_start_time
         total_time = time.time() - ai_start_time
@@ -1605,6 +1637,8 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
             "bmr_tdee": {"bmr": user_bmr, "tdee": user_tdee},
             "available_items": menu_data.get("items", []),
             "meal_plan": meal_plan,
+            "generation_id": generation_id,
+            "ask_feedback": "Did you like this meal plan?",
             "processing_info": {
                 "menu_fetch_time_seconds": round(menu_fetch_time, 2),
                 "ai_generation_time_seconds": round(ai_generation_time, 2),
@@ -1616,7 +1650,6 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 "ai_model": "openai/gpt-oss-20b",
                 "authenticated": authenticated_user is not None,
                 "raw_ai_response_length": len(ai_response_raw),
-                # New: echo dietary preference if set
                 "dietary_preference": user.dietary_preference,
             },
         }
@@ -1624,6 +1657,28 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")
+async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depends(get_current_user)):
+    try:
+        # Validate UUID format
+        gen_id = payload.generation_id
+        try:
+            _ = UUID(gen_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid generation_id")
+        # Ensure record belongs to user
+        existing = supabase.table("meal_plan_generations").select("id, user_id, liked").eq("id", gen_id).eq("user_id", current_user["id"]).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        update_data = {"liked": payload.liked, "feedback_at": datetime.now().isoformat()}
+        updated = supabase.table("meal_plan_generations").update(update_data).eq("id", gen_id).execute()
+        return {"success": True, "generation_id": gen_id, "liked": payload.liked}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record feedback: {e}")
 
 
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
