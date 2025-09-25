@@ -18,7 +18,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import bcrypt
@@ -1309,6 +1309,102 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     }
 
 
+# ---- Server-side nutrition math to avoid model hallucinations ----
+
+def _to_number(val) -> Optional[float]:
+    """Best-effort convert to float. Accepts numbers or numeric strings like '141', '141 kcal'."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            return float(val)
+        except Exception:
+            return None
+    if isinstance(val, str):
+        s = val.strip()
+        # Extract the first numeric token (supports decimals, optional minus)
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        if m:
+            try:
+                return float(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+def _sum_items(items: List[dict]) -> Tuple[float, float]:
+    calories_sum = 0.0
+    protein_sum = 0.0
+    for it in items or []:
+        c = _to_number(it.get("calories"))
+        p = _to_number(it.get("protein_g"))
+        # Skip items where numbers are missing, mirroring the instruction to exclude nulls
+        if c is not None:
+            calories_sum += c
+        if p is not None:
+            protein_sum += p
+    return calories_sum, protein_sum
+
+
+def recompute_meal_plan_totals(meal_plan: dict) -> dict:
+    """Compute per-meal and total calories/protein from the AI-assembled items."""
+    meals = (meal_plan or {}).get("meals", {}) or {}
+    per_meal = {}
+    total_cals = 0.0
+    total_pro = 0.0
+    for meal_name in ("breakfast", "lunch", "dinner"):
+        section = meals.get(meal_name) or {}
+        items = section.get("items") or []
+        cals, prot = _sum_items(items)
+        per_meal[meal_name] = {
+            "calories": int(round(cals)),
+            "protein_g": int(round(prot)),
+        }
+        total_cals += cals
+        total_pro += prot
+    return {
+        "totals": {"calories": int(round(total_cals)), "protein_g": int(round(total_pro))},
+        "per_meal": per_meal,
+    }
+
+
+def build_user_stats_obj(bmr: float, tdee: float, goal: str, dietary: Optional[str]) -> dict:
+    return {
+        "bmr": float(bmr),
+        "tdee": float(tdee),
+        "goal": str(goal),
+        "dietary_preference": (dietary if dietary in ("vegan", "vegetarian") else None),
+    }
+
+
+def patch_meal_plan_numbers(meal_plan: dict, user_bmr: float, user_tdee: float, user_goal: str, dietary: Optional[str], targets: dict) -> dict:
+    """Override model-provided numbers with server-calculated values and add validation."""
+    recomputed = recompute_meal_plan_totals(meal_plan)
+    server_totals = recomputed["totals"]
+    server_goals = {
+        "calories": int(round(targets.get("calories") or 0)),
+        "protein_g": int(round(targets.get("protein_grams") or 0)),
+    }
+    # Update/override fields
+    meal_plan["user_stats"] = build_user_stats_obj(user_bmr, user_tdee, user_goal, dietary)
+    meal_plan["goals"] = server_goals
+    meal_plan["totals"] = server_totals
+    # Optional: attach per-meal computed sums for transparency (non-breaking addition)
+    meal_plan.setdefault("meta", {})
+    meal_plan["meta"]["per_meal_computed"] = recomputed.get("per_meal")
+    # Validation: within ±5% of calorie target
+    tgt = max(server_goals["calories"], 1)
+    delta = server_totals["calories"] - server_goals["calories"]
+    within = abs(delta) <= 0.05 * tgt
+    meal_plan["validation"] = {
+        "calorie_target": server_goals["calories"],
+        "actual_calories": server_totals["calories"],
+        "delta": delta,
+        "within_5_percent": within,
+    }
+    return meal_plan
+
+
 @app.put("/auth/profile", summary="Update User Profile")
 async def update_profile(profile_data: UpdateProfileRequest, current_user=Depends(get_current_user)):
     """Update user profile"""
@@ -1412,7 +1508,6 @@ Always output strictly in JSON format WITHOUT any markdown code blocks or additi
 Output Format:
 
 {
-  "date": "YYYY-MM-DD",
   "user_stats": {
     "bmr": <float>,
     "tdee": <float>,
@@ -1442,7 +1537,7 @@ Output Format:
     "lunch": { ... },
     "dinner": { ... }
   },
-  "explanation": "Brief explanation of how the plan meets nutritional targets based on BMR/TDEE"
+  "explanation": "Brief explanation of how the plan meets nutritional targets based on BMR/TDEE wihtout saying the amount of calories and protein. Just explain how this meal plan makes sense for users goal."
 }
 
 Additional Rules:
@@ -1484,6 +1579,22 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 return {"error": "Failed to parse AI response as JSON", "raw_response": content}
 
         meal_plan = extract_json_from_response(ai_response_raw)
+        # NEW: deterministically recompute numbers and override model outputs
+        try:
+            meal_plan = patch_meal_plan_numbers(
+                meal_plan if isinstance(meal_plan, dict) else {},
+                user_bmr,
+                user_tdee,
+                user.goal,
+                user.dietary_preference,
+                meal_plan_context["nutritional_targets"],
+            )
+        except Exception as _e:
+            # Non-fatal; attach error for debugging
+            if isinstance(meal_plan, dict):
+                meal_plan.setdefault("meta", {})
+                meal_plan["meta"]["server_totals_error"] = str(_e)
+
         menu_fetch_time = getattr(menu_data, 'fetch_time', 0)
         ai_generation_time = ai_end_time - ai_start_time
         total_time = time.time() - ai_start_time
