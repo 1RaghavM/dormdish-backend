@@ -1782,8 +1782,20 @@ def _stripe_version():
 # Debug flag for verbose billing diagnostics
 DEBUG_BILLING = os.getenv("DEBUG_BILLING", "0") in ("1", "true", "True")
 
-# Stripe configuration
-STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+def _get_stripe_api_key() -> Optional[str]:
+    """Return first present Stripe secret key from supported env var names."""
+    for k in [
+        "STRIPE_API_KEY",
+        "STRIPE_SECRET_KEY",
+        "STRIPE_SECRET",
+        "STRIPE_KEY",
+    ]:
+        val = os.getenv(k)
+        if val and val.strip():
+            return val.strip()
+    return None
+
+STRIPE_API_KEY = _get_stripe_api_key()
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  # Default subscription price (recurring)
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dormdish.com")  # Production site base URL
@@ -1804,6 +1816,8 @@ if STRIPE_API_KEY and stripe:
                     )
             except Exception:
                 pass
+        if not STRIPE_PRICE_ID:
+            logging.warning("STRIPE_PRICE_ID not configured; checkout will fail until set.")
     except Exception:
         pass
 
@@ -1816,6 +1830,7 @@ async def billing_debug():
         "api_key_prefix": STRIPE_API_KEY[:7] + '...' if STRIPE_API_KEY else None,
         "api_key_valid_format": bool(STRIPE_API_KEY and STRIPE_API_KEY.startswith('sk_')),
         "debug_flag": DEBUG_BILLING,
+        "price_id_set": bool(STRIPE_PRICE_ID),
     }
 
 class CheckoutSessionRequest(BaseModel):
@@ -1871,6 +1886,16 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
         price_id = payload.price_id or STRIPE_PRICE_ID
         if not price_id:
             raise HTTPException(status_code=400, detail="No price specified")
+
+        # Prevent creating multiple active subscriptions for same customer
+        try:
+            existing = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
+            if existing and existing.get('data'):
+                raise HTTPException(status_code=400, detail="Active subscription already exists")
+        except HTTPException:
+            raise
+        except Exception as sub_list_err:
+            logging.warning(f"Could not check existing subscriptions: {sub_list_err}")
 
         mode = "subscription"
         session_params = {
