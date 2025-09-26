@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Header
+from fastapi import FastAPI, HTTPException, Depends, status, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr
 from openai import OpenAI
 import requests
@@ -1678,7 +1678,7 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to record feedback: {e}")
+        raise HTTPException(status_code=500, detail="Failed to record feedback: {e}")
 
 
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
@@ -1754,6 +1754,255 @@ async def cache_status():
         return {"total_cached_menus": len(cached_menus), "cached_menus": cached_menus}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get cache status: {str(e)}")
+
+import logging
+try:
+    import stripe  # type: ignore
+except Exception:
+    stripe = None  # type: ignore
+
+# Helper: robust stripe version extraction (supports stripe>=12 where __version__ removed)
+def _stripe_version():
+    if not stripe:
+        return None
+    for attr in ('__version__', 'VERSION'):
+        v = getattr(stripe, attr, None)
+        if isinstance(v, str):
+            return v
+    # Fallback: internal module
+    try:
+        from stripe import _version  # type: ignore
+        v = getattr(_version, 'VERSION', None)
+        if isinstance(v, str):
+            return v
+    except Exception:
+        pass
+    return None
+
+# Debug flag for verbose billing diagnostics
+DEBUG_BILLING = os.getenv("DEBUG_BILLING", "0") in ("1", "true", "True")
+
+# Stripe configuration
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  # Default subscription price (recurring)
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dormdish.com")  # Production site base URL
+if STRIPE_API_KEY and stripe:
+    stripe.api_key = STRIPE_API_KEY
+    try:
+        ver = _stripe_version() or 'unknown'
+        logging.info(
+            f"Stripe initialized version={ver} key_prefix={STRIPE_API_KEY[:7] if STRIPE_API_KEY else 'None'}"
+        )
+        # Only enforce minimum if we can parse version
+        if ver and ver[0].isdigit():
+            try:
+                major = int(ver.split('.')[0])
+                if major < 10:
+                    logging.warning(
+                        "Stripe library major version <10 (" + ver + "). Please upgrade (pip install 'stripe>=10,<13')."
+                    )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+@app.get("/billing/debug")
+async def billing_debug():
+    return {
+        "stripe_imported": stripe is not None,
+        "stripe_version": _stripe_version(),
+        "api_key_set": bool(STRIPE_API_KEY),
+        "api_key_prefix": STRIPE_API_KEY[:7] + '...' if STRIPE_API_KEY else None,
+        "api_key_valid_format": bool(STRIPE_API_KEY and STRIPE_API_KEY.startswith('sk_')),
+        "debug_flag": DEBUG_BILLING,
+    }
+
+class CheckoutSessionRequest(BaseModel):
+    price_id: Optional[str] = None  # Allow overriding default price
+    trial: Optional[bool] = None
+
+stripe_ready = bool(stripe and STRIPE_API_KEY)
+
+def _require_stripe():
+    if stripe is None:
+        raise HTTPException(status_code=503, detail="Stripe library not installed (pip install stripe)")
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=503, detail="STRIPE_API_KEY missing in environment")
+    ver = _stripe_version()
+    # Only block if version is known and clearly too old
+    if ver and ver[0].isdigit():
+        try:
+            major = int(ver.split('.')[0])
+            if major < 10:
+                raise HTTPException(status_code=503, detail=f"Outdated stripe package ({ver}). Upgrade to >=10.15.0")
+        except Exception:
+            pass
+
+@app.get("/billing/health")
+async def billing_health():
+    return {
+        "stripe_imported": stripe is not None,
+        "api_key_configured": bool(STRIPE_API_KEY),
+        "price_id_configured": bool(STRIPE_PRICE_ID),
+        "webhook_secret_configured": bool(STRIPE_WEBHOOK_SECRET),
+        "ready": stripe_ready,
+    }
+
+@app.post("/billing/create-checkout-session")
+async def create_checkout_session(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
+    _require_stripe()
+    try:
+        user_id = current_user.get("id")
+        email = current_user.get("email")
+        # Ensure we have (or create) a Stripe Customer and store id on user row
+        stripe_customer_id = current_user.get("stripe_customer_id")
+        if not stripe_customer_id:
+            customer = stripe.Customer.create(
+                email=email,
+                metadata={"user_id": user_id}
+            )
+            stripe_customer_id = customer.id
+            try:
+                supabase.table("users").update({"stripe_customer_id": stripe_customer_id}).eq("id", user_id).execute()
+            except Exception as e:
+                logging.warning(f"Could not persist stripe_customer_id: {e}")
+
+        price_id = payload.price_id or STRIPE_PRICE_ID
+        if not price_id:
+            raise HTTPException(status_code=400, detail="No price specified")
+
+        mode = "subscription"
+        session_params = {
+            "mode": mode,
+            "customer": stripe_customer_id,
+            "line_items": [
+                {"price": price_id, "quantity": 1}
+            ],
+            "success_url": f"{FRONTEND_URL}/dashboard?upgrade=success",
+            "cancel_url": f"{FRONTEND_URL}/pricing?upgrade=cancel",
+            "metadata": {"user_id": user_id},
+            "subscription_data": {
+                "metadata": {"user_id": user_id}
+            }
+        }
+        if payload.trial:
+            # Optionally apply trial period if requested (ensure Price allows trials)
+            session_params["subscription_data"]["trial_period_days"] = 14
+
+        checkout_session = stripe.checkout.Session.create(**session_params)
+        return {"url": checkout_session.url, "id": checkout_session.id}
+    except Exception as e:  # Catch all to expose diagnostics when DEBUG_BILLING enabled
+        err_type = type(e).__name__
+        logging.error(f"Create checkout session failed ({err_type}): {e}")
+        if DEBUG_BILLING:
+            return JSONResponse(status_code=500, content={
+                "error": "checkout_session_failed",
+                "error_type": err_type,
+                "message": str(e),
+                "stripe_version": _stripe_version(),
+            })
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+# Legacy alias (older frontend path support)
+@app.post("/create-checkout-session")
+async def legacy_create_checkout(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
+    return await create_checkout_session(payload, current_user)  # type: ignore
+
+@app.post("/billing/create-portal-session")
+async def create_billing_portal(current_user=Depends(get_current_user)):
+    _require_stripe()
+    try:
+        stripe_customer_id = current_user.get("stripe_customer_id")
+        if not stripe_customer_id:
+            raise HTTPException(status_code=400, detail="No Stripe customer for user")
+        portal = stripe.billing_portal.Session.create(
+            customer=stripe_customer_id,
+            return_url=f"{FRONTEND_URL}/dashboard"
+        )
+        return {"url": portal.url}
+    except Exception as e:
+        logging.error(f"Portal session error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create portal session")
+
+# Legacy alias for portal
+@app.post("/create-portal-session")
+async def legacy_portal(current_user=Depends(get_current_user)):
+    return await create_billing_portal(current_user)  # type: ignore
+
+@app.post("/webhooks/stripe", response_class=PlainTextResponse)
+async def stripe_webhook(request: Request):
+    if not (stripe and STRIPE_API_KEY):
+        return PlainTextResponse("stripe disabled", status_code=200)
+
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature")
+    event = None
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(
+                payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
+            )
+        else:
+            event = stripe.Event.construct_from(json.loads(payload.decode("utf-8")), stripe.api_key)
+    except Exception as e:
+        logging.error(f"Webhook signature/parse error: {e}")
+        return PlainTextResponse("invalid payload", status_code=400)
+
+    etype = event.get("type")
+    data_object = event.get("data", {}).get("object", {})
+
+    try:
+        if etype == "checkout.session.completed":
+            # Subscription created
+            subscription_id = data_object.get("subscription")
+            customer_id = data_object.get("customer")
+            if subscription_id and customer_id:
+                try:
+                    sub = stripe.Subscription.retrieve(subscription_id)
+                    user_id = (sub.get("metadata", {}) or {}).get("user_id") or (data_object.get("metadata", {}) or {}).get("user_id")
+                    current_period_end = sub.get("current_period_end")
+                    update_payload = {
+                        "stripe_customer_id": customer_id,
+                        "stripe_subscription_id": subscription_id,
+                        "subscription_status": sub.get("status"),
+                        "subscription_current_period_end": datetime.utcfromtimestamp(current_period_end).isoformat() if current_period_end else None,
+                    }
+                    if user_id:
+                        try:
+                            supabase.table("users").update(update_payload).eq("id", user_id).execute()
+                        except Exception as db_err:
+                            logging.warning(f"Failed to update user subscription columns (create them if missing): {db_err}")
+                except Exception as sub_err:
+                    logging.error(f"Failed to process subscription: {sub_err}")
+        elif etype in ("customer.subscription.updated", "customer.subscription.deleted"):
+            subscription_id = data_object.get("id")
+            customer_id = data_object.get("customer")
+            status_val = data_object.get("status")
+            user_id = (data_object.get("metadata", {}) or {}).get("user_id")
+            current_period_end = data_object.get("current_period_end")
+            update_payload = {
+                "subscription_status": status_val,
+                "subscription_current_period_end": datetime.utcfromtimestamp(current_period_end).isoformat() if current_period_end else None,
+            }
+            if user_id:
+                try:
+                    supabase.table("users").update(update_payload).eq("id", user_id).execute()
+                except Exception as db_err:
+                    logging.warning(f"Failed to update user subscription on lifecycle event: {db_err}")
+            else:
+                # Fallback: attempt to locate user by stored customer id
+                try:
+                    res = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
+                    if res.data:
+                        uid = res.data[0]["id"]
+                        supabase.table("users").update(update_payload).eq("id", uid).execute()
+                except Exception as db_err:
+                    logging.warning(f"Fallback update failed: {db_err}")
+    except Exception as e:
+        logging.error(f"Webhook handling error: {e}")
+
+    return PlainTextResponse("ok", status_code=200)
 
 if __name__ == '__main__':
     import uvicorn
