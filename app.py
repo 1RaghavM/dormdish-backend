@@ -789,6 +789,10 @@ def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_dat
             items_count = len(menu_data["items"])
         elif "menu" in menu_data and "items" in menu_data["menu"]:
             items_count = len(menu_data["menu"]["items"])
+        # NEW: skip caching completely empty FoodPro scrapes to avoid poisoning cache
+        if items_count == 0:
+            print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
+            return False
         print(f"🔍 Saving menu with {items_count} items to Supabase")
         print(f"🔍 Menu data keys: {list(menu_data.keys())}")
         stored_menu_data = menu_data.get("menu", menu_data)
@@ -866,8 +870,9 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             print(f"💾 Save to Supabase result: {save_result}")
             return menu_data
         except Exception as e:
-            print(f"❌ FoodPro fetch failed, falling back to Nutrislice if available: {e}")
-            # Fallback to Nutrislice path
+            # NEW: do NOT fall back to Nutrislice for these halls (must use FoodPro)
+            print(f"❌ FoodPro fetch failed (no fallback) for {hall_slug}: {e}")
+            return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
@@ -945,7 +950,17 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
         meal_sources: List[str] = []
         warnings: List[str] = []
 
-        for meal in ("breakfast", "lunch", "dinner"):
+        # NEW: include 'brunch' automatically; order tuned so brunch (weekends) captured even if breakfast/lunch empty
+        try:
+            weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
+        except Exception:
+            weekday = None
+        if weekday is not None and weekday >= 5:  # Saturday/Sunday
+            meals_sequence = ("brunch", "dinner", "breakfast", "lunch")
+        else:
+            meals_sequence = ("breakfast", "brunch", "lunch", "dinner")
+
+        for meal in meals_sequence:
             meal_url = _set_meal_in_url(base_url, meal)
             print(f"   ↳ Fetching meal '{meal}' with URL: {meal_url}")
             try:
@@ -1030,6 +1045,8 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     warnings: List[str] = attempt.get("warnings", [])
     if not unique_items:
         warnings.append("No items parsed from FoodPro")
+        # NEW: force failure upstream so caller does not wrongly fall back to another data source
+        raise RuntimeError("FoodPro returned zero items")
 
     meal_sources = attempt.get("meal_sources", [])
 
