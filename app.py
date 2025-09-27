@@ -27,6 +27,7 @@ from functools import lru_cache
 import base64
 from fastapi import Request
 from uuid import UUID
+import secrets as _secrets_for_google  # ensure we can generate placeholder passwords
 
 # New: import FoodPro scraping helpers
 try:
@@ -591,6 +592,41 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+# --- Google OAuth models & helpers ---
+class GoogleIdTokenRequest(BaseModel):
+    id_token: str
+
+class GoogleRegisterRequest(BaseModel):
+    id_token: str
+    username: str
+    email: EmailStr
+    age: int
+    height_feet: int
+    height_inches: int
+    weight_lbs: float
+    gender: str
+    activity_level: str
+    goal: str
+    university: str
+    dietary_preference: Optional[str] = None
+
+def _verify_google_id_token(id_token: str) -> Dict[str, any]:
+    """Verify Google ID token using Google's tokeninfo endpoint.
+    Returns token payload dict or raises HTTPException.
+    """
+    try:
+        resp = requests.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token}, timeout=8)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to verify Google token: {e}")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Google ID token")
+    data = resp.json()
+    aud_expected = os.getenv("GOOGLE_CLIENT_ID")
+    if aud_expected and data.get("aud") != aud_expected:
+        raise HTTPException(status_code=401, detail="Google token audience mismatch")
+    if data.get("email_verified") not in ("true", True):
+        raise HTTPException(status_code=401, detail="Google email not verified")
+    return data
 
 def get_bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization:
@@ -729,6 +765,96 @@ def auth_logout(authorization: Optional[str] = Header(None)):
     except Exception as e:
         print(f"⚠️ Logout cleanup failed: {e}")
     return {"success": True, "message": "Logged out"}
+
+@app.post('/auth/google/login')
+def auth_google_login(payload: GoogleIdTokenRequest):
+    token_data = _verify_google_id_token(payload.id_token)
+    email = token_data.get('email', '').lower()
+    given_name = token_data.get('given_name') or ''
+    family_name = token_data.get('family_name') or ''
+    if not email:
+        raise HTTPException(status_code=400, detail="Google token missing email")
+    # Look up user
+    res = supabase.table("users").select("*").eq("email", email).execute()
+    if not res.data:
+        # Not registered yet
+        return {
+            "success": True,
+            "message": "Google account not registered",
+            "needs_registration": True,
+            "email": email,
+            "given_name": given_name,
+            "family_name": family_name,
+        }
+    user_row = res.data[0]
+    # Create session
+    token = create_user_session(user_row.get("id"))
+    if not token:
+        raise HTTPException(status_code=500, detail="Failed to create session")
+    try:
+        supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
+    except Exception:
+        pass
+    return {
+        "success": True,
+        "message": "Login successful",
+        "user": user_row,
+        "session_token": token,
+    }
+
+@app.post('/auth/google/register')
+def auth_google_register(data: GoogleRegisterRequest):
+    # Verify token & email
+    token_data = _verify_google_id_token(data.id_token)
+    email = token_data.get('email', '').lower()
+    if email != str(data.email).lower():
+        raise HTTPException(status_code=400, detail="Email mismatch between Google token and registration data")
+    # Ensure not existing
+    existing = supabase.table("users").select("id").eq("email", email).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+    # Generate placeholder password (user authenticates via Google)
+    random_secret = _secrets_for_google.token_urlsafe(32)
+    pwd_hash = hash_password(random_secret)
+    metrics = calculate_bmr_tdee(
+        age=int(data.age),
+        height_feet=int(data.height_feet),
+        height_inches=int(data.height_inches),
+        weight_lbs=float(data.weight_lbs),
+        gender=data.gender,
+        activity_level=data.activity_level,
+    )
+    payload = {
+        "username": data.username,
+        "email": email,
+        "password_hash": pwd_hash,
+        "age": int(data.age),
+        "height_feet": int(data.height_feet),
+        "height_inches": int(data.height_inches),
+        "weight_lbs": float(data.weight_lbs),
+        "gender": data.gender,
+        "activity_level": data.activity_level,
+        "goal": data.goal,
+        "university": data.university,
+        "dietary_preference": (data.dietary_preference or None),
+        "bmr": metrics.get("bmr"),
+        "tdee": metrics.get("tdee"),
+        "created_at": datetime.now().isoformat(),
+    }
+    inserted = supabase.table("users").insert(payload).execute()
+    if not inserted.data:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    user_row = inserted.data[0]
+    token = create_user_session(user_row.get("id"))
+    if not token:
+        raise HTTPException(status_code=500, detail="Failed to create session")
+    user_row["session_token"] = token
+    return {
+        "success": True,
+        "message": "Registration successful",
+        "user": user_row,
+        "session_token": token,
+    }
 
 # ---------------------------
 # Dining halls, menus, and meal planning (from app real.py)
