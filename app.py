@@ -45,13 +45,18 @@ load_dotenv()
 
 app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
 
-# Enable CORS for all routes (needed for web frontend)
+# Refined CORS configuration: use explicit origins (env CORS_ORIGINS comma-separated) instead of wildcard when credentials enabled
+_raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
+_configured_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_allow_all = any(o in ("*", "*") for o in _configured_origins)
+# If '*' provided, disable credentials per spec; otherwise allow credentials
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend domain
-    allow_credentials=True,
+    allow_origins=["*"] if _allow_all else _configured_origins,
+    allow_credentials=not _allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Connect to OpenAI API (configurable for different providers)
@@ -804,57 +809,72 @@ def auth_google_login(payload: GoogleIdTokenRequest):
 
 @app.post('/auth/google/register')
 def auth_google_register(data: GoogleRegisterRequest):
-    # Verify token & email
-    token_data = _verify_google_id_token(data.id_token)
-    email = token_data.get('email', '').lower()
-    if email != str(data.email).lower():
-        raise HTTPException(status_code=400, detail="Email mismatch between Google token and registration data")
-    # Ensure not existing
-    existing = supabase.table("users").select("id").eq("email", email).execute()
-    if existing.data:
-        raise HTTPException(status_code=400, detail="An account with this email already exists")
-    # Generate placeholder password (user authenticates via Google)
-    random_secret = _secrets_for_google.token_urlsafe(32)
-    pwd_hash = hash_password(random_secret)
-    metrics = calculate_bmr_tdee(
-        age=int(data.age),
-        height_feet=int(data.height_feet),
-        height_inches=int(data.height_inches),
-        weight_lbs=float(data.weight_lbs),
-        gender=data.gender,
-        activity_level=data.activity_level,
-    )
-    payload = {
-        "username": data.username,
-        "email": email,
-        "password_hash": pwd_hash,
-        "age": int(data.age),
-        "height_feet": int(data.height_feet),
-        "height_inches": int(data.height_inches),
-        "weight_lbs": float(data.weight_lbs),
-        "gender": data.gender,
-        "activity_level": data.activity_level,
-        "goal": data.goal,
-        "university": data.university,
-        "dietary_preference": (data.dietary_preference or None),
-        "bmr": metrics.get("bmr"),
-        "tdee": metrics.get("tdee"),
-        "created_at": datetime.now().isoformat(),
-    }
-    inserted = supabase.table("users").insert(payload).execute()
-    if not inserted.data:
-        raise HTTPException(status_code=500, detail="Failed to create user")
-    user_row = inserted.data[0]
-    token = create_user_session(user_row.get("id"))
-    if not token:
-        raise HTTPException(status_code=500, detail="Failed to create session")
-    user_row["session_token"] = token
-    return {
-        "success": True,
-        "message": "Registration successful",
-        "user": user_row,
-        "session_token": token,
-    }
+    """Register a new user via Google ID token.
+    Enhanced with detailed logging and clearer error surfaces for frontend debugging.
+    """
+    try:
+        print("[google.register] start")
+        token_data = _verify_google_id_token(data.id_token)
+        print(f"[google.register] token aud={token_data.get('aud')} email={token_data.get('email')} sub={token_data.get('sub')}")
+        email = token_data.get('email', '').lower()
+        if email != str(data.email).lower():
+            raise HTTPException(status_code=400, detail="Email mismatch between Google token and registration data")
+        existing = supabase.table("users").select("id").eq("email", email).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail="An account with this email already exists")
+        random_secret = _secrets_for_google.token_urlsafe(32)
+        pwd_hash = hash_password(random_secret)
+        metrics = calculate_bmr_tdee(
+            age=int(data.age),
+            height_feet=int(data.height_feet),
+            height_inches=int(data.height_inches),
+            weight_lbs=float(data.weight_lbs),
+            gender=data.gender,
+            activity_level=data.activity_level,
+        )
+        payload = {
+            "username": data.username,
+            "email": email,
+            "password_hash": pwd_hash,
+            "age": int(data.age),
+            "height_feet": int(data.height_feet),
+            "height_inches": int(data.height_inches),
+            "weight_lbs": float(data.weight_lbs),
+            "gender": data.gender,
+            "activity_level": data.activity_level,
+            "goal": data.goal,
+            "university": data.university,
+            "dietary_preference": (data.dietary_preference or None),
+            "bmr": metrics.get("bmr"),
+            "tdee": metrics.get("tdee"),
+            "created_at": datetime.now().isoformat(),
+        }
+        print(f"[google.register] inserting user payload keys={list(payload.keys())}")
+        inserted = supabase.table("users").insert(payload).execute()
+        if getattr(inserted, 'error', None):
+            # Supabase-py sometimes returns .error
+            raise HTTPException(status_code=500, detail=f"Supabase insert error: {inserted.error}")
+        if not inserted.data:
+            raise HTTPException(status_code=500, detail="Failed to create user (no data returned)")
+        user_row = inserted.data[0]
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+        user_row["session_token"] = token
+        print(f"[google.register] success user_id={user_row.get('id')}")
+        return {
+            "success": True,
+            "message": "Registration successful",
+            "user": user_row,
+            "session_token": token,
+        }
+    except HTTPException as he:
+        print(f"[google.register] http_error status={he.status_code} detail={he.detail}")
+        raise
+    except Exception as e:
+        # Catch-all (network issues, unexpected)
+        print(f"[google.register] unhandled_error: {e}")
+        raise HTTPException(status_code=500, detail="Google registration failed")
 
 # ---------------------------
 # Dining halls, menus, and meal planning (from app real.py)
