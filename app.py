@@ -27,29 +27,29 @@ from functools import lru_cache
 import base64
 from fastapi import Request
 from uuid import UUID
-import secrets as _secrets_for_google  # ensure we can generate placeholder passwords
+import secrets as _secrets_for_google  
 
-# New: import FoodPro scraping helpers
+
 try:
     from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
 except Exception:
-    fp_build_menu_url = None  # type: ignore
-    fp_fetch = None  # type: ignore
-    fp_parse_menu = None  # type: ignore
+    fp_build_menu_url = None  
+    fp_fetch = None  
+    fp_parse_menu = None  
 
-# Add URL helpers for adjusting FoodPro params (mealName)
+
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-# Load environment variables from .env file
+
 load_dotenv()
 
 app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
 
-# Refined CORS configuration: use explicit origins (env CORS_ORIGINS comma-separated) instead of wildcard when credentials enabled
+
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
 _configured_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 _allow_all = any(o in ("*", "*") for o in _configured_origins)
-# If '*' provided, disable credentials per spec; otherwise allow credentials
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if _allow_all else _configured_origins,
@@ -59,21 +59,21 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Connect to OpenAI API (configurable for different providers)
-# Default to local model, but allow override via environment variables
+
+
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://10.75.176.49:1234/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "lm-studio")
 
 client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
-# Initialize Supabase client
-# You'll need to set these environment variables or replace with your actual values
+
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "your_supabase_url_here")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Authentication helper functions
+
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
     salt = bcrypt.gensalt()
@@ -106,7 +106,7 @@ def create_user_session(user_id: str, expires_hours: int = 24) -> str:
 def verify_session_token(token: str) -> Optional[dict]:
     """Verify a session token and return user data if valid"""
     try:
-        # Get session with user data
+        
         response = supabase.table("user_sessions")\
             .select("*, users(*)")\
             .eq("session_token", token)\
@@ -115,7 +115,7 @@ def verify_session_token(token: str) -> Optional[dict]:
         
         if response.data and len(response.data) > 0:
             session = response.data[0]
-            # Update last login
+            
             supabase.table("users")\
                 .update({"last_login": datetime.now().isoformat()})\
                 .eq("id", session["user_id"])\
@@ -129,20 +129,20 @@ def verify_session_token(token: str) -> Optional[dict]:
 def calculate_bmr_tdee(age: int, height_feet: int, height_inches: int, weight_lbs: float, 
                       gender: str, activity_level: str) -> Dict[str, float]:
     """Calculate BMR and TDEE based on user stats"""
-    # Convert to metric
+    
     height_cm = ((height_feet * 12) + height_inches) * 2.54
     weight_kg = weight_lbs * 0.453592
     
-    # Mifflin-St Jeor Equation
+    
     if gender.lower() == 'male':
         bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) + 5
     elif gender.lower() == 'female':
         bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) - 161
     else:
-        # Default to male formula
+        
         bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) + 5
     
-    # Activity multipliers
+    
     activity_multipliers = {
         'sedentary': 1.2,
         'lightly_active': 1.375,
@@ -167,10 +167,10 @@ class User:
     height_feet: int
     height_inches: int
     weight_lbs: int
-    activity_level: str  # "sedentary", "active", "very_active"
-    goal: str  # "bulk", "cut", "maintain"
+    activity_level: str  
+    goal: str  
     preferred_dining_hall: str
-    # New: optional dietary preference
+    
     dietary_preference: Optional[str] = None
     
     @property
@@ -184,9 +184,9 @@ class User:
         """Convert weight to kilograms"""
         return self.weight_lbs * 0.453592
 
-# ---------------------------
-# Brevo (Sendinblue) helpers
-# ---------------------------
+
+
+
 class SubscribeRequest(BaseModel):
     email: EmailStr
     firstName: Optional[str] = None
@@ -208,7 +208,7 @@ def _brevo_headers() -> Dict[str, str]:
     }
 
 
-# New: simple Brevo health helpers
+
 def _brevo_get_account() -> Dict:
     try:
         r = requests.get(f"{_brevo_base_url()}/account", headers=_brevo_headers(), timeout=10)
@@ -227,7 +227,7 @@ def _brevo_get_template(template_id: int) -> Dict:
 
 def _guess_name_from_email(email: str) -> Dict[str, str]:
     local = email.split("@")[0]
-    # split by common delimiters
+    
     parts = re.split(r"[._-]+", local)
     parts = [p for p in parts if p]
     if not parts:
@@ -250,7 +250,7 @@ def upsert_brevo_contact(
     }
     if attributes:
         payload["attributes"] = attributes
-    # If a single list id provided via env, use it by default
+    
     env_list_id = os.getenv("BREVO_LIST_ID")
     resolved_list_ids: List[int] = []
     if env_list_id:
@@ -263,11 +263,11 @@ def upsert_brevo_contact(
             if isinstance(lid, int):
                 resolved_list_ids.append(lid)
     if resolved_list_ids:
-        payload["listIds"] = list(dict.fromkeys(resolved_list_ids))  # dedupe, preserve order
+        payload["listIds"] = list(dict.fromkeys(resolved_list_ids))  
 
     try:
         resp = requests.post(url, headers=_brevo_headers(), data=json.dumps(payload), timeout=12)
-        # 201 created or 200 updated
+        
         if resp.status_code not in (200, 201):
             raise HTTPException(status_code=502, detail=f"Brevo contact upsert failed: {resp.text}")
         return resp.json()
@@ -299,7 +299,7 @@ def send_brevo_template(
     if not (from_email and template_id):
         raise HTTPException(status_code=500, detail="Brevo env vars missing (FROM_EMAIL, TEMPLATE_ID)")
 
-    # Ensure contact exists (optionally add to default list)
+    
     if not first_name or not last_name:
         guess = _guess_name_from_email(email)
         first_name = first_name or guess["first"]
@@ -336,7 +336,7 @@ def send_brevo_template(
 @app.post('/subscribe', summary='Subscribe to newsletter and send welcome email')
 def subscribe(req: SubscribeRequest):
     try:
-        # Upsert contact and send template email
+        
         fn = (req.firstName or "").strip()
         ln = (req.lastName or "").strip()
         res = send_brevo_template(req.email.strip().lower(), first_name=fn or None, last_name=ln or None)
@@ -348,7 +348,7 @@ def subscribe(req: SubscribeRequest):
         raise HTTPException(status_code=500, detail="Subscription failed")
 
 
-# New: Brevo health endpoints (non-breaking additions)
+
 @app.get('/health/brevo', summary='Brevo configuration and template health check')
 def brevo_health():
     try:
@@ -392,9 +392,9 @@ def email_test(email: EmailStr):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Test email failed: {e}")
 
-# ---------------------------
-# Universities list endpoint
-# ---------------------------
+
+
+
 UNIVERSITIES_CSV_PATH = os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv') if os.path.exists(os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv')) else os.path.join(os.getcwd(), 'us-colleges-and-universities.csv')
 
 @lru_cache(maxsize=1)
@@ -406,14 +406,14 @@ def load_universities_list() -> List[str]:
             print(f"⚠️ Universities CSV not found at {path}")
             return universities
         with open(path, 'r', encoding='utf-8') as f:
-            # Detect delimiter (supports ';', ',', '|', tabs)
+            
             sample = f.read(2048)
             f.seek(0)
             try:
                 dialect = csv.Sniffer().sniff(sample, delimiters=',;|\t')
                 delim = dialect.delimiter
             except Exception:
-                # Heuristic fallback
+                
                 first_line = sample.splitlines()[0] if sample else ''
                 delim = ';' if ';' in first_line else ("\t" if '\t' in first_line else ',')
 
@@ -430,14 +430,14 @@ def load_universities_list() -> List[str]:
                     if val:
                         universities.append(val)
             else:
-                # Fallback: try simple CSV without reliable headers
+                
                 f.seek(0)
                 reader2 = csv.reader(f, delimiter=delim)
                 first_row = True
                 for row in reader2:
                     if first_row:
                         first_row = False
-                        # Skip header row if it contains a 'name' column
+                        
                         if any((col or '').strip().lower() == 'name' for col in row):
                             continue
                     if row:
@@ -446,7 +446,7 @@ def load_universities_list() -> List[str]:
                             universities.append(name)
     except Exception as e:
         print(f"⚠️ Failed to load universities CSV: {e}")
-    # Deduplicate while preserving order
+    
     seen = set()
     deduped: List[str] = []
     for u in universities:
@@ -459,9 +459,9 @@ def load_universities_list() -> List[str]:
 def get_universities():
     return {"universities": load_universities_list()}
 
-# ---------------------------
-# Waitlist endpoints
-# ---------------------------
+
+
+
 class WaitlistJoinRequest(BaseModel):
     firstName: str
     lastName: str
@@ -469,14 +469,14 @@ class WaitlistJoinRequest(BaseModel):
     university: str
     graduationYear: Optional[str] = None
     notifications: Optional[bool] = True
-    # New: Turnstile captcha token (optional in dev if server secret not set)
+    
     captchaToken: Optional[str] = None
 
 
 def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None) -> bool:
     """Verify Cloudflare Turnstile token. If TURNSTILE_SECRET_KEY is not set, skip verification (dev mode)."""
     secret = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
-    # Dev bypass if no secret configured
+    
     if not secret:
         print("[Turnstile] No TURNSTILE_SECRET_KEY configured; skipping captcha verification (dev mode)")
         return True
@@ -515,8 +515,8 @@ def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None)
 @app.post('/waitlist/join')
 def join_waitlist(data: WaitlistJoinRequest, request: Request):
     try:
-        # Verify captcha (skipped in dev if no TURNSTILE_SECRET_KEY)
-        # Extract client IP from headers or connection
+        
+        
         client_ip = (
             request.headers.get('CF-Connecting-IP')
             or (request.headers.get('X-Forwarded-For', '').split(',')[0].strip() if request.headers.get('X-Forwarded-For') else None)
@@ -524,7 +524,7 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
         )
         verify_turnstile_token(data.captchaToken, client_ip)
 
-        # Upsert by email (only one per email)
+        
         payload = {
             "first_name": data.firstName.strip(),
             "last_name": data.lastName.strip(),
@@ -536,7 +536,7 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
         }
         supabase.table('waitlist_users').upsert(payload, on_conflict='email').execute()
 
-        # Push to Brevo if notifications allowed
+        
         brevo_status = None
         if bool(data.notifications):
             try:
@@ -550,7 +550,7 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
                     data.email.strip().lower(),
                     attributes=attributes,
                 )
-                # Try sending a confirmation/welcome email
+                
                 try:
                     send_brevo_template(
                         data.email.strip().lower(),
@@ -565,7 +565,7 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
             except HTTPException as e:
                 print(f"⚠️ Brevo sync failed: {e.detail}")
 
-        # Count people on the same university waitlist
+        
         count_resp = supabase.table('waitlist_users').select('id', count='exact').eq('university', data.university.strip()).execute()
         uni_count = getattr(count_resp, 'count', None)
         return {"success": True, "message": "Successfully joined waitlist", "university_count": uni_count or 0, "brevo_status": brevo_status}
@@ -573,9 +573,9 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
         print(f"⚠️ Waitlist join failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to join waitlist")
 
-# ---------------------------
-# Auth endpoints
-# ---------------------------
+
+
+
 authorization_header_prefix = "Bearer "
 
 class RegisterRequest(BaseModel):
@@ -590,14 +590,14 @@ class RegisterRequest(BaseModel):
     activity_level: str
     goal: str
     university: str
-    # New: optional dietary preference
+    
     dietary_preference: Optional[str] = None
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
-# --- Google OAuth models & helpers ---
+
 class GoogleIdTokenRequest(BaseModel):
     id_token: str
 
@@ -654,15 +654,15 @@ def get_current_user(authorization: Optional[str] = Header(None)):
 @app.post('/auth/register')
 def auth_register(data: RegisterRequest):
     try:
-        # Check for existing user
+        
         existing = supabase.table("users").select("id").eq("email", str(data.email).lower()).execute()
         if existing.data and len(existing.data) > 0:
             raise HTTPException(status_code=400, detail="An account with this email already exists")
 
-        # Hash password
+        
         pwd_hash = hash_password(data.password)
 
-        # Calculate BMR/TDEE
+        
         metrics = calculate_bmr_tdee(
             age=int(data.age),
             height_feet=int(data.height_feet),
@@ -684,7 +684,7 @@ def auth_register(data: RegisterRequest):
             "activity_level": data.activity_level,
             "goal": data.goal,
             "university": data.university,
-            # New: store dietary preference (nullable)
+            
             "dietary_preference": (data.dietary_preference or None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
@@ -696,14 +696,14 @@ def auth_register(data: RegisterRequest):
             raise HTTPException(status_code=500, detail="Failed to create user")
         user_row = inserted.data[0]
 
-        # Create session
+        
         token = create_user_session(user_row.get("id"))
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
 
-        # Return response format expected by frontend
-        # Match types in src/services/api.ts: { success, message, user, session_token }
-        user_row["session_token"] = token  # not persisted, for response convenience
+        
+        
+        user_row["session_token"] = token  
         return {
             "success": True,
             "message": "Registration successful",
@@ -720,23 +720,23 @@ def auth_register(data: RegisterRequest):
 @app.post('/auth/login')
 def auth_login(data: LoginRequest):
     try:
-        # Fetch user by email
+        
         res = supabase.table("users").select("*").eq("email", str(data.email).lower()).execute()
         if not res.data:
             raise HTTPException(status_code=401, detail="Invalid email or password")
         user_row = res.data[0]
 
-        # Verify password
+        
         hashed = user_row.get("password_hash")
         if not hashed or not verify_password(data.password, hashed):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        # Create session
+        
         token = create_user_session(user_row.get("id"))
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
 
-        # Update last_login is handled in verify_session_token during profile fetch, but set here too for immediacy
+        
         try:
             supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
         except Exception:
@@ -779,10 +779,10 @@ def auth_google_login(payload: GoogleIdTokenRequest):
     family_name = token_data.get('family_name') or ''
     if not email:
         raise HTTPException(status_code=400, detail="Google token missing email")
-    # Look up user
+    
     res = supabase.table("users").select("*").eq("email", email).execute()
     if not res.data:
-        # Not registered yet
+        
         return {
             "success": True,
             "message": "Google account not registered",
@@ -792,7 +792,7 @@ def auth_google_login(payload: GoogleIdTokenRequest):
             "family_name": family_name,
         }
     user_row = res.data[0]
-    # Create session
+    
     token = create_user_session(user_row.get("id"))
     if not token:
         raise HTTPException(status_code=500, detail="Failed to create session")
@@ -852,7 +852,7 @@ def auth_google_register(data: GoogleRegisterRequest):
         print(f"[google.register] inserting user payload keys={list(payload.keys())}")
         inserted = supabase.table("users").insert(payload).execute()
         if getattr(inserted, 'error', None):
-            # Supabase-py sometimes returns .error
+            
             raise HTTPException(status_code=500, detail=f"Supabase insert error: {inserted.error}")
         if not inserted.data:
             raise HTTPException(status_code=500, detail="Failed to create user (no data returned)")
@@ -872,13 +872,13 @@ def auth_google_register(data: GoogleRegisterRequest):
         print(f"[google.register] http_error status={he.status_code} detail={he.detail}")
         raise
     except Exception as e:
-        # Catch-all (network issues, unexpected)
+        
         print(f"[google.register] unhandled_error: {e}")
         raise HTTPException(status_code=500, detail="Google registration failed")
 
-# ---------------------------
-# Dining halls, menus, and meal planning (from app real.py)
-# ---------------------------
+
+
+
 class UpdateProfileRequest(BaseModel):
     age: Optional[int] = None
     height_feet: Optional[int] = None
@@ -888,7 +888,7 @@ class UpdateProfileRequest(BaseModel):
     activity_level: Optional[str] = None
     goal: Optional[str] = None
     university: Optional[str] = None
-    # New: optional dietary preference
+    
     dietary_preference: Optional[str] = None
 
 class MealPlanRequest(BaseModel):
@@ -935,7 +935,7 @@ def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_dat
             items_count = len(menu_data["items"])
         elif "menu" in menu_data and "items" in menu_data["menu"]:
             items_count = len(menu_data["menu"]["items"])
-        # NEW: skip caching completely empty FoodPro scrapes to avoid poisoning cache
+        
         if items_count == 0:
             print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
             return False
@@ -965,7 +965,7 @@ def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_dat
 def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice"""
     dining_hall_mapping = {
-        # Hopkins halls
+        
         "hopkins-cafe": ("hopkins", "hopkins-cafe"),
         "hopkins cafe": ("hopkins", "hopkins-cafe"),
         "hopkins": ("hopkins", "hopkins-cafe"),
@@ -974,7 +974,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "nolan": ("hopkins", "nolans-on-33rd"),
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
-        # Rutgers halls
+        
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
@@ -994,7 +994,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook-douglass": ("rutgers", "neilson-dining-hall"),
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
-        # New: The Atrium (Rutgers Livingston)
+        
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
@@ -1007,7 +1007,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
-    # Route Rutgers halls to FoodPro when applicable
+    
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
@@ -1016,7 +1016,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             print(f"💾 Save to Supabase result: {save_result}")
             return menu_data
         except Exception as e:
-            # NEW: do NOT fall back to Nutrislice for these halls (must use FoodPro)
+            
             print(f"❌ FoodPro fetch failed (no fallback) for {hall_slug}: {e}")
             return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
@@ -1036,12 +1036,12 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     if not (fp_build_menu_url and fp_fetch and fp_parse_menu):
         raise RuntimeError("FoodPro scraper not available")
 
-    # Map hall slug to FoodPro location params
-    # Known/assumed mappings: Livingston=03, Neilson=04. Atrium best-effort mapping using location name.
+    
+    
     location_map = {
         "livingston-dining-commons": {"locationNum": "03", "locationName": "Livingston Dining Commons"},
         "neilson-dining-hall": {"locationNum": "04", "locationName": "Neilson Dining Hall"},
-        # Atrium is a retail at Livingston; try common FoodPro name
+        
         "the-atrium": {"locationNum": "07", "locationName": "The Atrium"},
     }
     params = location_map.get(hall_slug)
@@ -1049,7 +1049,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
         raise ValueError(f"Unsupported Rutgers FoodPro hall: {hall_slug}")
 
     def _set_meal_in_url(url: str, meal: str) -> str:
-        # FoodPro typically accepts mealName=Breakfast|Lunch|Dinner
+        
         try:
             u = urlparse(url)
             qs = parse_qs(u.query)
@@ -1090,18 +1090,18 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
         items.append(out_item)
 
     def _attempt_all_meals(location_num: str, location_name: str) -> dict:
-        base_url = fp_build_menu_url(date, location_num, location_name)  # type: ignore
+        base_url = fp_build_menu_url(date, location_num, location_name)  
         print(f"🔗 FoodPro base URL: {base_url}")
         all_items: List[dict] = []
         meal_sources: List[str] = []
         warnings: List[str] = []
 
-        # NEW: include 'brunch' automatically; order tuned so brunch (weekends) captured even if breakfast/lunch empty
+        
         try:
             weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
         except Exception:
             weekday = None
-        if weekday is not None and weekday >= 5:  # Saturday/Sunday
+        if weekday is not None and weekday >= 5:  
             meals_sequence = ("brunch", "dinner", "breakfast", "lunch")
         else:
             meals_sequence = ("breakfast", "brunch", "lunch", "dinner")
@@ -1110,27 +1110,27 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
             meal_url = _set_meal_in_url(base_url, meal)
             print(f"   ↳ Fetching meal '{meal}' with URL: {meal_url}")
             try:
-                soup = fp_fetch(meal_url)  # type: ignore
+                soup = fp_fetch(meal_url)  
             except Exception as e:
                 warnings.append(f"Failed to fetch {meal}: {e}")
                 continue
             try:
-                parsed = fp_parse_menu(str(soup), meal_type=meal, date=date, base_url=meal_url)  # type: ignore
+                parsed = fp_parse_menu(str(soup), meal_type=meal, date=date, base_url=meal_url)  
             except Exception as e:
                 warnings.append(f"Failed to parse {meal}: {e}")
                 continue
 
-            # Collect items from either old or new schema
+            
             items: List[dict] = []
             if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
-                # Old shape
+                
                 for it in parsed.get("items", []):
                     if not isinstance(it, dict):
                         continue
                     name = it.get("name")
                     if not name:
                         continue
-                    # Fixed type annotation syntax
+                    
                     out_item: Dict[str, object] = {"name": name}
                     if it.get("protein_g") is not None:
                         out_item["protein_g"] = it.get("protein_g")
@@ -1140,7 +1140,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
                         out_item["serving_size"] = it.get("serving_size")
                     items.append(out_item)
             else:
-                # New meals_trimmed-style
+                
                 if isinstance(parsed, dict):
                     meal_map = parsed.get(meal) or {}
                     blocks = meal_map.get(date) or [] if isinstance(meal_map, dict) else []
@@ -1161,13 +1161,13 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
 
         return {"items": all_items, "meal_sources": meal_sources, "warnings": warnings, "url": base_url}
 
-    attempt = _attempt_all_meals(params["locationNum"], params["locationName"])  # type: ignore
+    attempt = _attempt_all_meals(params["locationNum"], params["locationName"])  
 
-    # If Atrium returned no items across all meals, try alternative naming variants
+    
     if hall_slug == "the-atrium" and not attempt["items"]:
         for alt_name in [
-            "Atrium",  # shorter variant
-            "The Atrium at Livingston",  # descriptive variant
+            "Atrium",  
+            "The Atrium at Livingston",  
             "The Atrium at Livingston Campus",
         ]:
             try:
@@ -1178,7 +1178,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
             except Exception as e:
                 print(f"⚠️ Retry failed for Atrium alt name '{alt_name}': {e}")
 
-    # Deduplicate by name to mirror Nutrislice behavior
+    
     all_items = attempt["items"]
     seen = set()
     unique_items: List[dict] = []
@@ -1191,7 +1191,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     warnings: List[str] = attempt.get("warnings", [])
     if not unique_items:
         warnings.append("No items parsed from FoodPro")
-        # NEW: force failure upstream so caller does not wrongly fall back to another data source
+        
         raise RuntimeError("FoodPro returned zero items")
 
     meal_sources = attempt.get("meal_sources", [])
@@ -1349,16 +1349,16 @@ def process_menu_item(item: dict) -> Optional[dict]:
     result: Dict[str, object] = {"name": name}
     if nutrition.get("protein_g") is not None:
         try:
-            result["protein_g"] = float(nutrition["protein_g"])  # type: ignore
+            result["protein_g"] = float(nutrition["protein_g"])  
         except (ValueError, TypeError):
             pass
     if nutrition.get("calories") is not None:
         try:
-            result["calories"] = float(nutrition["calories"])  # type: ignore
+            result["calories"] = float(nutrition["calories"])  
         except (ValueError, TypeError):
             pass
     if nutrition.get("serving_size"):
-        result["serving_size"] = str(nutrition["serving_size"])  # type: ignore
+        result["serving_size"] = str(nutrition["serving_size"])  
     return result
 
 
@@ -1478,7 +1478,7 @@ def generate_meal_plan_with_bmr(user: User, menu_data: dict, bmr: float, tdee: f
     }
 
 
-# ---- Server-side nutrition math to avoid model hallucinations ----
+
 
 def _to_number(val) -> Optional[float]:
     """Best-effort convert to float. Accepts numbers or numeric strings like '141', '141 kcal'."""
@@ -1491,7 +1491,7 @@ def _to_number(val) -> Optional[float]:
             return None
     if isinstance(val, str):
         s = val.strip()
-        # Extract the first numeric token (supports decimals, optional minus)
+        
         m = re.search(r"-?\d+(?:\.\d+)?", s)
         if m:
             try:
@@ -1507,7 +1507,7 @@ def _sum_items(items: List[dict]) -> Tuple[float, float]:
     for it in items or []:
         c = _to_number(it.get("calories"))
         p = _to_number(it.get("protein_g"))
-        # Skip items where numbers are missing, mirroring the instruction to exclude nulls
+        
         if c is not None:
             calories_sum += c
         if p is not None:
@@ -1554,14 +1554,14 @@ def patch_meal_plan_numbers(meal_plan: dict, user_bmr: float, user_tdee: float, 
         "calories": int(round(targets.get("calories") or 0)),
         "protein_g": int(round(targets.get("protein_grams") or 0)),
     }
-    # Update/override fields
+    
     meal_plan["user_stats"] = build_user_stats_obj(user_bmr, user_tdee, user_goal, dietary)
     meal_plan["goals"] = server_goals
     meal_plan["totals"] = server_totals
-    # Optional: attach per-meal computed sums for transparency (non-breaking addition)
+    
     meal_plan.setdefault("meta", {})
     meal_plan["meta"]["per_meal_computed"] = recomputed.get("per_meal")
-    # Validation: within ±5% of calorie target
+    
     tgt = max(server_goals["calories"], 1)
     delta = server_totals["calories"] - server_goals["calories"]
     within = abs(delta) <= 0.05 * tgt
@@ -1587,12 +1587,12 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                     raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan' or 'vegetarian'")
                 update_data[field] = value
         if any(field in update_data for field in ['age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level']):
-            current_age = update_data.get('age', current_user['age'])  # type: ignore
-            current_height_feet = update_data.get('height_feet', current_user['height_feet'])  # type: ignore
-            current_height_inches = update_data.get('height_inches', current_user['height_inches'])  # type: ignore
-            current_weight = update_data.get('weight_lbs', current_user['weight_lbs'])  # type: ignore
-            current_gender = update_data.get('gender', current_user['gender'])  # type: ignore
-            current_activity = update_data.get('activity_level', current_user['activity_level'])  # type: ignore
+            current_age = update_data.get('age', current_user['age'])  
+            current_height_feet = update_data.get('height_feet', current_user['height_feet'])  
+            current_height_inches = update_data.get('height_inches', current_user['height_inches'])  
+            current_weight = update_data.get('weight_lbs', current_user['weight_lbs'])  
+            current_gender = update_data.get('gender', current_user['gender'])  
+            current_activity = update_data.get('activity_level', current_user['activity_level'])  
             bmr_data = calculate_bmr_tdee(
                 int(current_age), int(current_height_feet), int(current_height_inches), float(current_weight), str(current_gender), str(current_activity)
             )
@@ -1723,7 +1723,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
             ],
             temperature=0.7,
         )
-        # Capture prompts for storage
+        
         system_prompt = "You are an AI meal planner. Your role is to generate complete daily meal plans using the provided dataset of foods. (truncated)"
         user_prompt = meal_plan_context["ai_prompt"]
         ai_end_time = time.time()
@@ -1751,7 +1751,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 return {"error": "Failed to parse AI response as JSON", "raw_response": content}
 
         meal_plan = extract_json_from_response(ai_response_raw)
-        # NEW: deterministically recompute numbers and override model outputs
+        
         try:
             meal_plan = patch_meal_plan_numbers(
                 meal_plan if isinstance(meal_plan, dict) else {},
@@ -1762,12 +1762,12 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 meal_plan_context["nutritional_targets"],
             )
         except Exception as _e:
-            # Non-fatal; attach error for debugging
+            
             if isinstance(meal_plan, dict):
                 meal_plan.setdefault("meta", {})
                 meal_plan["meta"]["server_totals_error"] = str(_e)
 
-        # Store generation in meal_plan_generations
+        
         generation_id = None
         try:
             insert_payload = {
@@ -1782,7 +1782,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 ]),
                 "model_raw_response": ai_response_raw,
                 "meal_plan": meal_plan,
-                # Removed calories/protein_g columns (not in table). Totals remain inside meal_plan JSON.
+                
             }
             inserted = supabase.table("meal_plan_generations").insert(insert_payload).execute()
             if inserted.data:
@@ -1825,13 +1825,13 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
 @app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")
 async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depends(get_current_user)):
     try:
-        # Validate UUID format
+        
         gen_id = payload.generation_id
         try:
             _ = UUID(gen_id)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid generation_id")
-        # Ensure record belongs to user
+        
         existing = supabase.table("meal_plan_generations").select("id, user_id, liked").eq("id", gen_id).eq("user_id", current_user["id"]).execute()
         if not existing.data:
             raise HTTPException(status_code=404, detail="Generation not found")
@@ -1920,11 +1920,11 @@ async def cache_status():
 
 import logging
 try:
-    import stripe  # type: ignore
+    import stripe  
 except Exception:
-    stripe = None  # type: ignore
+    stripe = None  
 
-# Helper: robust stripe version extraction (supports stripe>=12 where __version__ removed)
+
 def _stripe_version():
     if not stripe:
         return None
@@ -1932,9 +1932,9 @@ def _stripe_version():
         v = getattr(stripe, attr, None)
         if isinstance(v, str):
             return v
-    # Fallback: internal module
+    
     try:
-        from stripe import _version  # type: ignore
+        from stripe import _version  
         v = getattr(_version, 'VERSION', None)
         if isinstance(v, str):
             return v
@@ -1942,7 +1942,7 @@ def _stripe_version():
         pass
     return None
 
-# Debug flag for verbose billing diagnostics
+
 DEBUG_BILLING = os.getenv("DEBUG_BILLING", "0") in ("1", "true", "True")
 
 def _get_stripe_api_key() -> Optional[str]:
@@ -1959,9 +1959,9 @@ def _get_stripe_api_key() -> Optional[str]:
     return None
 
 STRIPE_API_KEY = _get_stripe_api_key()
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  # Default subscription price (recurring)
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dormdish.com")  # Production site base URL
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dormdish.com")  
 if STRIPE_API_KEY and stripe:
     stripe.api_key = STRIPE_API_KEY
     try:
@@ -1969,7 +1969,7 @@ if STRIPE_API_KEY and stripe:
         logging.info(
             f"Stripe initialized version={ver} key_prefix={STRIPE_API_KEY[:7] if STRIPE_API_KEY else 'None'}"
         )
-        # Only enforce minimum if we can parse version
+        
         if ver and ver[0].isdigit():
             try:
                 major = int(ver.split('.')[0])
@@ -1997,7 +1997,7 @@ async def billing_debug():
     }
 
 class CheckoutSessionRequest(BaseModel):
-    price_id: Optional[str] = None  # Allow overriding default price
+    price_id: Optional[str] = None  
     trial: Optional[bool] = None
 
 stripe_ready = bool(stripe and STRIPE_API_KEY)
@@ -2008,7 +2008,7 @@ def _require_stripe():
     if not STRIPE_API_KEY:
         raise HTTPException(status_code=503, detail="STRIPE_API_KEY missing in environment")
     ver = _stripe_version()
-    # Only block if version is known and clearly too old
+    
     if ver and ver[0].isdigit():
         try:
             major = int(ver.split('.')[0])
@@ -2033,7 +2033,7 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
     try:
         user_id = current_user.get("id")
         email = current_user.get("email")
-        # Ensure we have (or create) a Stripe Customer and store id on user row
+        
         stripe_customer_id = current_user.get("stripe_customer_id")
         if not stripe_customer_id:
             customer = stripe.Customer.create(
@@ -2050,7 +2050,7 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
         if not price_id:
             raise HTTPException(status_code=400, detail="No price specified")
 
-        # Prevent creating multiple active subscriptions for same customer
+        
         try:
             existing = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
             if existing and existing.get('data'):
@@ -2075,12 +2075,12 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
             }
         }
         if payload.trial:
-            # Optionally apply trial period if requested (ensure Price allows trials)
+            
             session_params["subscription_data"]["trial_period_days"] = 14
 
         checkout_session = stripe.checkout.Session.create(**session_params)
         return {"url": checkout_session.url, "id": checkout_session.id}
-    except Exception as e:  # Catch all to expose diagnostics when DEBUG_BILLING enabled
+    except Exception as e:  
         err_type = type(e).__name__
         logging.error(f"Create checkout session failed ({err_type}): {e}")
         if DEBUG_BILLING:
@@ -2092,10 +2092,10 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
             })
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
 
-# Legacy alias (older frontend path support)
+
 @app.post("/create-checkout-session")
 async def legacy_create_checkout(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
-    return await create_checkout_session(payload, current_user)  # type: ignore
+    return await create_checkout_session(payload, current_user)  
 
 @app.post("/billing/create-portal-session")
 async def create_billing_portal(current_user=Depends(get_current_user)):
@@ -2113,10 +2113,10 @@ async def create_billing_portal(current_user=Depends(get_current_user)):
         logging.error(f"Portal session error: {e}")
         raise HTTPException(status_code=500, detail="Failed to create portal session")
 
-# Legacy alias for portal
+
 @app.post("/create-portal-session")
 async def legacy_portal(current_user=Depends(get_current_user)):
-    return await create_billing_portal(current_user)  # type: ignore
+    return await create_billing_portal(current_user)  
 
 @app.post("/webhooks/stripe", response_class=PlainTextResponse)
 async def stripe_webhook(request: Request):
@@ -2142,7 +2142,7 @@ async def stripe_webhook(request: Request):
 
     try:
         if etype == "checkout.session.completed":
-            # Subscription created
+            
             subscription_id = data_object.get("subscription")
             customer_id = data_object.get("customer")
             if subscription_id and customer_id:
@@ -2179,7 +2179,7 @@ async def stripe_webhook(request: Request):
                 except Exception as db_err:
                     logging.warning(f"Failed to update user subscription on lifecycle event: {db_err}")
             else:
-                # Fallback: attempt to locate user by stored customer id
+                
                 try:
                     res = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
                     if res.data:
