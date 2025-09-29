@@ -1679,7 +1679,7 @@ Prioritize protein targets first, then balance calories.
 Avoid repeating the exact same dish within a single day. Variety is preferred.
 
 Respect dietary constraints when provided: if the user is vegan or vegetarian, only select items compliant with that diet.
-
+YOU SHOULD NOT GIVE DRINK RECOMMENDATIONS.
 Always output strictly in JSON format WITHOUT any markdown code blocks or additional text.
 
 Output Format:
