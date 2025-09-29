@@ -49,10 +49,18 @@ app = FastAPI(title="DormDish API", description="Meal planning API for college s
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
 _configured_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 _allow_all = any(o in ("*", "*") for o in _configured_origins)
+# NEW: optional regex to allow dynamic preview domains
+_cors_regex = os.getenv("CORS_ORIGIN_REGEX", r"https://([a-z0-9-]+\.)?(dormdish\.ai|vercel\.app)") if not _allow_all else None
+
+print("[CORS] raw=", repr(_raw_origins))
+print("[CORS] list=", _configured_origins)
+print("[CORS] allow_all=", _allow_all)
+print("[CORS] regex=", _cors_regex)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if _allow_all else _configured_origins,
+    allow_origin_regex=_cors_regex if (not _allow_all and _cors_regex) else None,
     allow_credentials=not _allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
