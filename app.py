@@ -69,8 +69,8 @@ app.add_middleware(
 
 
 
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://10.75.176.49:1234/v1")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "lm-studio")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
@@ -1651,7 +1651,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         meal_plan_context = generate_meal_plan_with_bmr(user, menu_data, user_bmr, user_tdee)
         ai_start_time = time.time()
         response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": """You are an AI meal planner. Your role is to generate complete daily meal plans using the provided dataset of foods.
 

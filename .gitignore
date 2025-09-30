@@ -317,6 +317,9 @@ settings.local.py
 
 # Documentation build
 docs/build/
+evaluation_results_20250930_165100.json
+monitor_evaluation.sh
+evaluate_meal_plans_comparison.py
 
 supabase_setup.md
 supabase_auth_schema.sql
@@ -328,3 +331,4 @@ meals_trimmed.json
 meals_trimmed copy.json
 extract.py
 
+evaluate_meal_plans.py
