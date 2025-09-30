@@ -1020,6 +1020,10 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
             menu_data = fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
+            # Validate before saving to cache
+            if not menu_data.get("items") or len(menu_data.get("items", [])) == 0:
+                print(f"⚠️ FoodPro returned menu with no items, not caching")
+                return {"error": f"No menu items available for {hall_slug} on {date}"}
             save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
             return menu_data
@@ -1030,6 +1034,10 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
+        # Validate before saving to cache
+        if not menu_data.get("items") or len(menu_data.get("items", [])) == 0:
+            print(f"⚠️ Nutrislice returned menu with no items, not caching")
+            return {"error": f"No menu items available for {hall_slug} on {date}"}
         save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
         return menu_data
@@ -1267,6 +1275,15 @@ def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, dat
         if item_name and item_name not in seen_items:
             seen_items.add(item_name)
             unique_items.append(item)
+    
+    # Log if we got no items
+    if not unique_items:
+        print(f"⚠️ WARNING: fetch_nutrislice_menu returned ZERO items for {university}/{hall_slug} on {date}")
+        print(f"⚠️ Warnings: {warnings}")
+        print(f"⚠️ Meal sources attempted: {meal_slugs}")
+    else:
+        print(f"✅ fetch_nutrislice_menu got {len(unique_items)} unique items")
+    
     return {
         "university": university,
         "hall": dining_hall,
@@ -1648,6 +1665,16 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if "error" in menu_data and menu_data["error"] is not None:
             raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {menu_data['error']}")
+        
+        # CRITICAL: Validate that menu has items before proceeding
+        menu_items = menu_data.get("items", [])
+        if not menu_items or len(menu_items) == 0:
+            raise HTTPException(
+                status_code=503, 
+                detail=f"No menu items available for {meal_plan_request.dining_hall} on {meal_plan_request.date}. The dining hall may be closed or menu data is unavailable. Please try a different date or dining hall."
+            )
+        
+        print(f"✅ Menu has {len(menu_items)} items available for meal planning")
         meal_plan_context = generate_meal_plan_with_bmr(user, menu_data, user_bmr, user_tdee)
         ai_start_time = time.time()
         response = client.chat.completions.create(
@@ -1759,6 +1786,47 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
                 return {"error": "Failed to parse AI response as JSON", "raw_response": content}
 
         meal_plan = extract_json_from_response(ai_response_raw)
+        
+        # CRITICAL: Validate meal plan structure
+        if not isinstance(meal_plan, dict):
+            print(f"❌ AI response is not a dict: {type(meal_plan)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate meal plan: AI returned invalid format"
+            )
+        
+        if "error" in meal_plan:
+            print(f"❌ AI response parsing failed: {meal_plan.get('error')}")
+            print(f"Raw AI response: {ai_response_raw[:500]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate meal plan: {meal_plan.get('error', 'Unknown parsing error')}"
+            )
+        
+        # Validate that meals exist
+        meals = meal_plan.get("meals", {})
+        if not meals or not isinstance(meals, dict) or len(meals) == 0:
+            print(f"❌ AI response has no meals: {meal_plan}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate meal plan: AI did not return any meals. Please try again."
+            )
+        
+        # Check that at least one meal has items
+        has_valid_meal = False
+        for meal_name, meal_data in meals.items():
+            if isinstance(meal_data, dict) and meal_data.get("items"):
+                has_valid_meal = True
+                break
+        
+        if not has_valid_meal:
+            print(f"❌ AI response has no valid meal items: {meals}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate meal plan: AI did not return valid meal items. Please try again."
+            )
+        
+        print(f"✅ Valid meal plan generated with {len(meals)} meals")
         
         try:
             meal_plan = patch_meal_plan_numbers(
