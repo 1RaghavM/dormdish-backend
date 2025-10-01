@@ -250,6 +250,9 @@ jspm_packages/
 # nuxt.js build output
 .nuxt
 
+evaluate_prompt_model.py
+
+
 # vuepress build output
 .vuepress/dist
 
