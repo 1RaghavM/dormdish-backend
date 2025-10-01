@@ -255,6 +255,7 @@ jspm_packages/
 
 # Serverless directories
 .serverless/
+test-meal-plan-fixes.sh
 
 # FuseBox cache
 .fusebox/
