@@ -1660,6 +1660,34 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             )
             user_bmr = float(authenticated_user['bmr'])
             user_tdee = float(authenticated_user['tdee'])
+
+            # DAILY GENERATION LIMIT ENFORCEMENT (max 3 per user per UTC day)
+            try:
+                generation_limit = 3
+                now_utc = datetime.utcnow()
+                start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
+                end_of_day = start_of_day + timedelta(days=1)
+                start_iso = start_of_day.isoformat()
+                end_iso = end_of_day.isoformat()
+                # Count existing generations created today for this user
+                count_resp = supabase.table("meal_plan_generations") \
+                    .select("id", count="exact") \
+                    .eq("user_id", authenticated_user["id"]) \
+                    .gte("created_at", start_iso) \
+                    .lt("created_at", end_iso) \
+                    .execute()
+                existing_count = getattr(count_resp, 'count', None)
+                if existing_count is None:
+                    existing_count = len(count_resp.data or [])
+                if existing_count >= generation_limit:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"⚠️ Failed to enforce generation limit: {e}")
         else:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not yet supported in FastAPI version.")
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
