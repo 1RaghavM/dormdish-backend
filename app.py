@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Header, Body
+from fastapi import FastAPI, HTTPException, Depends, status, Header, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr
@@ -1640,7 +1640,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
 
 
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
-async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None)):
+async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated or guest)"""
     try:
         authenticated_user = None
@@ -1897,6 +1897,27 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting, no code blocks, 
         menu_fetch_time = getattr(menu_data, 'fetch_time', 0)
         ai_generation_time = ai_end_time - ai_start_time
         total_time = time.time() - ai_start_time
+        try:
+            # Hook: schedule Brevo notification if authenticated user present
+            if 'authenticated_user' in locals() and authenticated_user and authenticated_user.get('email'):
+                if background_tasks is not None:
+                    background_tasks.add_task(
+                        send_meal_plan_generation_email,
+                        authenticated_user,
+                        generation_id,
+                        meal_plan_request.dining_hall,
+                        meal_plan_request.date,
+                    )
+                else:
+                    # Fallback synchronous send (should be rare)
+                    send_meal_plan_generation_email(
+                        authenticated_user,
+                        generation_id,
+                        meal_plan_request.dining_hall,
+                        meal_plan_request.date,
+                    )
+        except Exception as _e_mail:
+            print(f"[brevo] scheduling meal plan email failed: {_e_mail}")
         return {
             "success": True,
             "user_profile": meal_plan_context["user_profile"],
@@ -2295,6 +2316,64 @@ async def stripe_webhook(request: Request):
         logging.error(f"Webhook handling error: {e}")
 
     return PlainTextResponse("ok", status_code=200)
+
+BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()  # Template for meal plan generation notification
+
+def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str):
+    """Send Brevo email notifying user their meal plan was generated.
+    Uses BREVO_MEAL_PLAN_TEMPLATE_ID. Silently returns if misconfigured.
+    """
+    try:
+        if not user_row or not user_row.get("email"):
+            return
+        if not BREVO_MEAL_PLAN_TEMPLATE_ID:
+            return
+        try:
+            template_id = int(re.match(r"(\d+)", BREVO_MEAL_PLAN_TEMPLATE_ID).group(1))  # type: ignore
+        except Exception:
+            print("[brevo] Invalid BREVO_MEAL_PLAN_TEMPLATE_ID value; skipping meal plan email")
+            return
+        # Ensure contact exists (best effort)
+        try:
+            guess = _guess_name_from_email(user_row["email"]) if user_row.get("email") else {"first": "", "last": ""}
+            upsert_brevo_contact(
+                user_row["email"],
+                attributes={
+                    "FIRSTNAME": (user_row.get("username") or guess.get("first") or ""),
+                    "LASTNAME": guess.get("last") or "",
+                },
+            )
+        except Exception as e:
+            print(f"[brevo] contact upsert failed (continuing): {e}")
+        # Build payload similar to send_brevo_template but with dynamic params
+        from_email = os.getenv("BREVO_FROM_EMAIL")
+        from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
+        if not from_email:
+            print("[brevo] BREVO_FROM_EMAIL not set; skipping meal plan email")
+            return
+        params = {
+            "USERNAME": user_row.get("username") or guess.get("first") or "",
+            "GENERATION_ID": generation_id or "",
+            "DINING_HALL": dining_hall,
+            "DATE": date,
+        }
+        body = {
+            "templateId": template_id,
+            "to": [{"email": user_row["email"], "name": user_row.get("username") or guess.get("first") or None}],
+            "sender": {"email": from_email, "name": from_name},
+            "params": params,
+            "tags": ["meal_plan_generated"],
+        }
+        try:
+            r = requests.post(f"{_brevo_base_url()}/smtp/email", headers=_brevo_headers(), data=json.dumps(body), timeout=12)
+            if r.status_code not in (200, 201):
+                print(f"[brevo] meal plan email send failed status={r.status_code} body={r.text[:200]}")
+            else:
+                print(f"[brevo] meal plan email sent generation_id={generation_id}")
+        except Exception as e:
+            print(f"[brevo] meal plan email error: {e}")
+    except Exception as outer:
+        print(f"[brevo] unexpected meal plan email error: {outer}")
 
 if __name__ == '__main__':
     import uvicorn
