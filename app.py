@@ -1587,12 +1587,6 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         # Prepare menu names for model
         model_menu_listing = "\n".join(sorted(n for n in [v['name'] for v in lookup.values()]))
 
-        # Updated system prompt per user specification (kept same core) + explicit instruction about exact item names
-        #system_prompt = """You are an AI meal planner. Your role is to generate complete daily meal plans using only the provided dataset of foods.\n\nCore Meal Plan Rules:\n\nAlways return three meals: breakfast, lunch, and dinner.\n\nMeals must be structured combinations, not standalone components.\n\nExample: \"Scrambled eggs with toast and fruit\" is acceptable.\n\nA lone item like “bun” or “slice of cheese” is not acceptable.\n\nYou may combine multiple menu items into realistic dishes (sandwiches, cereal with milk, pasta with sauce, etc.).\n\nUse only menu items from the dataset. Never invent foods. Each item you list inside a meal's items[] array MUST have a name that exactly (case-insensitive) matches one of the allowed item names provided. Do NOT create composite names; list each component separately as its own item entry.\n\nNo drinks should be recommended.\n\nNutrition Targets:\n\nBase calorie goals on the user’s BMR and TDEE:\n\nBulk: TDEE + 300–500 calories\n\nCut: TDEE – 300–500 calories\n\nMaintain: TDEE\n\nFinal daily totals must be within ±5% of the calculated calorie goal.\n\nProtein goals must be prioritized first, then calories balanced.\n\nYou may increase serving sizes beyond the dataset default to meet macros. Always include a numeric 'servings' field for every item (default 1.0 if unsure).\n\nExclude foods with null calories or protein values.\n\nDiet Types:\n\nRespect dietary constraints when specified (vegan, vegetarian).\n\nIf constraints prevent exact macro matching, still return a valid plan using only compliant items.\n\nMeal plan must always be produced regardless of dietary limitations.\n\nMeal Plan Quality:\n\nProvide varied meals within the same day (no repeats).\n\nMeals should feel natural, student-friendly, and realistic (not random item pairings).\n\nPlans should read like real meals from a dining hall menu.\n\nAllowed Menu Items (exact names):\n<<ITEM_LIST>>\n\nOutput Format:\n\nReturn only valid JSON, no markdown, no extra text. The format must exactly match:\n\n{\n  \"user_stats\": {\n    \"bmr\": <float>,\n    \"tdee\": <float>,\n    \"goal\": \"<cut|maintain|bulk>\",\n    \"dietary_preference\": \"<vegan|vegetarian|null>\"\n  },\n  \"goals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"totals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"meals\": {\n    \"breakfast\": {\n      \"description\": \"Scrambled eggs with toast, oatmeal, and blueberries\",\n      \"items\": [\n        {\n          \"name\": \"SCRAMBLED EGGS\",\n          \"calories\": 141,\n          \"protein_g\": 11,\n          \"serving_size\": \"4 oz\",\n          \"servings\": 1.0\n        }\n      ]\n    },\n    \"lunch\": { ... },\n    \"dinner\": { ... }\n  },\n  \"explanation\": \"Brief explanation of how the plan supports the user's goal based on BMR/TDEE, without citing exact numbers.\"\n}\n"""
-
-        # Inject item list into system prompt
-        #system_prompt = system_prompt.replace("<<ITEM_LIST>>", model_menu_listing)
-
         user_context = f"Goal: {user.goal}; Target Calories: {target_calories}; Target Protein: {target_protein}g; Dietary: {dietary or 'none'}; Menu Items:\n<<ITEM_LIST>>"
 
         user_context = user_context.replace("<<ITEM_LIST>>", model_menu_listing)
@@ -1606,17 +1600,71 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             temperature=0.6,
         )
         ai_raw = ai_resp.choices[0].message.content.strip()
-        try:
-            plan_raw = json.loads(ai_raw)
-        except Exception:
-            # attempt extract braces
-            m = re.search(r"\{.*\}", ai_raw, re.DOTALL)
-            if not m:
-                raise HTTPException(status_code=500, detail="AI returned non-JSON output")
+
+        # --- Robust JSON extraction / repair ---
+        def _robust_parse_ai_json(raw: str):
+            import json, re
+            original = raw
+            # 1. Strip markdown fences
+            raw = re.sub(r"^```(?:json|JSON)?", "", raw.strip())
+            raw = re.sub(r"```$", "", raw.strip())
+            raw = raw.strip()
+            # Quick direct parse
             try:
-                plan_raw = json.loads(m.group(0))
+                return json.loads(raw)
             except Exception:
-                raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
+                pass
+            # 2. If raw contains multiple lines with commentary, isolate largest balanced brace block
+            def _largest_brace_block(s: str):
+                best = None
+                stack = 0
+                start = None
+                for i,ch in enumerate(s):
+                    if ch == '{':
+                        if stack == 0:
+                            start = i
+                        stack += 1
+                    elif ch == '}':
+                        if stack > 0:
+                            stack -= 1
+                            if stack == 0 and start is not None:
+                                cand = s[start:i+1]
+                                if not best or len(cand) > len(best):
+                                    best = cand
+                return best
+            block = _largest_brace_block(raw)
+            if block:
+                try:
+                    return json.loads(block)
+                except Exception:
+                    raw = block  # continue attempts on block only
+            # 3. Light repairs: remove trailing commas, convert single quotes -> double (naive but constrained)
+            repaired = raw
+            # Remove trailing commas before } or ]
+            repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+            # Replace single-quoted keys/strings that are simple (no embedded quotes)
+            repaired = re.sub(r"'([^'\n\r]*)'", lambda m: '"'+m.group(1).replace('"','\\"')+'"', repaired)
+            # Ensure numeric tokens ok; attempt parse
+            try:
+                return json.loads(repaired)
+            except Exception:
+                pass
+            # 4. Last resort: wrap in braces if missing
+            if not repaired.strip().startswith('{') and '{' not in repaired:
+                repaired = '{' + repaired + '}'
+                try:
+                    return json.loads(repaired)
+                except Exception:
+                    pass
+            print("[AI JSON Parser] Failed to parse. Raw snippet (first 300 chars):", original[:300])
+            raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
+
+        try:
+            plan_raw = _robust_parse_ai_json(ai_raw)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
 
         # Validate skeleton
         if not isinstance(plan_raw, dict) or 'meals' not in plan_raw:
