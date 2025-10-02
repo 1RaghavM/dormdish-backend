@@ -71,7 +71,7 @@ app.add_middleware(
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MEAL_PLAN_MODEL = os.getenv("MEAL_PLAN_MODEL", "qwen/qwen3-4b-2507")
+MEAL_PLAN_MODEL = os.getenv("MEAL_PLAN_MODEL", "openai/gpt-oss-20b")
 
 client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
@@ -1452,28 +1452,28 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         user_tdee = float(authenticated_user['tdee'])
 
         #DAILY GENERATION LIMIT (max 3 per UTC day per user)
-        try:
-            generation_limit = 3
-            now_utc = datetime.utcnow()
-            start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
-            end_of_day = start_of_day + timedelta(days=1)
-            start_iso = start_of_day.isoformat()
-            end_iso = end_of_day.isoformat()
-            count_resp = supabase.table("meal_plan_generations") \
-                .select("id", count="exact") \
-                .eq("user_id", authenticated_user["id"]) \
-                .gte("created_at", start_iso) \
-                .lt("created_at", end_iso) \
-                .execute()
-            existing_count = getattr(count_resp, 'count', None)
-            if existing_count is None:
-                existing_count = len(count_resp.data or [])
-            if existing_count >= generation_limit:
-                raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
-        except HTTPException:
-            raise
-        except Exception as _limit_e:
-            print(f"⚠️ Generation limit check failed: {_limit_e}")
+        # try:
+        #     generation_limit = 3
+        #     now_utc = datetime.utcnow()
+        #     start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
+        #     end_of_day = start_of_day + timedelta(days=1)
+        #     start_iso = start_of_day.isoformat()
+        #     end_iso = end_of_day.isoformat()
+        #     count_resp = supabase.table("meal_plan_generations") \
+        #         .select("id", count="exact") \
+        #         .eq("user_id", authenticated_user["id"]) \
+        #         .gte("created_at", start_iso) \
+        #         .lt("created_at", end_iso) \
+        #         .execute()
+        #     existing_count = getattr(count_resp, 'count', None)
+        #     if existing_count is None:
+        #         existing_count = len(count_resp.data or [])
+        #     if existing_count >= generation_limit:
+        #         raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
+        # except HTTPException:
+        #     raise
+        # except Exception as _limit_e:
+        #     print(f"⚠️ Generation limit check failed: {_limit_e}")
 
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
@@ -1531,35 +1531,33 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         if not lookup:
             raise HTTPException(status_code=503, detail="Dietary filter removed all items. Cannot build plan.")
 
-        # Compute targets from user goal
+        # Compute targets from user goal (protein now fixed at 1.1x bodyweight per updated requirement)
         if user.goal == "bulk":
             target_calories = user_tdee + 400
-            protein_per_lb = 1.0
         elif user.goal == "cut":
             target_calories = user_tdee - 400
-            protein_per_lb = 1.2
         else:
             target_calories = user_tdee
-            protein_per_lb = 0.8
         target_calories = int(round(target_calories))
-        target_protein = int(round(user.weight_lbs * protein_per_lb))
+        target_protein = int(round(user.weight_lbs * 1.1))
 
         # Prepare menu names for model
         model_menu_listing = "\n".join(sorted(n for n in [v['name'] for v in lookup.values()]))
 
         # Updated system prompt per user specification (kept same core) + explicit instruction about exact item names
-        system_prompt = """You are an AI meal planner. Your role is to generate complete daily meal plans using only the provided dataset of foods.\n\nCore Meal Plan Rules:\n\nAlways return three meals: breakfast, lunch, and dinner.\n\nMeals must be structured combinations, not standalone components.\n\nExample: \"Scrambled eggs with toast and fruit\" is acceptable.\n\nA lone item like “bun” or “slice of cheese” is not acceptable.\n\nYou may combine multiple menu items into realistic dishes (sandwiches, cereal with milk, pasta with sauce, etc.).\n\nUse only menu items from the dataset. Never invent foods. Each item you list inside a meal's items[] array MUST have a name that exactly (case-insensitive) matches one of the allowed item names provided. Do NOT create composite names; list each component separately as its own item entry.\n\nNo drinks should be recommended.\n\nNutrition Targets:\n\nBase calorie goals on the user’s BMR and TDEE:\n\nBulk: TDEE + 300–500 calories\n\nCut: TDEE – 300–500 calories\n\nMaintain: TDEE\n\nFinal daily totals must be within ±5% of the calculated calorie goal.\n\nProtein goals must be prioritized first, then calories balanced.\n\nYou may increase serving sizes beyond the dataset default to meet macros. Always include a numeric 'servings' field for every item (default 1.0 if unsure).\n\nExclude foods with null calories or protein values.\n\nDiet Types:\n\nRespect dietary constraints when specified (vegan, vegetarian).\n\nIf constraints prevent exact macro matching, still return a valid plan using only compliant items.\n\nMeal plan must always be produced regardless of dietary limitations.\n\nMeal Plan Quality:\n\nProvide varied meals within the same day (no repeats).\n\nMeals should feel natural, student-friendly, and realistic (not random item pairings).\n\nPlans should read like real meals from a dining hall menu.\n\nAllowed Menu Items (exact names):\n<<ITEM_LIST>>\n\nOutput Format:\n\nReturn only valid JSON, no markdown, no extra text. The format must exactly match:\n\n{\n  \"user_stats\": {\n    \"bmr\": <float>,\n    \"tdee\": <float>,\n    \"goal\": \"<cut|maintain|bulk>\",\n    \"dietary_preference\": \"<vegan|vegetarian|null>\"\n  },\n  \"goals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"totals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"meals\": {\n    \"breakfast\": {\n      \"description\": \"Scrambled eggs with toast, oatmeal, and blueberries\",\n      \"items\": [\n        {\n          \"name\": \"SCRAMBLED EGGS\",\n          \"calories\": 141,\n          \"protein_g\": 11,\n          \"serving_size\": \"4 oz\",\n          \"servings\": 1.0\n        }\n      ]\n    },\n    \"lunch\": { ... },\n    \"dinner\": { ... }\n  },\n  \"explanation\": \"Brief explanation of how the plan supports the user's goal based on BMR/TDEE, without citing exact numbers.\"\n}\n"""
+        #system_prompt = """You are an AI meal planner. Your role is to generate complete daily meal plans using only the provided dataset of foods.\n\nCore Meal Plan Rules:\n\nAlways return three meals: breakfast, lunch, and dinner.\n\nMeals must be structured combinations, not standalone components.\n\nExample: \"Scrambled eggs with toast and fruit\" is acceptable.\n\nA lone item like “bun” or “slice of cheese” is not acceptable.\n\nYou may combine multiple menu items into realistic dishes (sandwiches, cereal with milk, pasta with sauce, etc.).\n\nUse only menu items from the dataset. Never invent foods. Each item you list inside a meal's items[] array MUST have a name that exactly (case-insensitive) matches one of the allowed item names provided. Do NOT create composite names; list each component separately as its own item entry.\n\nNo drinks should be recommended.\n\nNutrition Targets:\n\nBase calorie goals on the user’s BMR and TDEE:\n\nBulk: TDEE + 300–500 calories\n\nCut: TDEE – 300–500 calories\n\nMaintain: TDEE\n\nFinal daily totals must be within ±5% of the calculated calorie goal.\n\nProtein goals must be prioritized first, then calories balanced.\n\nYou may increase serving sizes beyond the dataset default to meet macros. Always include a numeric 'servings' field for every item (default 1.0 if unsure).\n\nExclude foods with null calories or protein values.\n\nDiet Types:\n\nRespect dietary constraints when specified (vegan, vegetarian).\n\nIf constraints prevent exact macro matching, still return a valid plan using only compliant items.\n\nMeal plan must always be produced regardless of dietary limitations.\n\nMeal Plan Quality:\n\nProvide varied meals within the same day (no repeats).\n\nMeals should feel natural, student-friendly, and realistic (not random item pairings).\n\nPlans should read like real meals from a dining hall menu.\n\nAllowed Menu Items (exact names):\n<<ITEM_LIST>>\n\nOutput Format:\n\nReturn only valid JSON, no markdown, no extra text. The format must exactly match:\n\n{\n  \"user_stats\": {\n    \"bmr\": <float>,\n    \"tdee\": <float>,\n    \"goal\": \"<cut|maintain|bulk>\",\n    \"dietary_preference\": \"<vegan|vegetarian|null>\"\n  },\n  \"goals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"totals\": {\n    \"calories\": <int>,\n    \"protein_g\": <int>\n  },\n  \"meals\": {\n    \"breakfast\": {\n      \"description\": \"Scrambled eggs with toast, oatmeal, and blueberries\",\n      \"items\": [\n        {\n          \"name\": \"SCRAMBLED EGGS\",\n          \"calories\": 141,\n          \"protein_g\": 11,\n          \"serving_size\": \"4 oz\",\n          \"servings\": 1.0\n        }\n      ]\n    },\n    \"lunch\": { ... },\n    \"dinner\": { ... }\n  },\n  \"explanation\": \"Brief explanation of how the plan supports the user's goal based on BMR/TDEE, without citing exact numbers.\"\n}\n"""
 
         # Inject item list into system prompt
-        system_prompt = system_prompt.replace("<<ITEM_LIST>>", model_menu_listing)
+        #system_prompt = system_prompt.replace("<<ITEM_LIST>>", model_menu_listing)
 
-        user_context = f"Goal: {user.goal}; Target Calories: {target_calories}; Target Protein: {target_protein}g; Dietary: {dietary or 'none'}"
+        user_context = f"Goal: {user.goal}; Target Calories: {target_calories}; Target Protein: {target_protein}g; Dietary: {dietary or 'none'}; Menu Items:\n<<ITEM_LIST>>"
 
+        user_context = user_context.replace("<<ITEM_LIST>>", model_menu_listing)
         ai_start = time.time()
         ai_resp = client.chat.completions.create(
             model=MEAL_PLAN_MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},
+                #{"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_context},
             ],
             temperature=0.6,
@@ -1618,7 +1616,13 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 })
             # If meal ends up empty, seed with top protein items not yet used
             if not items_out:
-                used_names = {it['name'].upper() for ml in unmatched_by_meal for it in []}
+                existing_meal_items = []
+                for _mn in ['breakfast','lunch','dinner']:
+                    if _mn in meals_block and isinstance(meals_block[_mn], dict):
+                        for _it in (meals_block[_mn].get('items') or []):
+                            if isinstance(_it, dict) and _it.get('name'):
+                                existing_meal_items.append({'name': _it.get('name')})
+                used_names = { (it.get('name') or '').upper() for it in existing_meal_items if it.get('name') }
                 # choose up to 2 highest protein density items
                 dens_sorted = sorted(lookup.values(), key=lambda v: (v['protein_g']/max(v['calories'],1)), reverse=True)
                 added = 0
