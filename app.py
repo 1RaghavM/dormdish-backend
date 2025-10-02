@@ -1452,28 +1452,28 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         user_tdee = float(authenticated_user['tdee'])
 
         #DAILY GENERATION LIMIT (max 3 per UTC day per user)
-        # try:
-        #     generation_limit = 3
-        #     now_utc = datetime.utcnow()
-        #     start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
-        #     end_of_day = start_of_day + timedelta(days=1)
-        #     start_iso = start_of_day.isoformat()
-        #     end_iso = end_of_day.isoformat()
-        #     count_resp = supabase.table("meal_plan_generations") \
-        #         .select("id", count="exact") \
-        #         .eq("user_id", authenticated_user["id"]) \
-        #         .gte("created_at", start_iso) \
-        #         .lt("created_at", end_iso) \
-        #         .execute()
-        #     existing_count = getattr(count_resp, 'count', None)
-        #     if existing_count is None:
-        #         existing_count = len(count_resp.data or [])
-        #     if existing_count >= generation_limit:
-        #         raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
-        # except HTTPException:
-        #     raise
-        # except Exception as _limit_e:
-        #     print(f"⚠️ Generation limit check failed: {_limit_e}")
+        try:
+            generation_limit = 3
+            now_utc = datetime.utcnow()
+            start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            start_iso = start_of_day.isoformat()
+            end_iso = end_of_day.isoformat()
+            count_resp = supabase.table("meal_plan_generations") \
+                .select("id", count="exact") \
+                .eq("user_id", authenticated_user["id"]) \
+                .gte("created_at", start_iso) \
+                .lt("created_at", end_iso) \
+                .execute()
+            existing_count = getattr(count_resp, 'count', None)
+            if existing_count is None:
+                existing_count = len(count_resp.data or [])
+            if existing_count >= generation_limit:
+                raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
+        except HTTPException:
+            raise
+        except Exception as _limit_e:
+            print(f"⚠️ Generation limit check failed: {_limit_e}")
 
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
@@ -1763,10 +1763,10 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 'user_id': authenticated_user.get('id'),
                 'date': meal_plan_request.date,
                 'dining_hall': meal_plan_request.dining_hall,
-                'system_prompt': system_prompt,
+                #'system_prompt': system_prompt,
                 'user_prompt': user_context,
                 'full_messages': json.dumps([
-                    {'role':'system','content':system_prompt},
+                    #{'role':'system','content':system_prompt},
                     {'role':'user','content':user_context}
                 ]),
                 'model_raw_response': ai_raw,
