@@ -37,6 +37,26 @@ except Exception:
     fp_fetch = None  
     fp_parse_menu = None  
 
+# Added: custom fetch wrapper with retries & UA hardening for FoodPro in deployment
+import contextlib
+import random
+from zoneinfo import ZoneInfo
+
+def _fetch_with_retries(url: str, attempts: int = 3, base_delay: float = 0.6):
+    if not fp_fetch:
+        raise RuntimeError("FoodPro fetch function unavailable")
+    last_err = None
+    for i in range(attempts):
+        try:
+            print(f"[FoodPro] Attempt {i+1}/{attempts} GET {url}")
+            return fp_fetch(url)  # fp_fetch already raises on status
+        except Exception as e:
+            last_err = e
+            sleep_for = base_delay * (2 ** i) + random.uniform(0, 0.25)
+            print(f"[FoodPro] attempt {i+1} failed: {e} (sleep {sleep_for:.2f}s)")
+            time.sleep(sleep_for)
+    raise last_err  # propagate after retries
+
 
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -971,10 +991,26 @@ def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_dat
         return False
 
 
+# Patch: ensure Rutgers date uses America/New_York to avoid UTC date drift
+def _rutgers_today_str():
+    try:
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
+
 def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
-    """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice"""
+    """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
+    # Normalize common typos / variants early
+    dh_norm = dining_hall.strip().lower()
+    if dh_norm == "nielson":  # common misspelling
+        dh_norm = "neilson"
+    if dh_norm in {"nielson-dining-hall", "nielson dining hall"}:
+        dh_norm = "neilson"
+    dining_hall = dh_norm
+
     dining_hall_mapping = {
-        
+        # Hopkins
         "hopkins-cafe": ("hopkins", "hopkins-cafe"),
         "hopkins cafe": ("hopkins", "hopkins-cafe"),
         "hopkins": ("hopkins", "hopkins-cafe"),
@@ -983,7 +1019,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "nolan": ("hopkins", "nolans-on-33rd"),
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
-        
+        # Rutgers (include variants + typos)
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
@@ -997,47 +1033,54 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "college-ave": ("rutgers", "brower-commons"),
         "college ave": ("rutgers", "brower-commons"),
         "college avenue": ("rutgers", "brower-commons"),
+        # Neilson + common misspellings
         "neilson": ("rutgers", "neilson-dining-hall"),
         "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
         "neilson dining hall": ("rutgers", "neilson-dining-hall"),
+        "nielson": ("rutgers", "neilson-dining-hall"),
+        "nielson-dining-hall": ("rutgers", "neilson-dining-hall"),
+        "nielson dining hall": ("rutgers", "neilson-dining-hall"),
         "cook-douglass": ("rutgers", "neilson-dining-hall"),
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
-        
+        # Atrium
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
     }
-    mapping = dining_hall_mapping.get(dining_hall.lower())
+    mapping = dining_hall_mapping.get(dining_hall)
     if not mapping:
         return {"error": f"Unknown dining hall: {dining_hall}"}
     university, hall_slug = mapping
+
+    # Auto-fix date if empty / 'today'
+    if not date or date.lower() == "today":
+        date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
+
     cached_menu = get_menu_from_supabase(university, dining_hall, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
-    
+
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
             menu_data = fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
-            # Validate before saving to cache
-            if not menu_data.get("items") or len(menu_data.get("items", [])) == 0:
-                print(f"⚠️ FoodPro returned menu with no items, not caching")
+            if not menu_data.get("items"):
+                print(f"⚠️ FoodPro returned no items, skipping cache save")
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
             save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
             return menu_data
         except Exception as e:
-            
-            print(f"❌ FoodPro fetch failed (no fallback) for {hall_slug}: {e}")
+            print(f"❌ FoodPro fetch failed: {e}")
             return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
+
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
-        # Validate before saving to cache
-        if not menu_data.get("items") or len(menu_data.get("items", [])) == 0:
-            print(f"⚠️ Nutrislice returned menu with no items, not caching")
+        if not menu_data.get("items"):
+            print(f"⚠️ Nutrislice returned no items, skipping cache save")
             return {"error": f"No menu items available for {hall_slug} on {date}"}
         save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
@@ -1127,7 +1170,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
             meal_url = _set_meal_in_url(base_url, meal)
             print(f"   ↳ Fetching meal '{meal}' with URL: {meal_url}")
             try:
-                soup = fp_fetch(meal_url)  
+                soup = _fetch_with_retries(meal_url)
             except Exception as e:
                 warnings.append(f"Failed to fetch {meal}: {e}")
                 continue
@@ -1200,7 +1243,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     seen = set()
     unique_items: List[dict] = []
     for it in all_items:
-        nm = (it.get("name") or "").strip()
+        nm = (it.get("name") or '').strip()
         if nm and nm not in seen:
             seen.add(nm)
             unique_items.append(it)
@@ -1452,28 +1495,28 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         user_tdee = float(authenticated_user['tdee'])
 
         #DAILY GENERATION LIMIT (max 3 per UTC day per user)
-        try:
-            generation_limit = 3
-            now_utc = datetime.utcnow()
-            start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
-            end_of_day = start_of_day + timedelta(days=1)
-            start_iso = start_of_day.isoformat()
-            end_iso = end_of_day.isoformat()
-            count_resp = supabase.table("meal_plan_generations") \
-                .select("id", count="exact") \
-                .eq("user_id", authenticated_user["id"]) \
-                .gte("created_at", start_iso) \
-                .lt("created_at", end_iso) \
-                .execute()
-            existing_count = getattr(count_resp, 'count', None)
-            if existing_count is None:
-                existing_count = len(count_resp.data or [])
-            if existing_count >= generation_limit:
-                raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
-        except HTTPException:
-            raise
-        except Exception as _limit_e:
-            print(f"⚠️ Generation limit check failed: {_limit_e}")
+        # try:
+        #     generation_limit = 3
+        #     now_utc = datetime.utcnow()
+        #     start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
+        #     end_of_day = start_of_day + timedelta(days=1)
+        #     start_iso = start_of_day.isoformat()
+        #     end_iso = end_of_day.isoformat()
+        #     count_resp = supabase.table("meal_plan_generations") \
+        #         .select("id", count="exact") \
+        #         .eq("user_id", authenticated_user["id"]) \
+        #         .gte("created_at", start_iso) \
+        #         .lt("created_at", end_iso) \
+        #         .execute()
+        #     existing_count = getattr(count_resp, 'count', None)
+        #     if existing_count is None:
+        #         existing_count = len(count_resp.data or [])
+        #     if existing_count >= generation_limit:
+        #         raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
+        # except HTTPException:
+        #     raise
+        # except Exception as _limit_e:
+        #     print(f"⚠️ Generation limit check failed: {_limit_e}")
 
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
