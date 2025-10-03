@@ -26,9 +26,10 @@ import csv
 from functools import lru_cache
 import base64
 from fastapi import Request
-from uuid import UUID
+from uuid import UUID, uuid4
 import secrets as _secrets_for_google  
-
+from difflib import get_close_matches
+import math
 
 try:
     from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
@@ -37,7 +38,7 @@ except Exception:
     fp_fetch = None  
     fp_parse_menu = None  
 
-# Added: custom fetch wrapper with retries & UA hardening for FoodPro in deployment
+
 import contextlib
 import random
 from zoneinfo import ZoneInfo
@@ -49,13 +50,13 @@ def _fetch_with_retries(url: str, attempts: int = 3, base_delay: float = 0.6):
     for i in range(attempts):
         try:
             print(f"[FoodPro] Attempt {i+1}/{attempts} GET {url}")
-            return fp_fetch(url)  # fp_fetch already raises on status
+            return fp_fetch(url)  
         except Exception as e:
             last_err = e
             sleep_for = base_delay * (2 ** i) + random.uniform(0, 0.25)
             print(f"[FoodPro] attempt {i+1} failed: {e} (sleep {sleep_for:.2f}s)")
             time.sleep(sleep_for)
-    raise last_err  # propagate after retries
+    raise last_err  
 
 
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -69,7 +70,7 @@ app = FastAPI(title="DormDish API", description="Meal planning API for college s
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
 _configured_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 _allow_all = any(o in ("*", "*") for o in _configured_origins)
-# NEW: optional regex to allow dynamic preview domains
+
 _cors_regex = os.getenv("CORS_ORIGIN_REGEX", r"https://([a-z0-9-]+\.)?(dormdish\.ai|vercel\.app)") if not _allow_all else None
 
 print("[CORS] raw=", repr(_raw_origins))
@@ -991,7 +992,7 @@ def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_dat
         return False
 
 
-# Patch: ensure Rutgers date uses America/New_York to avoid UTC date drift
+
 def _rutgers_today_str():
     try:
         return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
@@ -1001,16 +1002,16 @@ def _rutgers_today_str():
 
 def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
-    # Normalize common typos / variants early
+    
     dh_norm = dining_hall.strip().lower()
-    if dh_norm == "nielson":  # common misspelling
+    if dh_norm == "nielson":  
         dh_norm = "neilson"
     if dh_norm in {"nielson-dining-hall", "nielson dining hall"}:
         dh_norm = "neilson"
     dining_hall = dh_norm
 
     dining_hall_mapping = {
-        # Hopkins
+        
         "hopkins-cafe": ("hopkins", "hopkins-cafe"),
         "hopkins cafe": ("hopkins", "hopkins-cafe"),
         "hopkins": ("hopkins", "hopkins-cafe"),
@@ -1019,7 +1020,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "nolan": ("hopkins", "nolans-on-33rd"),
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
-        # Rutgers (include variants + typos)
+        
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
@@ -1033,7 +1034,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "college-ave": ("rutgers", "brower-commons"),
         "college ave": ("rutgers", "brower-commons"),
         "college avenue": ("rutgers", "brower-commons"),
-        # Neilson + common misspellings
+        
         "neilson": ("rutgers", "neilson-dining-hall"),
         "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
         "neilson dining hall": ("rutgers", "neilson-dining-hall"),
@@ -1043,7 +1044,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook-douglass": ("rutgers", "neilson-dining-hall"),
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
-        # Atrium
+        
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
@@ -1053,7 +1054,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         return {"error": f"Unknown dining hall: {dining_hall}"}
     university, hall_slug = mapping
 
-    # Auto-fix date if empty / 'today'
+    
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -1320,7 +1321,7 @@ def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, dat
             seen_items.add(item_name)
             unique_items.append(item)
     
-    # Log if we got no items
+    
     if not unique_items:
         print(f"⚠️ WARNING: fetch_nutrislice_menu returned ZERO items for {university}/{hall_slug} on {date}")
         print(f"⚠️ Warnings: {warnings}")
@@ -1431,6 +1432,182 @@ def process_menu_item(item: dict) -> Optional[dict]:
     return result
 
 
+
+
+
+def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
+    """Construct the system prompt for the meal plan model.
+    Emphasizes a balanced, realistic nutritionist approach (main + sides + sensible pairings)
+    while keeping the JSON schema EXACTLY the same. Less rigid wording, still enforces
+    internal numeric consistency and allowed item usage.
+    """
+    lines: List[str] = []
+    for it in allowed_items_with_macros:
+        nm = (it.get("name") or "").strip()
+        if not nm:
+            continue
+        cal = it.get("calories")
+        prot = it.get("protein_g")
+        if cal is None or prot is None:
+            continue
+        try:
+            lines.append(f"{nm} | {int(round(cal))} cal | {int(round(prot))} g protein")
+        except Exception:
+            continue
+    allowed_block = "\n".join(lines) if lines else "(none)"
+
+    prompt_lines: List[str] = [
+        "You are a pragmatic, encouraging university dining hall nutritionist & meal designer.",
+        "Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.",
+        "",
+        "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):",
+        "",
+        "{",
+        ' "user_stats": { "bmr": "<float>", "tdee": "<float>", "goal": "<cut|maintain|bulk>", "dietary_preference": "<vegan|vegetarian|null>" },',
+        ' "goals": { "calories": "<int>", "protein_g": "<int>" },',
+        ' "totals": { "calories": "<int>", "protein_g": "<int>" },',
+        ' "meals": {',
+        '   "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
+        '   "lunch": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
+        '   "dinner": { "description": "<string>", "items": [ "<meal_item>", ... ] }',
+        ' },',
+        ' "explanation": "<string>"',
+        "}",
+        "",
+        "Meal item schema:",
+        "",
+        '{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "serving_size": "<string|null>" }',
+        "",
+        "Rules",
+        "",
+        "3 meals only. Each: short description + 2–4 items (main protein + carb/veg/sauce). A single larger item is OK if realistic.",
+        "",
+        "Variety: avoid repeating exact items more than once/day.",
+        "",
+        "Don’t stack multiple meats in one meal. Plant proteins may complement sensibly.",
+        "",
+        "If pairing item missing from list, proceed without fabrication (note in explanation).",
+        "",
+        "Respect dietary prefs (vegan/vegetarian).",
+        "",
+        "Serving sizes can be fractional (0.5 increments).",
+        "",
+        "Nutrition Targets",
+        "",
+        "Calories & protein must be within ±5% of goals.",
+        "",
+        "Prioritize protein target first, then adjust calories.",
+        "",
+        "Meals must be realistic, balanced, appetizing.",
+        "",
+        "Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess.",
+        "",
+        "Allowed items list:",
+        allowed_block,
+    ]
+
+    return "\n".join(prompt_lines).strip()
+
+def _estimate_missing_macros(calories: Optional[float], protein: Optional[float]) -> Tuple[float, float]:
+    """Estimate missing macros with sensible defaults based on available data."""
+    if calories is not None and protein is not None:
+        return float(calories), float(protein)
+    if protein is not None and calories is None:
+        
+        calories = protein * 4 * 1.25
+    elif calories is not None and protein is None:
+        
+        protein = max(1.0, (calories * 0.12) / 4.0)
+    else:
+        
+        calories = 50.0
+        protein = 2.0
+    return float(calories), float(protein)
+
+
+def _backend_recompute_meal_macros(plan: dict, nutrition_lookup: Dict[str, dict]) -> dict:
+    """Recompute all macros authoritatively from nutrition database.
+    Models are bad at math - backend does all calculations.
+    """
+    total_cal = 0.0
+    total_prot = 0.0
+    
+    for meal_key in ["breakfast", "lunch", "dinner"]:
+        meal = plan.get("meals", {}).get(meal_key, {})
+        if not isinstance(meal, dict):
+            continue
+            
+        valid_items = []
+        for it in meal.get("items", []) or []:
+            if not isinstance(it, dict):
+                continue
+                
+            name = it.get("name")
+            if not name:
+                continue
+                
+            
+            k = _fuzzy_lookup(name, nutrition_lookup)
+            if not k:
+                print(f"⚠️ Dropped unknown item: {name}")
+                continue
+                
+            
+            nutr = nutrition_lookup[k]
+            base_cal = float(nutr.get("calories", 0) or 0)
+            base_prot = float(nutr.get("protein_g", 0) or 0)
+            
+            
+            servings = it.get("servings", 1)
+            try:
+                servings = float(servings)
+                if servings <= 0 or servings > 10:
+                    servings = 1.0
+            except (ValueError, TypeError):
+                servings = 1.0
+            
+            
+            item_cal = base_cal * servings
+            item_prot = base_prot * servings
+            
+            
+            it["name"] = nutr["name"]
+            it["servings"] = round(servings, 2)
+            it["calories"] = round(item_cal, 1)
+            it["protein_g"] = round(item_prot, 1)
+            it["serving_size"] = nutr.get("serving_size") or None
+            
+            valid_items.append(it)
+            total_cal += item_cal
+            total_prot += item_prot
+        
+        meal["items"] = valid_items
+    
+    
+    plan.setdefault("totals", {})
+    plan["totals"]["calories"] = round(total_cal, 1)
+    plan["totals"]["protein_g"] = round(total_prot, 1)
+    
+    return plan
+
+
+def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
+    """Fuzzy lookup for item names in nutrition database."""
+    if name.upper() in lookup:
+        return name.upper()
+    lower_map = {k.lower(): k for k in lookup.keys()}
+    if name.lower() in lower_map:
+        return lower_map[name.lower()]
+    candidates = get_close_matches(name.lower(), lower_map.keys(), n=1, cutoff=0.85)
+    if candidates:
+        return lower_map[candidates[0]]
+    return None
+
+
+def _recompute_totals(plan: dict, nutrition_lookup: Dict[str, dict]) -> dict:
+    """Legacy recompute function - redirects to authoritative backend recompute."""
+    return _backend_recompute_meal_macros(plan, nutrition_lookup)
+
 @app.put("/auth/profile", summary="Update User Profile")
 async def update_profile(profile_data: UpdateProfileRequest, current_user=Depends(get_current_user)):
     """Update user profile"""
@@ -1473,7 +1650,11 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
 
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
-    """Generate a meal plan for a user (authenticated) with backend-authoritative macro math."""
+    """Generate a meal plan for a user (authenticated) with backend-authoritative macro math.
+    Returns legacy MealPlanResponse wrapper expected by frontend.
+    """
+    t_start = time.time()
+    menu_fetch_start = t_start
     try:
         authenticated_user = None
         if authorization and authorization.startswith('Bearer '):
@@ -1494,419 +1675,181 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         user_bmr = float(authenticated_user['bmr'])
         user_tdee = float(authenticated_user['tdee'])
 
-        #DAILY GENERATION LIMIT (max 3 per UTC day per user)
-        # try:
-        #     generation_limit = 3
-        #     now_utc = datetime.utcnow()
-        #     start_of_day = datetime(now_utc.year, now_utc.month, now_utc.day)
-        #     end_of_day = start_of_day + timedelta(days=1)
-        #     start_iso = start_of_day.isoformat()
-        #     end_iso = end_of_day.isoformat()
-        #     count_resp = supabase.table("meal_plan_generations") \
-        #         .select("id", count="exact") \
-        #         .eq("user_id", authenticated_user["id"]) \
-        #         .gte("created_at", start_iso) \
-        #         .lt("created_at", end_iso) \
-        #         .execute()
-        #     existing_count = getattr(count_resp, 'count', None)
-        #     if existing_count is None:
-        #         existing_count = len(count_resp.data or [])
-        #     if existing_count >= generation_limit:
-        #         raise HTTPException(status_code=429, detail=f"Daily meal plan generation limit reached ({generation_limit}). Try again tomorrow.")
-        # except HTTPException:
-        #     raise
-        # except Exception as _limit_e:
-        #     print(f"⚠️ Generation limit check failed: {_limit_e}")
-
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
-            raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {menu_data['error']}")
+            raise HTTPException(status_code=400, detail=menu_data.get("error"))
         items_list = menu_data.get("items", []) or []
         if not items_list:
-            raise HTTPException(status_code=503, detail=f"No menu items available for {meal_plan_request.dining_hall} on {meal_plan_request.date}.")
+            raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
+        menu_fetch_end = time.time()
 
-        # Build lookup (uppercase name -> nutrition)
-        lookup = {}
-        for it in items_list:
-            name = (it.get("name") or "").strip()
+        
+        nutrition_lookup: Dict[str, dict] = {}
+        allowed_for_prompt: List[dict] = []
+        for raw in items_list:
+            name = (raw.get("name") or "").strip()
             if not name:
                 continue
-            key = name.upper()
-            try:
-                cals = float(it.get("calories")) if it.get("calories") not in (None, "") else None
-            except Exception:
-                cals = None
-            try:
-                prot = float(it.get("protein_g") or it.get("protein")) if it.get("protein_g") not in (None, "") else None
-            except Exception:
-                prot = None
-            if cals is None or prot is None:
-                # skip unusable items (no nutrient data)
-                continue
-            lookup[key] = {
+            calories = raw.get("calories")
+            protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
+            calories, protein = _estimate_missing_macros(calories, protein)
+            serving_size = raw.get("serving_size") or None
+            entry = {
                 "name": name,
-                "calories": cals,
-                "protein_g": prot,
-                "serving_size": it.get("serving_size") or it.get("portion_size") or it.get("serving") or None,
+                "calories": float(calories),
+                "protein_g": float(protein),
+                "serving_size": serving_size,
+                "density": (protein / calories) if calories else 0.0,
             }
+            key = name.upper()
+            if key not in nutrition_lookup:  
+                nutrition_lookup[key] = entry
+                allowed_for_prompt.append(entry)
 
-        if len(lookup) == 0:
-            raise HTTPException(status_code=503, detail="No nutritionally usable items available (all missing calories/protein).")
+        if len(nutrition_lookup) == 0:
+            raise HTTPException(status_code=500, detail="No usable menu items after processing")
 
-        # Filter lookup by dietary preference if needed
-        dietary = user.dietary_preference
-        if dietary in ("vegan", "vegetarian"):
-            # crude filter: remove items whose name suggests meat (improve later)
-            meat_terms = ["CHICKEN", "BEEF", "PORK", "FISH", "SALMON", "TURKEY", "TUNA", "HAM", "BACON"]
-            def is_meat(n):
-                up = n.upper()
-                return any(t in up for t in meat_terms)
-            if dietary == "vegetarian":
-                filtered = {k:v for k,v in lookup.items() if not is_meat(v['name']) or 'EGG' in v['name'].upper()}
-            else:  # vegan - also exclude eggs, cheese, dairy keywords
-                dairy_terms = meat_terms + ["EGG", "CHEESE", "MILK", "YOGURT", "BUTTER"]
-                def is_animal(n):
-                    up = n.upper()
-                    return any(t in up for t in dairy_terms)
-                filtered = {k:v for k,v in lookup.items() if not is_animal(v['name'])}
-            if filtered:
-                lookup = filtered
-        if not lookup:
-            raise HTTPException(status_code=503, detail="Dietary filter removed all items. Cannot build plan.")
-
-        # Compute targets from user goal (protein now fixed at 1.1x bodyweight per updated requirement)
-        if user.goal == "bulk":
-            target_calories = user_tdee + 400
-        elif user.goal == "cut":
-            target_calories = user_tdee - 400
+        
+        goal_mode = user.goal.lower()
+        if goal_mode == 'cut':
+            calorie_target = int(round(user_tdee * 0.85))
+        elif goal_mode == 'bulk':
+            calorie_target = int(round(user_tdee * 1.10))
         else:
-            target_calories = user_tdee
-        target_calories = int(round(target_calories))
-        target_protein = int(round(user.weight_lbs * 1.1))
+            calorie_target = int(round(user_tdee))
+        protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
 
-        # Prepare menu names for model
-        model_menu_listing = "\n".join(sorted(n for n in [v['name'] for v in lookup.values()]))
-
-        user_context = f"Goal: {user.goal}; Target Calories: {target_calories}; Target Protein: {target_protein}g; Dietary: {dietary or 'none'}; Menu Items:\n<<ITEM_LIST>>"
-
-        user_context = user_context.replace("<<ITEM_LIST>>", model_menu_listing)
-        ai_start = time.time()
-        ai_resp = client.chat.completions.create(
-            model=MEAL_PLAN_MODEL,
-            messages=[
-                #{"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_context},
-            ],
-            temperature=0.6,
+        system_prompt = build_meal_plan_system_prompt(allowed_for_prompt)
+        allowed_names_only = "\n".join([e['name'] for e in allowed_for_prompt])
+        user_content = (
+            f"User goal: {goal_mode}. Dietary preference: {user.dietary_preference or 'none'}.\n"
+            f"Calorie target: {calorie_target}\nProtein target: {protein_target}\n"
+            f"Allowed item names (reference list):\n{allowed_names_only}\n"
+            "Return the required JSON schema."
         )
-        ai_raw = ai_resp.choices[0].message.content.strip()
 
-        # --- Robust JSON extraction / repair ---
-        def _robust_parse_ai_json(raw: str):
-            import json, re
-            original = raw
-            # 1. Strip markdown fences
-            raw = re.sub(r"^```(?:json|JSON)?", "", raw.strip())
-            raw = re.sub(r"```$", "", raw.strip())
-            raw = raw.strip()
-            # Quick direct parse
-            try:
-                return json.loads(raw)
-            except Exception:
-                pass
-            # 2. If raw contains multiple lines with commentary, isolate largest balanced brace block
-            def _largest_brace_block(s: str):
-                best = None
-                stack = 0
-                start = None
-                for i,ch in enumerate(s):
-                    if ch == '{':
-                        if stack == 0:
-                            start = i
-                        stack += 1
-                    elif ch == '}':
-                        if stack > 0:
-                            stack -= 1
-                            if stack == 0 and start is not None:
-                                cand = s[start:i+1]
-                                if not best or len(cand) > len(best):
-                                    best = cand
-                return best
-            block = _largest_brace_block(raw)
-            if block:
-                try:
-                    return json.loads(block)
-                except Exception:
-                    raw = block  # continue attempts on block only
-            # 3. Light repairs: remove trailing commas, convert single quotes -> double (naive but constrained)
-            repaired = raw
-            # Remove trailing commas before } or ]
-            repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-            # Replace single-quoted keys/strings that are simple (no embedded quotes)
-            repaired = re.sub(r"'([^'\n\r]*)'", lambda m: '"'+m.group(1).replace('"','\\"')+'"', repaired)
-            # Ensure numeric tokens ok; attempt parse
-            try:
-                return json.loads(repaired)
-            except Exception:
-                pass
-            # 4. Last resort: wrap in braces if missing
-            if not repaired.strip().startswith('{') and '{' not in repaired:
-                repaired = '{' + repaired + '}'
-                try:
-                    return json.loads(repaired)
-                except Exception:
-                    pass
-            print("[AI JSON Parser] Failed to parse. Raw snippet (first 300 chars):", original[:300])
-            raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
-
+        
+        ai_start = time.time()
         try:
-            plan_raw = _robust_parse_ai_json(ai_raw)
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=500, detail="Failed to parse AI JSON")
+            completion = client.chat.completions.create(
+                model=MEAL_PLAN_MODEL,
+                temperature=0.4,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            raw_text = completion.choices[0].message.content.strip()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Model generation failed: {e}")
+        ai_end = time.time()
 
-        # Validate skeleton
-        if not isinstance(plan_raw, dict) or 'meals' not in plan_raw:
-            raise HTTPException(status_code=500, detail="AI response missing meals")
-        meals_block = plan_raw.get('meals') or {}
-        for meal_name in ['breakfast', 'lunch', 'dinner']:
-            if meal_name not in meals_block or not isinstance(meals_block[meal_name], dict):
-                raise HTTPException(status_code=500, detail=f"AI missing meal: {meal_name}")
+        def _extract_json(s: str) -> str:
+            first = s.find('{')
+            last = s.rfind('}')
+            if first == -1 or last == -1 or last <= first:
+                raise ValueError("No JSON object detected in model response")
+            return s[first:last+1]
+        try:
+            plan_json = json.loads(_extract_json(raw_text))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse model JSON: {e}")
 
-        # Normalize & compute nutrition (track unmatched)
-        unmatched_by_meal = {m: [] for m in ['breakfast','lunch','dinner']}
-        def compute_meal(meal_obj, meal_label):
-            items_out = []
-            for it in (meal_obj.get('items') or []):
-                if not isinstance(it, dict):
+        unknown_items: List[str] = []
+        used_names_global = set()
+        for meal_key in ["breakfast", "lunch", "dinner"]:
+            meal = plan_json.get("meals", {}).get(meal_key)
+            if not isinstance(meal, dict):
+                continue
+            new_items = []
+            for item in meal.get("items", []) or []:
+                if not isinstance(item, dict):
                     continue
-                nm = (it.get('name') or '').strip()
+                nm = (item.get("name") or "").strip()
                 if not nm:
                     continue
-                sv_raw = it.get('servings', 1)
+                key_match = _fuzzy_lookup(nm, nutrition_lookup)
+                if not key_match:
+                    unknown_items.append(nm)
+                    continue
+                if key_match in used_names_global:
+                    continue
+                used_names_global.add(key_match)
+                servings = item.get("servings") or 1
                 try:
-                    sv = float(sv_raw) if sv_raw not in (None, '') else 1.0
+                    servings = float(servings)
+                    if servings <= 0:
+                        servings = 1.0
                 except Exception:
-                    sv = 1.0
-                if sv <= 0:
-                    sv = 1.0
-                key = nm.upper()
-                base = lookup.get(key)
-                if not base:
-                    unmatched_by_meal[meal_label].append(nm)
-                    continue
-                calories = base['calories'] * sv
-                protein = base['protein_g'] * sv
-                items_out.append({
-                    'name': base['name'],
-                    'servings': sv,
-                    'calories': round(calories),
-                    'protein_g': round(protein),
-                    'serving_size': base.get('serving_size'),
+                    servings = 1.0
+                new_items.append({
+                    "name": nutrition_lookup[key_match]["name"],
+                    "servings": servings,
+                    "serving_size": nutrition_lookup[key_match].get("serving_size") or None,
                 })
-            # If meal ends up empty, seed with top protein items not yet used
-            if not items_out:
-                existing_meal_items = []
-                for _mn in ['breakfast','lunch','dinner']:
-                    if _mn in meals_block and isinstance(meals_block[_mn], dict):
-                        for _it in (meals_block[_mn].get('items') or []):
-                            if isinstance(_it, dict) and _it.get('name'):
-                                existing_meal_items.append({'name': _it.get('name')})
-                used_names = { (it.get('name') or '').upper() for it in existing_meal_items if it.get('name') }
-                # choose up to 2 highest protein density items
-                dens_sorted = sorted(lookup.values(), key=lambda v: (v['protein_g']/max(v['calories'],1)), reverse=True)
-                added = 0
-                for cand in dens_sorted:
-                    if cand['name'].upper() in used_names:
-                        continue
-                    items_out.append({
-                        'name': cand['name'],
-                        'servings': 1.0,
-                        'calories': round(cand['calories']),
-                        'protein_g': round(cand['protein_g']),
-                        'serving_size': cand.get('serving_size')
-                    })
-                    added += 1
-                    if added >= 2:
-                        break
-            return items_out
+            meal['items'] = new_items
+        if unknown_items:
+            plan_json.setdefault('meta', {})['dropped_unknown'] = unknown_items
 
-        meal_items = {m: compute_meal(meals_block[m], m) for m in ['breakfast', 'lunch', 'dinner']}
+        
+        print(f"🧮 Backend recomputing all macros authoritatively...")
+        plan_json = _backend_recompute_meal_macros(plan_json, nutrition_lookup)
+        
+        
+        plan_json.setdefault('goals', {})['calories'] = calorie_target
+        plan_json['goals']['protein_g'] = protein_target
+        plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
+        plan_json['user_stats']['tdee'] = user_tdee
+        plan_json['user_stats']['goal'] = goal_mode
+        plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
 
-        def sum_totals(items_all):
-            c = sum(it['calories'] for it in items_all)
-            p = sum(it['protein_g'] for it in items_all)
-            return c, p
+        
+        final_cal = plan_json['totals']['calories']
+        final_prot = plan_json['totals']['protein_g']
+        cal_diff = final_cal - calorie_target
+        prot_diff = final_prot - protein_target
+        cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
+        prot_pct = (prot_diff / protein_target * 100) if protein_target else 0
+        
+        print(f"📊 Final Plan Metrics:")
+        print(f"   Calories: {final_cal:.0f} / {calorie_target} ({cal_pct:+.1f}%)")
+        print(f"   Protein:  {final_prot:.0f}g / {protein_target}g ({prot_pct:+.1f}%)")
 
-        # Adjustment logic
-        def adjust_plan():
-            # flatten
-            for _round in range(8):
-                all_items = [*meal_items['breakfast'], *meal_items['lunch'], *meal_items['dinner']]
-                calories, protein = sum_totals(all_items)
-                cal_low = calories < 0.95 * target_calories
-                cal_high = calories > 1.05 * target_calories
-                prot_low = protein < target_protein
-                if not (cal_low or cal_high or prot_low):
-                    return
-                # Build density lists
-                density = []
-                for meal_name in meal_items:
-                    for it in meal_items[meal_name]:
-                        if it['calories'] > 0:
-                            density.append((it['protein_g']/it['calories'], meal_name, it))
-                density.sort(reverse=True, key=lambda x: x[0])
-                # pool of candidates not yet used or low usage
-                usage = {}
-                for it in all_items:
-                    usage[it['name']] = usage.get(it['name'], 0) + 1
-                # functions
-                def add_high_protein():
-                    # choose best new item
-                    existing_names = {it['name'].upper() for it in all_items}
-                    candidates = sorted(lookup.values(), key=lambda v: (v['protein_g']/max(v['calories'],1)), reverse=True)
-                    for cand in candidates:
-                        if cand['name'].upper() in existing_names and usage.get(cand['name'],0) >= 2:
-                            continue
-                        # add to smallest meal by protein
-                        meal_order = sorted(meal_items.keys(), key=lambda mn: sum(i['protein_g'] for i in meal_items[mn]))
-                        target_meal = meal_order[0]
-                        meal_items[target_meal].append({
-                            'name': cand['name'], 'servings': 1.0,
-                            'calories': round(cand['calories']), 'protein_g': round(cand['protein_g']),
-                            'serving_size': cand.get('serving_size')
-                        })
-                        return True
-                    return False
-                def scale_existing(up: bool, protein_first: bool):
-                    ordered = density if up else list(reversed(density))
-                    for _, meal_name, it in ordered:
-                        # limit servings 0.5 - 3
-                        new_sv = (it['servings'] + (0.5 if up else -0.5)) if up else (it['servings'] - 0.5)
-                        if new_sv < 0.5 or new_sv > 3:
-                            continue
-                        # find base
-                        base = lookup[it['name'].upper()]
-                        it['servings'] = round(new_sv,2)
-                        it['calories'] = round(base['calories'] * it['servings'])
-                        it['protein_g'] = round(base['protein_g'] * it['servings'])
-                        return True
-                    return False
-                if prot_low:
-                    # try scaling high-protein first
-                    if not scale_existing(True, True):
-                        if not add_high_protein():
-                            return
-                    continue
-                # calories fix
-                if cal_low:
-                    if not scale_existing(True, False):
-                        add_high_protein()
-                    continue
-                if cal_high:
-                    scale_existing(False, False)
-                    continue
-        adjust_plan()
+        if not plan_json.get('explanation'):
+            plan_json['explanation'] = "Balanced plan targeting protein and calories with available items."
 
-        # Final recompute
-        all_items_final = [*meal_items['breakfast'], *meal_items['lunch'], *meal_items['dinner']]
-        total_cals, total_pro = sum(it['calories'] for it in all_items_final), sum(it['protein_g'] for it in all_items_final)
-        within_5 = abs(total_cals - target_calories) <= 0.05 * max(target_calories,1)
+        t_end = time.time()
+        menu_fetch_time = menu_fetch_end - menu_fetch_start
+        ai_time = ai_end - ai_start
+        total_time = t_end - t_start
 
-        meal_plan = {
-            'user_stats': {
-                'bmr': user_bmr,
-                'tdee': user_tdee,
-                'goal': user.goal,
-                'dietary_preference': dietary if dietary in ('vegan','vegetarian') else None,
+        
+        safe_user = {k: authenticated_user[k] for k in authenticated_user.keys() if k != 'password_hash'}
+
+        generation_id = str(uuid4())
+        response_payload = {
+            "success": True,
+            "user_profile": safe_user,
+            "nutrition_targets": {"calories": calorie_target, "protein_g": protein_target},
+            "bmr_tdee": {"bmr": user_bmr, "tdee": user_tdee},
+            "available_items": allowed_for_prompt,
+            "meal_plan": plan_json,
+            "generation_id": generation_id,
+            "ask_feedback": "Please rate this meal plan",  
+            "processing_info": {
+                "menu_fetch_time_seconds": round(menu_fetch_time, 3),
+                "ai_generation_time_seconds": round(ai_time, 3),
+                "total_time_seconds": round(total_time, 3),
             },
-            'goals': {
-                'calories': target_calories,
-                'protein_g': target_protein,
-            },
-            'totals': {
-                'calories': int(total_cals),
-                'protein_g': int(total_pro),
-            },
-            'meals': {
-                m: {
-                    'description': (plan_raw.get('meals', {}).get(m, {}) or {}).get('description') or f'{m.title()} meal',
-                    'items': meal_items[m]
-                } for m in ['breakfast','lunch','dinner']
-            },
-            'explanation': plan_raw.get('explanation') or 'Backend computed macros; protein prioritized then calories adjusted.',
-            'validation': {
-                'calorie_target': target_calories,
-                'actual_calories': int(total_cals),
-                'within_5_percent': within_5,
-                'protein_target': target_protein,
-                'protein_met': total_pro >= target_protein,
-            },
-            'debug': {
-                'unmatched_items': unmatched_by_meal
-            }
+            "meta": plan_json.get('meta', {}),
         }
+        return response_payload
 
-        generation_id = None
-        try:
-            insert_payload = {
-                'user_id': authenticated_user.get('id'),
-                'date': meal_plan_request.date,
-                'dining_hall': meal_plan_request.dining_hall,
-                #'system_prompt': system_prompt,
-                'user_prompt': user_context,
-                'full_messages': json.dumps([
-                    #{'role':'system','content':system_prompt},
-                    {'role':'user','content':user_context}
-                ]),
-                'model_raw_response': ai_raw,
-                'meal_plan': meal_plan,
-            }
-            inserted = supabase.table('meal_plan_generations').insert(insert_payload).execute()
-            if inserted.data:
-                generation_id = inserted.data[0]['id']
-        except Exception as e:
-            print(f"⚠️ Failed to insert meal_plan_generation: {e}")
-
-        ai_time = time.time() - ai_start
-        if background_tasks and authenticated_user.get('email'):
-            try:
-                background_tasks.add_task(
-                    send_meal_plan_generation_email,
-                    authenticated_user,
-                    generation_id,
-                    meal_plan_request.dining_hall,
-                    meal_plan_request.date,
-                )
-            except Exception as e:
-                print(f"[brevo] scheduling meal plan email failed: {e}")
-        return {
-            'success': True,
-            'user_profile': asdict(user),
-            'nutrition_targets': {'calories': target_calories, 'protein_grams': target_protein},
-            'bmr_tdee': {'bmr': user_bmr, 'tdee': user_tdee},
-            'available_items': list(lookup.values()),
-            'meal_plan': meal_plan,
-            'generation_id': generation_id,
-            'ask_feedback': 'Did you like this meal plan?',
-            'processing_info': {
-                'ai_generation_time_seconds': round(ai_time,2),
-            },
-            'meta': {
-                'dining_hall': meal_plan_request.dining_hall,
-                'date': meal_plan_request.date,
-                'ai_model': MEAL_PLAN_MODEL,
-                'authenticated': authenticated_user is not None,
-                'raw_ai_response_length': len(ai_raw),
-                'dietary_preference': dietary,
-            }
-        }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
-
+        print(f"❌ Meal plan generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {e}")
 
 @app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")
 async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depends(get_current_user)):
@@ -2278,7 +2221,7 @@ async def stripe_webhook(request: Request):
 
     return PlainTextResponse("ok", status_code=200)
 
-BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()  # Template for meal plan generation notification
+BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()  
 
 def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str):
     """Send Brevo email notifying user their meal plan was generated.
@@ -2290,11 +2233,11 @@ def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str]
         if not BREVO_MEAL_PLAN_TEMPLATE_ID:
             return
         try:
-            template_id = int(re.match(r"(\d+)", BREVO_MEAL_PLAN_TEMPLATE_ID).group(1))  # type: ignore
+            template_id = int(re.match(r"(\d+)", BREVO_MEAL_PLAN_TEMPLATE_ID).group(1))  
         except Exception:
             print("[brevo] Invalid BREVO_MEAL_PLAN_TEMPLATE_ID value; skipping meal plan email")
             return
-        # Ensure contact exists (best effort)
+        
         try:
             guess = _guess_name_from_email(user_row["email"]) if user_row.get("email") else {"first": "", "last": ""}
             upsert_brevo_contact(
@@ -2306,7 +2249,7 @@ def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str]
             )
         except Exception as e:
             print(f"[brevo] contact upsert failed (continuing): {e}")
-        # Build payload similar to send_brevo_template but with dynamic params
+        
         from_email = os.getenv("BREVO_FROM_EMAIL")
         from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
         if not from_email:
