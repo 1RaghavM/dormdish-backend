@@ -41,7 +41,7 @@ except Exception as exc:
     fp_fetch = None  
     fp_parse_menu = None  
 
-
+hi = "hi"
 import contextlib
 import random
 from zoneinfo import ZoneInfo
