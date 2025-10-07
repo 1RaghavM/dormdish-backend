@@ -30,10 +30,13 @@ from uuid import UUID, uuid4
 import secrets as _secrets_for_google  
 from difflib import get_close_matches
 import math
+import traceback
 
 try:
     from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
-except Exception:
+except Exception as exc:
+    print(f"⚠️ Failed to import FoodPro scraper helpers: {exc}")
+    traceback.print_exc()
     fp_build_menu_url = None  
     fp_fetch = None  
     fp_parse_menu = None  
@@ -1661,7 +1664,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             token = authorization.replace('Bearer ', '')
             authenticated_user = verify_session_token(token)
         if not authenticated_user:
-            raise HTTPException(status_code=401, detail="Authentication required. Guest users not yet supported in FastAPI version.")
+            raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
         user = User(
             age=authenticated_user['age'],
             height_feet=authenticated_user['height_feet'],

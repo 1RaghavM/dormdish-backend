@@ -1,400 +1,137 @@
-# DormDish Backend
+# Deterministic Meal Planner
 
-A Flask-based meal planning backend that generates personalized nutrition plans for university students using real dining hall menu data.
+A production-ready meal-planning engine that replaces heuristic AI prompts with a deterministic OR-Tools solver, hard nutrition constraints, and LM Studio structured output support.
 
-## Features
+## Highlights
 
-- 🍽️ **Real Menu Data**: Fetches actual dining hall menus from Rutgers and Johns Hopkins via Nutrislice API
-- 🎯 **Personalized Nutrition**: Calculates calorie and macro needs based on user profile (age, height, weight, activity level, goals)
-- 🤖 **AI Meal Planning**: Uses OpenAI-compatible models to generate optimized meal plans
-- 💾 **Smart Caching**: Caches menu data in Supabase for faster subsequent requests
-- 🏫 **Multi-University**: Supports Rutgers University and Johns Hopkins University dining halls
+- **Deterministic nutrition math** – a canonical nutrition engine handles all conversions and rounding.
+- **CP-SAT optimization** – discrete portion steps, meal share windows, per-item caps, and diet filters enforced at solve time.
+- **Repair loop** – automatic local adjustments keep solutions inside ±5% calorie/protein tolerance without human intervention.
+- **FastAPI service** – `/solve`, `/sum`, and `/schema` endpoints for backend or LM Studio workflows.
+- **Tooling for LM Studio** – function-calling spec plus response schema with hard enums per menu item.
 
-## Supported Dining Halls
-
-### Rutgers University
-- Busch Dining Hall
-- Livingston Dining Commons
-- Brower Commons
-- Neilson Dining Hall
-
-### Johns Hopkins University
-- Hopkins Cafe
-- Nolan's on 33rd
-- Peabody Institute
-
-## API Endpoints
-
-### Health Check
-```
-GET /health
-```
-
-### Generate Meal Plan
-```
-POST /generate-meal-plan
-```
-
-**Authenticated Request (minimal):**
-```json
-{
-  "date": "2025-09-19"
-}
-```
-
-**Authenticated Request (with goal override):**
-```json
-{
-  "goal": "cut",
-  "date": "2025-09-19"
-}
-```
-
-**Guest Request (full profile required):**
-```json
-{
-  "age": 18,
-  "height_feet": 5,
-  "height_inches": 10,
-  "weight_lbs": 175,
-  "activity_level": "very_active",
-  "goal": "bulk",
-  "preferred_dining_hall": "busch",
-  "date": "2025-09-19"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "user_profile": {...},
-  "nutrition_targets": {
-    "calories": 3000,
-    "protein_grams": 175,
-    "carb_grams": 375,
-    "fat_grams": 90
-  },
-  "bmr_tdee": {
-    "bmr": 1800,
-    "tdee": 2600
-  },
-  "meal_plan": {...},
-  "meta": {
-    "authenticated": true,
-    "dining_hall": "busch"
-  }
-}
-```
-
-## Authentication
-
-### Register User
-```
-POST /auth/register
-```
-
-**Request Body:**
-```json
-{
-  "username": "johndoe",
-  "email": "john@example.com",
-  "password": "securepassword",
-  "age": 20,
-  "height_feet": 5,
-  "height_inches": 10,
-  "weight_lbs": 175,
-  "gender": "male",
-  "activity_level": "moderately_active",
-  "goal": "bulk",
-  "university": "rutgers",
-  "preferred_dining_hall": "busch"
-}
-```
-
-**Fitness Goals:**
-- `cut` - Weight loss with calorie deficit
-- `maintain` - Maintain current weight
-- `bulk` - Muscle gain with calorie surplus
-
-**Activity Levels:**
-- `sedentary` - Little/no exercise
-- `lightly_active` - Exercise 1-3 times/week
-- `moderately_active` - Exercise 4-5/week
-- `very_active` - Daily or intense 3-4
-- `extremely_active` - Intense 6-7
-- `super_active` - Very intense
-
-### Login
-```
-POST /auth/login
-```
-
-**Request Body:**
-```json
-{
-  "email": "john@example.com",
-  "password": "securepassword"
-}
-```
-
-### Get Profile
-```
-GET /auth/profile
-Authorization: Bearer <session_token>
-```
-
-### Update Profile
-```
-PUT /auth/profile
-Authorization: Bearer <session_token>
-```
-
-### Logout
-```
-POST /auth/logout
-Authorization: Bearer <session_token>
-```
-
-### Get Menu
-```
-GET /menu/<dining_hall>/<date>
-```
-
-### Get Supported Dining Halls
-```
-GET /dining-halls
-```
-
-### Cache Management
-```
-DELETE /cache/clear/<dining_hall>/<date>
-GET /cache/status
-```
-
-## Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd dormdish-backend
-   ```
-
-2. **Create a conda environment**
-   ```bash
-   conda create -n dormdish python=3.9
-   conda activate dormdish
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up environment variables**
-   
-   Create a `.env` file in the root directory:
-   ```env
-   SUPABASE_URL=your_supabase_project_url
-   SUPABASE_SERVICE_KEY=your_supabase_service_key
-   ```
-
-5. **Set up Supabase database**
-   
-   Follow the instructions in `supabase_setup.md` to create the required database schema.
-
-6. **Configure AI Model**
-   
-   The app uses OpenAI-compatible APIs. By default, it's configured for LM Studio running locally:
-   - Install and run LM Studio
-   - Load a compatible model
-   - The app will connect to `http://127.0.0.1:1234/v1`
-
-## Email (Brevo) setup
-
-The backend now uses Brevo (Sendinblue) for contacts and transactional emails. Configure these environment variables in `.env`:
+## Project layout
 
 ```
-BREVO_API_KEY=...           # API key with Contacts and SMTP/Transactional scopes
-BREVO_FROM_EMAIL=...        # Verified sender email in Brevo
-BREVO_FROM_NAME=DormDish    # Display name
-BREVO_TEMPLATE_ID=2         # Numeric ID of an Active transactional template
-BREVO_LIST_ID=5             # Optional default numeric list ID (e.g., "Waitlist")
+.
+├─ pyproject.toml
+├─ src/mealplanner
+│  ├─ api.py
+│  ├─ lmstudio_tools.py
+│  ├─ nutrition_engine.py
+│  ├─ planner.py
+│  ├─ schemas.py
+│  ├─ solver.py
+│  └─ taxonomy.py
+└─ tests
+   ├─ data/fixtures_menu.json
+   ├─ test_end_to_end.py
+   ├─ test_nutrition_engine.py
+   └─ test_solver_feasibility.py
 ```
 
-Notes
-- BREVO_LIST_ID must be the numeric ID, not the list name.
-- Verify your sender/domain in Brevo before sending.
-- If you personalize emails, create Brevo attributes used by the code: FIRSTNAME, LASTNAME, UNIVERSITY, GRADYEAR.
+## Requirements
 
-Endpoints using Brevo
-- POST /subscribe → Sends the template email to the provided address (also upserts contact).
-- POST /waitlist/join → Upserts a contact (with attributes) and, if notifications=true, sends a welcome/confirmation email.
+- Python 3.11 (or newer 3.12) with `pip`
+- OR-Tools native dependencies (installed automatically via `pip`)
+- Optional: [uv](https://docs.astral.sh/uv) for faster dependency management
 
-Testing
-- Use a real inbox you control. After calling the endpoint, check Brevo → Transactional → Logs for status/details.
-- If no email:
-  - Ensure BREVO_TEMPLATE_ID is a valid numeric template ID in Active status.
-  - Ensure BREVO_FROM_EMAIL is a verified sender.
-  - Ensure BREVO_API_KEY has required scopes.
-  - Confirm BREVO_LIST_ID is numeric and exists (if provided).
+## Quickstart
 
-Cleanup
-- Once Brevo is confirmed live, you can remove the legacy Mailchimp variables from `.env` as they are no longer used in code.
-
-## Usage
-
-1. **Start the server**
-   ```bash
-   conda activate dormdish
-   python app.py
-   ```
-
-2. **Test the API**
-   ```bash
-   curl http://localhost:5000/health
-   ```
-
-3. **Generate a meal plan**
-   ```bash
-   curl -X POST http://localhost:5000/generate-meal-plan \
-        -H "Content-Type: application/json" \
-        -d '{
-          "age": 18,
-          "height_feet": 5,
-          "height_inches": 10,
-          "weight_lbs": 175,
-          "activity_level": "very_active",
-          "goal": "bulk",
-          "preferred_dining_hall": "busch"
-        }'
-   ```
-
-## Frontend routing and hosting
-
-Path-based SPA routing is enabled in the frontend. For production hosting, add a fallback so deep links like /login or /dashboard resolve to index.html:
-
-- Netlify: a `_redirects` file is included at `DormDish Website Design/public/_redirects` with:
-  `/* /index.html 200`
-- Vercel (separate frontend project): add a rewrite to serve `/index.html` for all non-asset routes in the frontend project settings or `vercel.json` there. Do not change the root `vercel.json` used by the backend API.
-- Nginx: `try_files $uri /index.html;`
-
-`/dashboard` is protected in-app and requires a valid token. `/dashboard-test` is currently unprotected (optional to guard similarly).
-
-## Architecture
-
-### Data Flow
-1. **User Request** → Flask API endpoint
-2. **Cache Check** → Supabase database lookup
-3. **Fresh Data** → Nutrislice API calls (if not cached)
-4. **Menu Processing** → Extract nutritional information
-5. **AI Generation** → Create personalized meal plan
-6. **Cache Storage** → Save to Supabase for future requests
-
-### Key Components
-
-- **`app.py`**: Main Flask application with API endpoints
-- **`server.py`**: MCP server implementation (alternative approach)
-- **Nutrislice Integration**: Direct API calls to university dining services
-- **Supabase Caching**: Database storage for menu data
-- **OpenAI Integration**: AI-powered meal plan generation
-
-## Configuration
-
-### Activity Levels
-- `sedentary`: Office work, no exercise
-- `active`: Light exercise 3-5 days/week
-- `very_active`: Heavy exercise 6-7 days/week
-
-### Goals
-- `bulk`: Gain weight/muscle (300 calorie surplus)
-- `cut`: Lose weight (500 calorie deficit)
-- `maintain`: Maintain current weight
-
-### Dining Hall Name Variations
-The system accepts multiple name formats:
-- `busch`, `busch-dining-hall`, `busch dining hall`
-- `hopkins`, `hopkins-cafe`, `hopkins cafe`
-- `nolans`, `nolans-on-33rd`, `nolan`
-
-## Database SQL
-
-Run `sql/user_meal_plans.sql` in the Supabase SQL editor to create the `public.user_meal_plans` table with constraints, indexes, and an `updated_at` trigger.
-
-## Development
-
-### Adding New Universities
-1. Add API base URL to `api_bases` in `fetch_nutrislice_menu()`
-2. Configure meal slugs in `meal_configs`
-3. Add dining hall mappings in `dining_hall_mapping`
-4. Update university detection logic
-
-### Running Tests
 ```bash
-# Test individual endpoints
-curl http://localhost:5000/health
-curl http://localhost:5000/menu/busch/2025-09-19
+# clone repository if needed
+$ git clone <repo>
+$ cd dormdish-backend
 
-# Test full meal plan generation
-curl -X POST http://localhost:5000/generate-meal-plan -H "Content-Type: application/json" -d @test_user.json
+# create a virtual environment (python 3.11+ assumed)
+$ python3.11 -m venv .venv
+$ source .venv/bin/activate
+
+# install dependencies in editable mode
+$ pip install -e '.[tests]'
+
+# run the test suite
+$ pytest
 ```
 
-### Environment Variables
-- `SUPABASE_URL`: Your Supabase project URL
-- `SUPABASE_SERVICE_KEY`: Service role key for database access
+> **Note**: The test run requires Python 3.11+. Attempting to install with Python 3.9/3.10 will fail with a version constraint error.
 
-## Automation
+## Running the API
 
-### Daily Menu and User Meal Plan Cleanup
-
-The project includes automated cleanup of old data to keep the database optimized:
-
-**GitHub Actions (Automatic)**
-- Runs daily at 06:00 UTC (`.github/workflows/daily-cleanup.yml`)
-- Deletes previous day's records from both `menus` and `user_meal_plans`
-- Requires repository secrets:
-  - `SUPABASE_URL`
-  - `SUPABASE_SERVICE_KEY` (service role key)
-- You can also trigger it manually via the Actions tab (workflow_dispatch)
-
-Note: A legacy workflow (`cleanup-menus.yml`) is disabled to prevent duplicate runs.
-
-**Manual Cleanup Script**
 ```bash
-# Dry run
-python cleanup_menus.py --dry-run
-# Live - defaults to yesterday
-python cleanup_menus.py
-# Specific date
-python cleanup_menus.py --date 2025-09-18
+$ uvicorn mealplanner.api:app --reload
+```
+
+Endpoints:
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/solve` | POST | Accepts `MealRequest` payload and returns a solved `MealPlan`. |
+| `/sum` | POST | Re-computes totals for an existing `MealPlan` when provided the canonical menu. |
+| `/schema` | GET | Generic JSON schema for the `MealPlan` model (without per-item enums). |
+| `/schema` | POST | Given a `MealRequest`, returns a strict schema suitable for LM Studio response_format. |
+
+Example `curl` request:
+
+```bash
+curl -X POST http://localhost:8000/solve \
+  -H 'Content-Type: application/json' \
+  -d @tests/data/example_request.json
+```
+
+## LM Studio integration
+
+```python
+from mealplanner.lmstudio_tools import build_tool_spec, get_response_format_schema, invoke_tool
+from mealplanner.planner import MealPlanner
+from mealplanner.schemas import MealRequest
+
+menu = [...]  # list of menu items matching schemas.MenuItem
+request = MealRequest(...)
+planner = MealPlanner()
+
+# Register tool with LM Studio
+spec = build_tool_spec()
+response_schema = get_response_format_schema(menu)
+
+# Handle tool call payload
+def solve_meal_plan_tool(payload: dict):
+    return invoke_tool(planner, payload)
+```
+
+- `build_tool_spec()` exposes the OpenAI-compatible function signature.
+- `get_response_format_schema()` returns the strict JSON schema to pass as `response_format`.
+- `invoke_tool()` validates payloads and delegates to the deterministic planner.
+
+## Nutrition sums and verification
+
+All calorie/protein math flows through `mealplanner.nutrition_engine`:
+
+```python
+from mealplanner import nutrition_engine
+from mealplanner.schemas import MealPlan
+
+nutrition_engine.configure_menu(menu)  # canonical menu items
+plan = planner.solve(request)
+totals = nutrition_engine.sum_plan(plan)
+```
+
+Totals are rounded deterministically (kcal to nearest integer, protein grams to nearest gram).
+
+## Testing strategy
+
+- **Unit tests** (`tests/test_nutrition_engine.py`) – conversion correctness, rounding, and nutrition totals.
+- **Solver tests** (`tests/test_solver_feasibility.py`) – verifies feasibility across calorie/protein targets and share windows.
+- **End-to-end tests** (`tests/test_end_to_end.py`) – validates planner output, per-item caps, and FastAPI contract.
+
+Run with:
+
+```bash
+$ pytest
 ```
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **No menu items returned**
-   - Check if the date is valid (dining halls may be closed on weekends/holidays)
-   - Verify dining hall name spelling
-   - Check Nutrislice API availability
-
-2. **Supabase connection errors**
-   - Verify environment variables are set correctly
-   - Check internet connection
-   - Ensure Supabase project is active
-
-3. **AI model errors**
-   - Ensure LM Studio is running with a loaded model
-   - Check model compatibility with OpenAI API format
-   - Verify network connectivity to AI service
-
-### Debug Mode
-The Flask app runs in debug mode by default. Check the console output for detailed error information.
-
-## License
-
-[Add your license information here]
-
-## Contributing
-
-[Add contribution guidelines here]
+- Ensure Python ≥3.11. Use `python3.11` from [`pyenv`](https://github.com/pyenv/pyenv) or system packages if not available by default.
+- If OR-Tools wheels fail, update `pip` and `setuptools` before installation: `pip install --upgrade pip setuptools`.
+- For strict schema generation, guarantee that menu item names match taxonomy aliases so the structured output enums remain synchronized with the solver.

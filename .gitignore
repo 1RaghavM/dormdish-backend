@@ -250,6 +250,12 @@ jspm_packages/
 # nuxt.js build output
 .nuxt
 
+.tests/
+
+meal_planner_ui.py
+
+
+
 evaluate_prompt_model.py
 
 
