@@ -8,14 +8,7 @@
   ],
   "functions": {
     "api/index.py": {
-      "includeFiles": [
-        "app.py",
-        "extract.py",
-        "cleanup_menus.py",
-        "meals_trimmed.json",
-        "sql/**",
-        "src/**"
-      ]
+      "includeFiles": "extract.py"
     }
   },
   "routes": [
