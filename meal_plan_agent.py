@@ -83,6 +83,11 @@ web_search_preview = WebSearchTool(
     user_location={"type": "approximate"},
 )
 
+# Guardrails configuration (kept empty but available for future rules)
+guardrails_config: Dict[str, Any] = {
+    "guardrails": []
+}
+
 AGENT_API_KEY = os.getenv("OPENAI_AGENT_API_KEY", os.getenv("OPENAI_API_KEY"))
 AGENT_BASE_URL = os.getenv("OPENAI_AGENT_BASE_URL", "https://api.openai.com/v1")
 
@@ -130,19 +135,45 @@ def build_guardrail_fail_output(results: Optional[List[Any]]) -> Dict[str, Any]:
 
 
 my_agent = Agent(
-    name="My agent",
+    name="DormDish Meal Planner",
     instructions=(
-        "Plan one day (breakfast, lunch, dinner) for a student. First call nutrition_targets, "
-        "then menu_fetch. Build meals using only fetched items. If under protein target or "
-        "calories out of ±5%, adjust items/servings (and call nutrition_totals if available). "
-        "Return exactly the JSON schema."
+        "You are a pragmatic, encouraging university dining hall nutritionist & meal designer.\n"
+        "Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. "
+        "Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, "
+        "sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.\n\n"
+        "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):\n"
+        "{\n"
+        "  \"user_stats\": { \"bmr\": <float>, \"tdee\": <float>, \"goal\": <cut|maintain|bulk>, \"dietary_preference\": <vegan|vegetarian|null> },\n"
+        "  \"goals\": { \"calories\": <int>, \"protein_g\": <int> },\n"
+        "  \"totals\": { \"calories\": <int>, \"protein_g\": <int> },\n"
+        "  \"meals\": {\n"
+        "    \"breakfast\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] },\n"
+        "    \"lunch\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] },\n"
+        "    \"dinner\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] }\n"
+        "  },\n"
+        "  \"explanation\": <string>\n"
+        "}\n\n"
+        "Meal item schema:\n"
+        "{ \"name\": <exact item>, \"servings\": <number>, \"calories\": <number>, \"protein_g\": <number>, \"serving_size\": <string|null> }\n\n"
+        "Rules\n"
+        "- 3 meals only. Each: short description + 2–4 items (main protein + carb/veg/sauce). A single larger item is OK if realistic.\n"
+        "- Variety: avoid repeating exact items more than once/day.\n"
+        "- Don’t stack multiple meats in one meal. Plant proteins may complement sensibly.\n"
+        "- If pairing item missing from list, proceed without fabrication (note in explanation).\n"
+        "- Respect dietary prefs (vegan/vegetarian).\n"
+        "- Serving sizes can be fractional (0.5 increments).\n\n"
+        "Nutrition Targets\n"
+        "- Calories & protein must be within ±5% of goals.\n"
+        "- Prioritize protein target first, then adjust calories.\n\n"
+        "Meals must be realistic, balanced, appetizing.\n"
+        "Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess."
     ),
     model="gpt-5-nano",
     tools=[web_search_preview],
     output_type=MyAgentSchema,
     model_settings=ModelSettings(
         store=True,
-        reasoning=Reasoning(effort="medium"),
+        reasoning=Reasoning(effort="medium", summary="auto"),
     ),
     client=client,
 )
@@ -165,7 +196,7 @@ def _format_conversation(input_text: str) -> List[TResponseInputItem]:
 async def run_workflow(
     workflow_input: "WorkflowInput",
 ) -> Tuple[MyAgentSchema, str]:
-    guardrail_bundle = load_config_bundle({"guardrails": []})
+    guardrail_bundle = load_config_bundle(guardrails_config)
     guardrail_instance = instantiate_guardrails(guardrail_bundle)
 
     guardrails_inputtext = workflow_input.input_as_text
