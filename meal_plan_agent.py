@@ -166,6 +166,8 @@ my_agent = Agent(
         "- Calories & protein must be within ±5% of goals.\n"
         "- Prioritize protein target first, then adjust calories.\n\n"
         "Meals must be realistic, balanced, appetizing.\n"
+        "You are allowed to modify the serving sizes of the items. "
+        "Use web search to see how to properly pair items and ensure nutritional balance.\n\n"
         "Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess."
     ),
     model="gpt-5-nano",
