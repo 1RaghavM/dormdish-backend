@@ -164,8 +164,6 @@ def _format_conversation(input_text: str) -> List[TResponseInputItem]:
 
 async def run_workflow(
     workflow_input: "WorkflowInput",
-    *,
-    extra_system_messages: Optional[List[str]] = None,
 ) -> Tuple[MyAgentSchema, str]:
     guardrail_bundle = load_config_bundle({"guardrails": []})
     guardrail_instance = instantiate_guardrails(guardrail_bundle)
@@ -189,7 +187,6 @@ async def run_workflow(
     conversation_history = _format_conversation(guardrails_text)
     response_model, raw_text = await my_agent.arun(
         conversation_history=conversation_history,
-        extra_system_messages=extra_system_messages,
     )
     return response_model, raw_text
 
@@ -203,7 +200,6 @@ async def generate_meal_plan_with_agent(
     user_payload: Dict[str, Any],
     menu_payload: Dict[str, Any],
     nutrition_targets: Dict[str, Any],
-    extra_system_messages: Optional[List[str]] = None,
 ) -> Tuple[MyAgentSchema, str]:
     serialized_input = json.dumps(
         {
@@ -214,4 +210,4 @@ async def generate_meal_plan_with_agent(
         ensure_ascii=False,
     )
     workflow_input = WorkflowInput(input_as_text=serialized_input)
-    return await run_workflow(workflow_input, extra_system_messages=extra_system_messages)
+    return await run_workflow(workflow_input)

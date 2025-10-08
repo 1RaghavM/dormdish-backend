@@ -1690,8 +1690,6 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
 
-        system_prompt = build_meal_plan_system_prompt(allowed_for_prompt)
-
         agent_user_payload = {
             "age": user.age,
             "height_feet": user.height_feet,
@@ -1725,7 +1723,6 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 user_payload=agent_user_payload,
                 menu_payload=agent_menu_payload,
                 nutrition_targets=agent_nutrition_targets,
-                extra_system_messages=[system_prompt],
             )
         except ValueError as e:
             raise HTTPException(status_code=500, detail=f"Agent execution failed: {e}")
