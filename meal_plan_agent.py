@@ -175,7 +175,7 @@ my_agent = Agent(
     output_type=MyAgentSchema,
     model_settings=ModelSettings(
         store=True,
-        reasoning=Reasoning(effort="medium", summary="auto"),
+        reasoning=Reasoning(effort="low", summary="auto"),
     ),
     client=client,
 )
