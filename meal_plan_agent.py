@@ -1,246 +1,296 @@
-from __future__ import annotations
-
 import json
 import os
-from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from pydantic import BaseModel
+from agents import WebSearchTool, Agent, ModelSettings, TResponseInputItem
 from openai import AsyncOpenAI
-from openai.types.shared.reasoning import Reasoning
+from types import SimpleNamespace
+from pydantic import BaseModel
 
-from agents import Agent, ModelSettings, TResponseInputItem, WebSearchTool
+try:  # Reasoning support is model-dependent; older SDKs may not expose it
+  from openai.types.shared.reasoning import Reasoning  # type: ignore
+except ImportError:  # pragma: no cover - optional feature
+  Reasoning = None  # type: ignore
 
-try:  # pragma: no cover - optional dependency
-    from guardrails.runtime import (  # type: ignore
-        instantiate_guardrails,
-        load_config_bundle,
-        run_guardrails,
-    )
-except Exception:  # pragma: no cover - fallback for local/test environments
+try:  # Guardrails is optional in local/dev environments
+  from guardrails.runtime import load_config_bundle, instantiate_guardrails, run_guardrails  # type: ignore
+  GUARDRAILS_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - dependency optional
+  GUARDRAILS_AVAILABLE = False
 
-    async def run_guardrails(  # type: ignore
-        _ctx: Any,
-        _input_text: str,
-        _content_type: str,
-        _guardrails: Any,
-        suppress_tripwire: bool = True,
-    ) -> List[Any]:
-        return []
+  def load_config_bundle(config: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore
+    return config
 
-    def load_config_bundle(config: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore
-        return config
+  def instantiate_guardrails(config: Dict[str, Any]):  # type: ignore
+    return None
 
-    def instantiate_guardrails(config: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore
-        return config
+  async def run_guardrails(*_args: Any, **_kwargs: Any) -> List[Any]:  # type: ignore
+    return []
 
+# Tool definitions
+web_search_preview = WebSearchTool(
+  filters={
+    "allowed_domains": [
+      "nutritionsource.hsph.harvard.edu",
+      "www.healthline.com",
+      "pmc.ncbi.nlm.nih.gov"
+    ]
+  },
+  search_context_size="medium",
+  user_location={
+    "type": "approximate"
+  }
+)
+# Shared client for guardrails and file search
+client = AsyncOpenAI()
+ctx = SimpleNamespace(guardrail_llm=client)
+# Guardrails definitions
+guardrails_config = {
+  "guardrails": [
 
-class MyAgentSchemaUserStats(BaseModel):
+  ]
+}
+# Guardrails utils
+
+def guardrails_has_tripwire(results):
+    return any(getattr(r, "tripwire_triggered", False) is True for r in (results or []))
+
+def get_guardrail_checked_text(results, fallback_text):
+    for r in (results or []):
+        info = getattr(r, "info", None) or {}
+        if isinstance(info, dict) and ("checked_text" in info):
+            return info.get("checked_text") or fallback_text
+    return fallback_text
+
+def build_guardrail_fail_output(results):
+    failures = []
+    for r in (results or []):
+        if getattr(r, "tripwire_triggered", False):
+            info = getattr(r, "info", None) or {}
+            failure = {
+                "guardrail_name": info.get("guardrail_name"),
+            }
+            for key in ("flagged", "confidence", "threshold", "hallucination_type", "hallucinated_statements", "verified_statements"):
+                if key in (info or {}):
+                    failure[key] = info.get(key)
+            failures.append(failure)
+    return {"failed": len(failures) > 0, "failures": failures}
+class DormdishMealPlannerSchema__UserStats(BaseModel):
     bmr: float
     tdee: float
     goal: str
-    dietary_preference: Optional[str]
+    dietary_preference: Optional[str] = None
 
 
-class MyAgentSchemaGoals(BaseModel):
+class DormdishMealPlannerSchema__Goals(BaseModel):
     calories: float
     protein_g: float
 
 
-class MyAgentSchemaTotals(BaseModel):
+class DormdishMealPlannerSchema__Totals(BaseModel):
     calories: float
     protein_g: float
 
 
-class MyAgentSchemaMeal(BaseModel):
+class DormdishMealPlannerSchema__MealItem(BaseModel):
+    name: str
+    servings: float
+    calories: float
+    protein_g: float
+    serving_size: Optional[str] = None
+
+
+class DormdishMealPlannerSchema__Meal(BaseModel):
     description: str
-    items: List[Dict[str, Any]]
+    items: List[DormdishMealPlannerSchema__MealItem]
 
 
-class MyAgentSchemaMeals(BaseModel):
-    breakfast: MyAgentSchemaMeal
-    lunch: MyAgentSchemaMeal
-    dinner: MyAgentSchemaMeal
+class DormdishMealPlannerSchema__Meals(BaseModel):
+    breakfast: DormdishMealPlannerSchema__Meal
+    lunch: DormdishMealPlannerSchema__Meal
+    dinner: DormdishMealPlannerSchema__Meal
 
 
-class MyAgentSchema(BaseModel):
-    user_stats: MyAgentSchemaUserStats
-    goals: MyAgentSchemaGoals
-    totals: MyAgentSchemaTotals
-    meals: MyAgentSchemaMeals
+class DormdishMealPlannerSchema(BaseModel):
+    user_stats: DormdishMealPlannerSchema__UserStats
+    goals: DormdishMealPlannerSchema__Goals
+    totals: DormdishMealPlannerSchema__Totals
+    meals: DormdishMealPlannerSchema__Meals
     explanation: str
+    meta: Optional[Dict[str, Any]] = None
 
 
-web_search_preview = WebSearchTool(
-    filters={
-        "allowed_domains": [
-            "nutritionsource.hsph.harvard.edu",
-            "www.healthline.com",
-            "pmc.ncbi.nlm.nih.gov",
-        ]
-    },
-    search_context_size="medium",
-    user_location={"type": "approximate"},
-)
+dormdish_meal_planner = Agent(
+    name="DormDish Meal Planner",
+    instructions="""
+You are a pragmatic, encouraging university dining hall nutritionist & meal designer.
+Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.
 
-# Guardrails configuration (kept empty but available for future rules)
-guardrails_config: Dict[str, Any] = {
-    "guardrails": []
+STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):
+{
+  "user_stats": { "bmr": "<float>", "tdee": "<float>", "goal": "<cut|maintain|bulk>", "dietary_preference": "<vegan|vegetarian|null>" },
+  "goals": { "calories": "<int>", "protein_g": "<int>" },
+  "totals": { "calories": "<int>", "protein_g": "<int>" },
+  "meals": {
+    "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },
+    "lunch": { "description": "<string>", "items": [ "<meal_item>", ... ] },
+    "dinner": { "description": "<string>", "items": [ "<meal_item>", ... ] }
+  },
+  "explanation": "<string>"
 }
 
-AGENT_API_KEY = os.getenv("OPENAI_AGENT_API_KEY", os.getenv("OPENAI_API_KEY"))
-AGENT_BASE_URL = os.getenv("OPENAI_AGENT_BASE_URL", "https://api.openai.com/v1")
+Meal item schema:
+{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "serving_size": "<string|null>" }
 
-client = AsyncOpenAI(
-    api_key=AGENT_API_KEY,
-    base_url=AGENT_BASE_URL,
-)
-ctx = SimpleNamespace(guardrail_llm=client)
+Rules
+- 3 meals only. Each: short description + 2–4 items (main protein + carb/veg/sauce). A single larger item is OK if realistic.
+- Variety: avoid repeating exact items more than once/day.
+- Don’t stack multiple meats in one meal. Plant proteins may complement sensibly.
+- If pairing item missing from list, proceed without fabrication (note in explanation).
+- Respect dietary prefs (vegan/vegetarian).
+- Serving sizes can be fractional (0.5 increments).
 
-
-def guardrails_has_tripwire(results: Optional[List[Any]]) -> bool:
-    return any(getattr(r, "tripwire_triggered", False) for r in results or [])
-
-
-def get_guardrail_checked_text(results: Optional[List[Any]], fallback_text: str) -> str:
-    for result in results or []:
-        info = getattr(result, "info", None) or {}
-        if isinstance(info, dict) and "checked_text" in info:
-            checked = info.get("checked_text")
-            if isinstance(checked, str) and checked:
-                return checked
-    return fallback_text
-
-
-def build_guardrail_fail_output(results: Optional[List[Any]]) -> Dict[str, Any]:
-    failures: List[Dict[str, Any]] = []
-    for result in results or []:
-        if getattr(result, "tripwire_triggered", False):
-            info = getattr(result, "info", None) or {}
-            failure: Dict[str, Any] = {
-                "guardrail_name": info.get("guardrail_name"),
-            }
-            for key in (
-                "flagged",
-                "confidence",
-                "threshold",
-                "hallucination_type",
-                "hallucinated_statements",
-                "verified_statements",
-            ):
-                if key in info:
-                    failure[key] = info.get(key)
-            failures.append(failure)
-    return {"failed": bool(failures), "failures": failures}
-
-
-my_agent = Agent(
-    name="DormDish Meal Planner",
-    instructions=(
-        "You are a pragmatic, encouraging university dining hall nutritionist & meal designer.\n"
-        "Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. "
-        "Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, "
-        "sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.\n\n"
-        "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):\n"
-        "{\n"
-        "  \"user_stats\": { \"bmr\": <float>, \"tdee\": <float>, \"goal\": <cut|maintain|bulk>, \"dietary_preference\": <vegan|vegetarian|null> },\n"
-        "  \"goals\": { \"calories\": <int>, \"protein_g\": <int> },\n"
-        "  \"totals\": { \"calories\": <int>, \"protein_g\": <int> },\n"
-        "  \"meals\": {\n"
-        "    \"breakfast\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] },\n"
-        "    \"lunch\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] },\n"
-        "    \"dinner\": { \"description\": <string>, \"items\": [ <meal_item>, ... ] }\n"
-        "  },\n"
-        "  \"explanation\": <string>\n"
-        "}\n\n"
-        "Meal item schema:\n"
-        "{ \"name\": <exact item>, \"servings\": <number>, \"calories\": <number>, \"protein_g\": <number>, \"serving_size\": <string|null> }\n\n"
-        "Rules\n"
-        "- 3 meals only. Each: short description + 2–4 items (main protein + carb/veg/sauce). A single larger item is OK if realistic.\n"
-        "- Variety: avoid repeating exact items more than once/day.\n"
-        "- Don’t stack multiple meats in one meal. Plant proteins may complement sensibly.\n"
-        "- If pairing item missing from list, proceed without fabrication (note in explanation).\n"
-        "- Respect dietary prefs (vegan/vegetarian).\n"
-        "- Serving sizes can be fractional (0.5 increments).\n\n"
-        "Nutrition Targets\n"
-        "- Calories & protein must be within ±5% of goals.\n"
-        "- Prioritize protein target first, then adjust calories.\n\n"
-        "Meals must be realistic, balanced, appetizing.\n"
-        "You are allowed to modify the serving sizes of the items. "
-        "Use web search to see how to properly pair items and ensure nutritional balance.\n\n"
-        "Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess."
-    ),
+Nutrition Targets
+- Calories & protein must be within ±5% of goals.
+- Prioritize protein target first, then adjust calories.
+- Meals must be realistic, balanced, appetizing.
+- Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess.
+""",
     model="gpt-5-nano",
     tools=[web_search_preview],
-    output_type=MyAgentSchema,
+    output_type=DormdishMealPlannerSchema,
     model_settings=ModelSettings(
         store=True,
-        reasoning=Reasoning(effort="low", summary="auto"),
+        reasoning=Reasoning(effort="medium", summary="auto") if Reasoning else None,
     ),
     client=client,
+    temperature=1.0,
 )
 
 
-def _format_conversation(input_text: str) -> List[TResponseInputItem]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": input_text,
-                }
-            ],
-        }
-    ]
+def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] = None) -> str:
+  if not items:
+    return "- (no items provided)"
+
+  limit = limit or len(items)
+  lines: List[str] = []
+  for idx, item in enumerate(items):
+    if idx >= limit:
+      break
+    name = str(item.get("name", "")).strip()
+    cal = item.get("calories")
+    prot = item.get("protein_g")
+    serving = item.get("serving_size")
+    parts: List[str] = [name or "(unnamed item)"]
+    if cal is not None:
+      parts.append(f"{float(cal):.0f} cal")
+    if prot is not None:
+      parts.append(f"{float(prot):.1f} g protein")
+    if serving:
+      parts.append(f"serving: {serving}")
+    lines.append(" - " + " | ".join(parts))
+
+  remaining = max(0, len(items) - limit)
+  if remaining:
+    lines.append(f" - … {remaining} more items omitted for brevity")
+  return "\n".join(lines)
 
 
-async def run_workflow(
-    workflow_input: "WorkflowInput",
-) -> Tuple[MyAgentSchema, str]:
-    guardrail_bundle = load_config_bundle(guardrails_config)
-    guardrail_instance = instantiate_guardrails(guardrail_bundle)
+def _build_agent_prompt(
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Dict[str, Any],
+  *,
+  max_items: Optional[int] = None,
+) -> str:
+  hall = menu_payload.get("requested_dining_hall") or menu_payload.get("hall")
+  date = menu_payload.get("requested_date")
+  allowed_items = menu_payload.get("allowed_items") or []
+  if max_items is None:
+    try:
+      max_items = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "150"))
+    except ValueError:
+      max_items = 150
 
-    guardrails_inputtext = workflow_input.input_as_text
-    guardrails_result = await run_guardrails(
-        ctx,
-        guardrails_inputtext,
-        "text/plain",
-        guardrail_instance,
-        suppress_tripwire=True,
-    )
+  menu_meta = {}
+  source_menu = menu_payload.get("source_menu")
+  if isinstance(source_menu, dict):
+    menu_meta = {
+      "hall_slug": source_menu.get("hall_slug"),
+      "meal_sources": source_menu.get("menu", {}).get("meal_sources")
+      if isinstance(source_menu.get("menu"), dict)
+      else None,
+    }
 
-    guardrails_hastripwire = guardrails_has_tripwire(guardrails_result)
-    guardrails_text = get_guardrail_checked_text(guardrails_result, guardrails_inputtext)
+  prompt_sections = [
+    "# USER PROFILE",
+    json.dumps(user_payload, indent=2, ensure_ascii=False),
+    "",
+    "# NUTRITION TARGETS",
+    json.dumps(nutrition_targets, indent=2, ensure_ascii=False),
+    "",
+    "# DINING CONTEXT",
+    json.dumps({"dining_hall": hall, "date": date, "meta": menu_meta}, indent=2, ensure_ascii=False),
+    "",
+    "# ALLOWED MENU ITEMS (name | calories | protein | serving)",
+    _render_allowed_items(allowed_items, limit=max_items),
+    "",
+    "Generate the meal plan strictly in the JSON schema described in the system instructions above.",
+    "Do not include markdown backticks or additional commentary outside the JSON object.",
+  ]
 
-    if guardrails_hastripwire:
-        payload = build_guardrail_fail_output(guardrails_result)
-        raise ValueError(f"Guardrail tripwire triggered: {json.dumps(payload)}")
-
-    conversation_history = _format_conversation(guardrails_text)
-    response_model, raw_text = await my_agent.arun(
-        conversation_history=conversation_history,
-    )
-    return response_model, raw_text
-
-
-class WorkflowInput(BaseModel):
-    input_as_text: str
+  return "\n".join(section for section in prompt_sections if section is not None)
 
 
 async def generate_meal_plan_with_agent(
-    *,
-    user_payload: Dict[str, Any],
-    menu_payload: Dict[str, Any],
-    nutrition_targets: Dict[str, Any],
-) -> Tuple[MyAgentSchema, str]:
-    serialized_input = json.dumps(
+  *,
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Dict[str, Any],
+  extra_system_messages: Optional[Sequence[str]] = None,
+) -> Tuple[DormdishMealPlannerSchema, str]:
+  """Run the DormDish agent and return the validated response plus raw text."""
+
+  prompt = _build_agent_prompt(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+  )
+
+  result, raw_response = await dormdish_meal_planner.arun(
+    input_text=prompt,
+    extra_system_messages=extra_system_messages,
+  )
+  return result, raw_response
+
+
+class WorkflowInput(BaseModel):
+  input_as_text: str
+
+
+# Main code entrypoint
+async def run_workflow(workflow_input: WorkflowInput):
+  state = {
+
+  }
+  workflow = workflow_input.model_dump()
+  conversation_history: list[TResponseInputItem] = [
+    {
+      "role": "user",
+      "content": [
         {
-            "user": user_payload,
-            "menu": menu_payload,
-            "nutrition_targets": nutrition_targets,
-        },
-        ensure_ascii=False,
-    )
-    workflow_input = WorkflowInput(input_as_text=serialized_input)
-    return await run_workflow(workflow_input)
+          "type": "input_text",
+          "text": workflow["input_as_text"]
+        }
+      ]
+    }
+  ]
+  guardrails_inputtext = workflow["input_as_text"]
+  guardrails_result = await run_guardrails(ctx, guardrails_inputtext, "text/plain", instantiate_guardrails(load_config_bundle(guardrails_config)), suppress_tripwire=True)
+  guardrails_hastripwire = guardrails_has_tripwire(guardrails_result)
+  guardrails_anonymizedtext = get_guardrail_checked_text(guardrails_result, guardrails_inputtext)
+  guardrails_output = (guardrails_hastripwire and build_guardrail_fail_output(guardrails_result or [])) or (guardrails_anonymizedtext or guardrails_inputtext)
+  if guardrails_hastripwire:
+    return guardrails_output
+  else:
+    return guardrails_output

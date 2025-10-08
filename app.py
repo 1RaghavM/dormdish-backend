@@ -101,6 +101,31 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+_MENU_CACHE: Dict[str, Tuple[float, dict]] = {}
+_MENU_CACHE_TTL = int(os.getenv("MENU_CACHE_TTL_SECONDS", "600"))
+
+
+def _menu_cache_key(university: str, dining_hall: str, date: str) -> str:
+    return f"{university}|{dining_hall}|{date}"
+
+
+def _menu_cache_get(university: str, dining_hall: str, date: str) -> Optional[dict]:
+    key = _menu_cache_key(university, dining_hall, date)
+    cached = _MENU_CACHE.get(key)
+    if not cached:
+        return None
+    ts, payload = cached
+    if (time.time() - ts) <= _MENU_CACHE_TTL:
+        return payload
+    _MENU_CACHE.pop(key, None)
+    return None
+
+
+def _menu_cache_set(university: str, dining_hall: str, date: str, payload: dict) -> None:
+    key = _menu_cache_key(university, dining_hall, date)
+    _MENU_CACHE[key] = (time.time(), payload)
+
+
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
     salt = bcrypt.gensalt()
@@ -1072,9 +1097,15 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
+    mem_cached = _menu_cache_get(university, dining_hall, date)
+    if mem_cached is not None:
+        print(f"✅ Using in-memory cached menu for {university}/{dining_hall}/{date}")
+        return mem_cached
+
     cached_menu = get_menu_from_supabase(university, dining_hall, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
+        _menu_cache_set(university, dining_hall, date, cached_menu)
         return cached_menu
 
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
@@ -1086,6 +1117,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
             save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
+            _menu_cache_set(university, dining_hall, date, menu_data)
             return menu_data
         except Exception as e:
             print(f"❌ FoodPro fetch failed: {e}")
@@ -1099,6 +1131,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             return {"error": f"No menu items available for {hall_slug} on {date}"}
         save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
+        _menu_cache_set(university, dining_hall, date, menu_data)
         return menu_data
     except Exception as e:
         return {"error": f"Failed to fetch menu: {str(e)}"}
@@ -1883,12 +1916,7 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
 async def get_supported_dining_halls():
     """Get list of supported dining halls"""
-    try:
-        response = requests.get("https://dormdish-mcp.vercel.app/universities", timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        fallback_dining_halls = [
+    fallback_dining_halls = [
             {
                 "university": "rutgers",
                 "name": "Rutgers University",
@@ -1910,8 +1938,8 @@ async def get_supported_dining_halls():
                 ],
             },
         ]
-        print(f"⚠️ External dining halls service unavailable, using fallback: {str(e)}")
-        return fallback_dining_halls
+        #print(f"⚠️ External dining halls service unavailable, using fallback: {str(e)}")
+    return fallback_dining_halls
 
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
