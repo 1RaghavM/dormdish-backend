@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, Depends, status, Header, Body, Backg
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr
-from openai import OpenAI
 import requests
 import json
 import os
@@ -29,7 +28,6 @@ from fastapi import Request
 from uuid import UUID, uuid4
 import secrets as _secrets_for_google  
 from difflib import get_close_matches
-import math
 import traceback
 
 try:
@@ -67,6 +65,8 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 load_dotenv()
 
+from meal_plan_agent import generate_meal_plan_with_agent
+
 app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
 
 
@@ -92,14 +92,8 @@ app.add_middleware(
 )
 
 
-
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MEAL_PLAN_MODEL = os.getenv("MEAL_PLAN_MODEL", "openai/gpt-oss-20b")
-
-client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
-
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your_openai_api_key_here")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "your_supabase_url_here")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here")
@@ -159,38 +153,55 @@ def verify_session_token(token: str) -> Optional[dict]:
         print(f"Error verifying session: {e}")
         return None
 
-def calculate_bmr_tdee(age: int, height_feet: int, height_inches: int, weight_lbs: float, 
-                      gender: str, activity_level: str) -> Dict[str, float]:
-    """Calculate BMR and TDEE based on user stats"""
-    
-    height_cm = ((height_feet * 12) + height_inches) * 2.54
-    weight_kg = weight_lbs * 0.453592
-    
-    
-    if gender.lower() == 'male':
-        bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) + 5
-    elif gender.lower() == 'female':
-        bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) - 161
+ACTIVITY_MULTIPLIERS: Dict[str, Tuple[float, str]] = {
+    "sedentary": (1.2, "Sedentary: little or no exercise"),
+    "lightly_active": (1.375, "Exercise 1-3 times/week"),
+    "moderately_active": (1.55, "Exercise 4-5 times/week"),
+    "very_active": (1.725, "Daily exercise or intense exercise 3-4 times/week"),
+    "extremely_active": (1.9, "Intense exercise 6-7 times/week"),
+    "super_active": (2.2, "Very intense exercise daily, or physical job"),
+}
+
+
+def calculate_bmr_tdee(age: int, height_feet: int, height_inches: int, weight_lbs: float,
+                      gender: str, activity_level: str) -> Dict[str, object]:
+    """Calculate BMR and TDEE using the Mifflin-St Jeor equation, mirroring calculator.net."""
+
+    total_inches = (height_feet * 12) + height_inches
+    height_cm = total_inches * 2.54
+    weight_kg = weight_lbs * 0.45359237
+
+    gender_normalized = (gender or "").strip().lower()
+    base_component = (10 * weight_kg) + (6.25 * height_cm) - (5 * age)
+
+    if gender_normalized in {"male", "man", "m"}:
+        bmr_raw = base_component + 5
+    elif gender_normalized in {"female", "woman", "f"}:
+        bmr_raw = base_component - 161
     else:
-        
-        bmr = (10 * weight_kg) + (6.25 * height_cm) - (5 * age) + 5
-    
-    
-    activity_multipliers = {
-        'sedentary': 1.2,
-        'lightly_active': 1.375,
-        'moderately_active': 1.55,
-        'very_active': 1.725,
-        'extremely_active': 1.9,
-        'super_active': 2.2
-    }
-    
-    multiplier = activity_multipliers.get(activity_level, 1.55)
-    tdee = bmr * multiplier
-    
+        male_estimate = base_component + 5
+        female_estimate = base_component - 161
+        bmr_raw = (male_estimate + female_estimate) / 2.0
+
+    default_multiplier = ACTIVITY_MULTIPLIERS.get("moderately_active", (1.55, ""))[0]
+    multiplier = ACTIVITY_MULTIPLIERS.get(activity_level, (default_multiplier, ""))[0]
+
+    tdee_raw = bmr_raw * multiplier
+
+    activity_breakdown: Dict[str, Dict[str, float]] = {}
+    for key, (mult, description) in ACTIVITY_MULTIPLIERS.items():
+        activity_breakdown[key] = {
+            "label": description,
+            "multiplier": mult,
+            "calories": int(round(bmr_raw * mult)),
+        }
+
     return {
-        'bmr': round(bmr, 2),
-        'tdee': round(tdee, 2)
+        "bmr": int(round(bmr_raw)),
+        "tdee": int(round(tdee_raw)),
+        "bmr_precise": round(bmr_raw, 2),
+        "tdee_precise": round(tdee_raw, 2),
+        "activity_breakdown": activity_breakdown,
     }
 
 @dataclass
@@ -1528,72 +1539,6 @@ def _estimate_missing_macros(calories: Optional[float], protein: Optional[float]
     return float(calories), float(protein)
 
 
-def _backend_recompute_meal_macros(plan: dict, nutrition_lookup: Dict[str, dict]) -> dict:
-    """Recompute all macros authoritatively from nutrition database.
-    Models are bad at math - backend does all calculations.
-    """
-    total_cal = 0.0
-    total_prot = 0.0
-    
-    for meal_key in ["breakfast", "lunch", "dinner"]:
-        meal = plan.get("meals", {}).get(meal_key, {})
-        if not isinstance(meal, dict):
-            continue
-            
-        valid_items = []
-        for it in meal.get("items", []) or []:
-            if not isinstance(it, dict):
-                continue
-                
-            name = it.get("name")
-            if not name:
-                continue
-                
-            
-            k = _fuzzy_lookup(name, nutrition_lookup)
-            if not k:
-                print(f"⚠️ Dropped unknown item: {name}")
-                continue
-                
-            
-            nutr = nutrition_lookup[k]
-            base_cal = float(nutr.get("calories", 0) or 0)
-            base_prot = float(nutr.get("protein_g", 0) or 0)
-            
-            
-            servings = it.get("servings", 1)
-            try:
-                servings = float(servings)
-                if servings <= 0 or servings > 10:
-                    servings = 1.0
-            except (ValueError, TypeError):
-                servings = 1.0
-            
-            
-            item_cal = base_cal * servings
-            item_prot = base_prot * servings
-            
-            
-            it["name"] = nutr["name"]
-            it["servings"] = round(servings, 2)
-            it["calories"] = round(item_cal, 1)
-            it["protein_g"] = round(item_prot, 1)
-            it["serving_size"] = nutr.get("serving_size") or None
-            
-            valid_items.append(it)
-            total_cal += item_cal
-            total_prot += item_prot
-        
-        meal["items"] = valid_items
-    
-    
-    plan.setdefault("totals", {})
-    plan["totals"]["calories"] = round(total_cal, 1)
-    plan["totals"]["protein_g"] = round(total_prot, 1)
-    
-    return plan
-
-
 def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
     """Fuzzy lookup for item names in nutrition database."""
     if name.upper() in lookup:
@@ -1605,11 +1550,6 @@ def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
     if candidates:
         return lower_map[candidates[0]]
     return None
-
-
-def _recompute_totals(plan: dict, nutrition_lookup: Dict[str, dict]) -> dict:
-    """Legacy recompute function - redirects to authoritative backend recompute."""
-    return _backend_recompute_meal_macros(plan, nutrition_lookup)
 
 @app.put("/auth/profile", summary="Update User Profile")
 async def update_profile(profile_data: UpdateProfileRequest, current_user=Depends(get_current_user)):
@@ -1653,7 +1593,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
 
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
-    """Generate a meal plan for a user (authenticated) with backend-authoritative macro math.
+    """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
     Returns legacy MealPlanResponse wrapper expected by frontend.
     """
     t_start = time.time()
@@ -1675,8 +1615,36 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             preferred_dining_hall=meal_plan_request.dining_hall,
             dietary_preference=authenticated_user.get('dietary_preference'),
         )
-        user_bmr = float(authenticated_user['bmr'])
-        user_tdee = float(authenticated_user['tdee'])
+        metrics = calculate_bmr_tdee(
+            age=user.age,
+            height_feet=user.height_feet,
+            height_inches=user.height_inches,
+            weight_lbs=user.weight_lbs,
+            gender=authenticated_user.get('gender'),
+            activity_level=user.activity_level,
+        )
+        user_bmr = float(metrics["bmr"])
+        user_tdee = float(metrics["tdee"])
+        user_act_breakdown = metrics.get("activity_breakdown", {})
+
+        stored_bmr = authenticated_user.get("bmr")
+        stored_tdee = authenticated_user.get("tdee")
+        try:
+            stored_bmr_val = float(stored_bmr) if stored_bmr is not None else None
+            stored_tdee_val = float(stored_tdee) if stored_tdee is not None else None
+        except (TypeError, ValueError):
+            stored_bmr_val, stored_tdee_val = None, None
+
+        if stored_bmr_val != user_bmr or stored_tdee_val != user_tdee:
+            try:
+                supabase.table("users").update({
+                    "bmr": user_bmr,
+                    "tdee": user_tdee,
+                }).eq("id", authenticated_user['id']).execute()
+                authenticated_user['bmr'] = user_bmr
+                authenticated_user['tdee'] = user_tdee
+            except Exception as update_exc:
+                print(f"⚠️ Failed to persist refreshed BMR/TDEE: {update_exc}")
 
         menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
@@ -1723,40 +1691,47 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
 
         system_prompt = build_meal_plan_system_prompt(allowed_for_prompt)
-        allowed_names_only = "\n".join([e['name'] for e in allowed_for_prompt])
-        user_content = (
-            f"User goal: {goal_mode}. Dietary preference: {user.dietary_preference or 'none'}.\n"
-            f"Calorie target: {calorie_target}\nProtein target: {protein_target}\n"
-            f"Allowed item names (reference list):\n{allowed_names_only}\n"
-            "Return the required JSON schema."
-        )
 
-        
+        agent_user_payload = {
+            "age": user.age,
+            "height_feet": user.height_feet,
+            "height_inches": user.height_inches,
+            "weight_lbs": user.weight_lbs,
+            "activity_level": user.activity_level,
+            "goal": goal_mode,
+            "dietary_preference": user.dietary_preference,
+            "bmr": user_bmr,
+            "tdee": user_tdee,
+            "activity_breakdown": user_act_breakdown,
+        }
+        agent_menu_payload = {
+            "requested_dining_hall": meal_plan_request.dining_hall,
+            "requested_date": meal_plan_request.date,
+            "source_menu": menu_data,
+            "allowed_items": allowed_for_prompt,
+        }
+        agent_nutrition_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+            "bmr": user_bmr,
+            "tdee": user_tdee,
+            "goal": goal_mode,
+            "activity_breakdown": user_act_breakdown,
+        }
+
         ai_start = time.time()
         try:
-            completion = client.chat.completions.create(
-                model=MEAL_PLAN_MODEL,
-                temperature=0.4,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
+            agent_result, agent_raw_text = await generate_meal_plan_with_agent(
+                user_payload=agent_user_payload,
+                menu_payload=agent_menu_payload,
+                nutrition_targets=agent_nutrition_targets,
+                extra_system_messages=[system_prompt],
             )
-            raw_text = completion.choices[0].message.content.strip()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Model generation failed: {e}")
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=f"Agent execution failed: {e}")
         ai_end = time.time()
 
-        def _extract_json(s: str) -> str:
-            first = s.find('{')
-            last = s.rfind('}')
-            if first == -1 or last == -1 or last <= first:
-                raise ValueError("No JSON object detected in model response")
-            return s[first:last+1]
-        try:
-            plan_json = json.loads(_extract_json(raw_text))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse model JSON: {e}")
+        plan_json = agent_result.model_dump()
 
         unknown_items: List[str] = []
         used_names_global = set()
@@ -1785,30 +1760,47 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                         servings = 1.0
                 except Exception:
                     servings = 1.0
-                new_items.append({
-                    "name": nutrition_lookup[key_match]["name"],
-                    "servings": servings,
-                    "serving_size": nutrition_lookup[key_match].get("serving_size") or None,
-                })
-            meal['items'] = new_items
+
+                sanitized_item = {**item}
+                sanitized_item["name"] = nutrition_lookup[key_match]["name"]
+                sanitized_item["servings"] = round(servings, 2)
+                if not sanitized_item.get("serving_size"):
+                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or None
+
+                for macro_key in ("calories", "protein_g"):
+                    value = sanitized_item.get(macro_key)
+                    if value is None:
+                        continue
+                    try:
+                        sanitized_item[macro_key] = float(value)
+                    except (TypeError, ValueError):
+                        sanitized_item[macro_key] = value
+
+                new_items.append(sanitized_item)
+            meal["items"] = new_items
         if unknown_items:
             plan_json.setdefault('meta', {})['dropped_unknown'] = unknown_items
 
-        
-        print(f"🧮 Backend recomputing all macros authoritatively...")
-        plan_json = _backend_recompute_meal_macros(plan_json, nutrition_lookup)
-        
-        
+
         plan_json.setdefault('goals', {})['calories'] = calorie_target
         plan_json['goals']['protein_g'] = protein_target
         plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
         plan_json['user_stats']['tdee'] = user_tdee
         plan_json['user_stats']['goal'] = goal_mode
         plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
+        plan_json['user_stats']['activity_breakdown'] = user_act_breakdown
 
         
-        final_cal = plan_json['totals']['calories']
-        final_prot = plan_json['totals']['protein_g']
+        totals = plan_json.get('totals')
+        if not isinstance(totals, dict):
+            raise HTTPException(status_code=500, detail="Model response missing totals block")
+        try:
+            final_cal = float(totals['calories'])
+            final_prot = float(totals['protein_g'])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=500, detail="Model response missing valid totals")
+        totals['calories'] = final_cal
+        totals['protein_g'] = final_prot
         cal_diff = final_cal - calorie_target
         prot_diff = final_prot - protein_target
         cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
@@ -1828,13 +1820,28 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
         
         safe_user = {k: authenticated_user[k] for k in authenticated_user.keys() if k != 'password_hash'}
+        safe_user['bmr'] = user_bmr
+        safe_user['tdee'] = user_tdee
+        safe_user['activity_breakdown'] = user_act_breakdown
 
         generation_id = str(uuid4())
+        meta_payload = {}
+        if isinstance(plan_json.get('meta'), dict):
+            meta_payload = dict(plan_json.get('meta'))
+        meta_payload.setdefault('agent_raw_response', agent_raw_text)
+        plan_json['meta'] = meta_payload
+
         response_payload = {
             "success": True,
             "user_profile": safe_user,
             "nutrition_targets": {"calories": calorie_target, "protein_g": protein_target},
-            "bmr_tdee": {"bmr": user_bmr, "tdee": user_tdee},
+            "bmr_tdee": {
+                "bmr": user_bmr,
+                "tdee": user_tdee,
+                "activity_breakdown": user_act_breakdown,
+                "bmr_precise": metrics.get("bmr_precise"),
+                "tdee_precise": metrics.get("tdee_precise"),
+            },
             "available_items": allowed_for_prompt,
             "meal_plan": plan_json,
             "generation_id": generation_id,
@@ -1844,7 +1851,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "ai_generation_time_seconds": round(ai_time, 3),
                 "total_time_seconds": round(total_time, 3),
             },
-            "meta": plan_json.get('meta', {}),
+            "meta": meta_payload,
         }
         return response_payload
 

@@ -312,6 +312,8 @@ test_commands.ps1
 # menus/
 # *.json
 
+!tests/test_nutrition.py
+
 # Local configuration files
 config.local.py
 settings.local.py
