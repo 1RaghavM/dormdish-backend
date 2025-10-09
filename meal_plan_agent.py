@@ -1,5 +1,8 @@
+import asyncio
 import json
 import os
+import hashlib
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from agents import WebSearchTool, Agent, ModelSettings, TResponseInputItem
@@ -52,6 +55,11 @@ guardrails_config = {
 }
 
 
+_MEAL_PLAN_CACHE_LIMIT = int(os.getenv("MEALPLAN_CACHE_SIZE", "16"))
+_MEAL_PLAN_CACHE: "OrderedDict[str, Tuple[DormdishMealPlannerSchema, str]]" = OrderedDict()
+_MEAL_PLAN_CACHE_LOCK = asyncio.Lock()
+
+
 def guardrails_has_tripwire(results):
     return any(getattr(r, "tripwire_triggered", False) is True for r in (results or []))
 
@@ -75,6 +83,58 @@ def build_guardrail_fail_output(results):
                     failure[key] = info.get(key)
             failures.append(failure)
     return {"failed": len(failures) > 0, "failures": failures}
+
+
+def _build_mealplan_cache_key(
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Dict[str, Any],
+  extra_system_messages: Optional[Sequence[str]]
+) -> str:
+  serializable_payload = {
+    "user_payload": user_payload,
+    "menu_payload": menu_payload,
+    "nutrition_targets": nutrition_targets,
+    "extra_system_messages": list(extra_system_messages) if extra_system_messages else None,
+  }
+  serialized = json.dumps(serializable_payload, sort_keys=True, ensure_ascii=False)
+  return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+async def _run_guardrails_parallel(input_text: str) -> List[Any]:
+  guardrail_entries = guardrails_config.get("guardrails") or []
+  if not guardrail_entries:
+    guardrail_instance = instantiate_guardrails(load_config_bundle(guardrails_config))
+    return await run_guardrails(
+      ctx,
+      input_text,
+      "text/plain",
+      guardrail_instance,
+      suppress_tripwire=True,
+    )
+
+  tasks = []
+  for entry in guardrail_entries:
+    bundle = load_config_bundle({"guardrails": [entry]})
+    instance = instantiate_guardrails(bundle)
+    tasks.append(
+      run_guardrails(
+        ctx,
+        input_text,
+        "text/plain",
+        instance,
+        suppress_tripwire=True,
+      )
+    )
+
+  results = await asyncio.gather(*tasks, return_exceptions=False)
+  combined: List[Any] = []
+  for result in results:
+    if isinstance(result, list):
+      combined.extend(result)
+    elif result is not None:
+      combined.append(result)
+  return combined
 class DormdishMealPlannerSchema__UserStats(BaseModel):
     bmr: float
     tdee: float
@@ -162,7 +222,7 @@ Nutrition Targets
     output_type=DormdishMealPlannerSchema,
     model_settings=ModelSettings(
         store=True,
-        reasoning=Reasoning(effort="medium", summary="auto") if Reasoning else None,
+        reasoning=Reasoning(effort="low", summary="auto") if Reasoning else None,
     ),
     client=client,
     temperature=1.0,
@@ -257,11 +317,32 @@ async def generate_meal_plan_with_agent(
     menu_payload,
     nutrition_targets,
   )
+  cache_key = _build_mealplan_cache_key(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+    extra_system_messages,
+  )
+
+  async with _MEAL_PLAN_CACHE_LOCK:
+    cached_entry = _MEAL_PLAN_CACHE.get(cache_key)
+    if cached_entry:
+      cached_model, cached_raw = cached_entry
+      _MEAL_PLAN_CACHE.move_to_end(cache_key)
+      return cached_model.model_copy(deep=True), cached_raw
 
   result, raw_response = await dormdish_meal_planner.arun(
     input_text=prompt,
     extra_system_messages=extra_system_messages,
   )
+
+  cached_tuple = (result.model_copy(deep=True), raw_response)
+  async with _MEAL_PLAN_CACHE_LOCK:
+    _MEAL_PLAN_CACHE[cache_key] = cached_tuple
+    _MEAL_PLAN_CACHE.move_to_end(cache_key)
+    while len(_MEAL_PLAN_CACHE) > _MEAL_PLAN_CACHE_LIMIT:
+      _MEAL_PLAN_CACHE.popitem(last=False)
+
   return result, raw_response
 
 
@@ -287,7 +368,7 @@ async def run_workflow(workflow_input: WorkflowInput):
     }
   ]
   guardrails_inputtext = workflow["input_as_text"]
-  guardrails_result = await run_guardrails(ctx, guardrails_inputtext, "text/plain", instantiate_guardrails(load_config_bundle(guardrails_config)), suppress_tripwire=True)
+  guardrails_result = await _run_guardrails_parallel(guardrails_inputtext)
   guardrails_hastripwire = guardrails_has_tripwire(guardrails_result)
   guardrails_anonymizedtext = get_guardrail_checked_text(guardrails_result, guardrails_inputtext)
   guardrails_output = (guardrails_hastripwire and build_guardrail_fail_output(guardrails_result or [])) or (guardrails_anonymizedtext or guardrails_inputtext)
