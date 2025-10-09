@@ -124,6 +124,7 @@ dormdish_meal_planner = Agent(
     name="DormDish Meal Planner",
     instructions="""
 You are a pragmatic, encouraging university dining hall nutritionist & meal designer.
+Begin each task by using the web_search tool to skim at least one high-quality source on evidence-based meal planning structure for the meal type requested. Incorporate any relevant guidance (macronutrient balance, plating suggestions, meal timing) into your plan.
 Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.
 
 STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):
@@ -154,7 +155,7 @@ Nutrition Targets
 - Calories & protein must be within ±5% of goals.
 - Prioritize protein target first, then adjust calories.
 - Meals must be realistic, balanced, appetizing.
-- Explanation field: 1–3 sentences on overall balance and any unavoidable shortfall/excess.
+- Explanation field: 1–3 sentences on overall balance, noting any insights drawn from the web sources you consulted and any unavoidable shortfall/excess.
 """,
     model="gpt-5-nano",
     tools=[web_search_preview],
