@@ -7,27 +7,27 @@ from openai import AsyncOpenAI
 from types import SimpleNamespace
 from pydantic import BaseModel
 
-try:  # Reasoning support is model-dependent; older SDKs may not expose it
-  from openai.types.shared.reasoning import Reasoning  # type: ignore
-except ImportError:  # pragma: no cover - optional feature
-  Reasoning = None  # type: ignore
+try:  
+  from openai.types.shared.reasoning import Reasoning  
+except ImportError:  
+  Reasoning = None  
 
-try:  # Guardrails is optional in local/dev environments
-  from guardrails.runtime import load_config_bundle, instantiate_guardrails, run_guardrails  # type: ignore
+try:  
+  from guardrails.runtime import load_config_bundle, instantiate_guardrails, run_guardrails  
   GUARDRAILS_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover - dependency optional
+except ModuleNotFoundError:  
   GUARDRAILS_AVAILABLE = False
 
-  def load_config_bundle(config: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore
+  def load_config_bundle(config: Dict[str, Any]) -> Dict[str, Any]:  
     return config
 
-  def instantiate_guardrails(config: Dict[str, Any]):  # type: ignore
+  def instantiate_guardrails(config: Dict[str, Any]):  
     return None
 
-  async def run_guardrails(*_args: Any, **_kwargs: Any) -> List[Any]:  # type: ignore
+  async def run_guardrails(*_args: Any, **_kwargs: Any) -> List[Any]:  
     return []
 
-# Tool definitions
+
 web_search_preview = WebSearchTool(
   filters={
     "allowed_domains": [
@@ -41,16 +41,16 @@ web_search_preview = WebSearchTool(
     "type": "approximate"
   }
 )
-# Shared client for guardrails and file search
+
 client = AsyncOpenAI()
 ctx = SimpleNamespace(guardrail_llm=client)
-# Guardrails definitions
+
 guardrails_config = {
   "guardrails": [
 
   ]
 }
-# Guardrails utils
+
 
 def guardrails_has_tripwire(results):
     return any(getattr(r, "tripwire_triggered", False) is True for r in (results or []))
@@ -208,9 +208,9 @@ def _build_agent_prompt(
   allowed_items = menu_payload.get("allowed_items") or []
   if max_items is None:
     try:
-      max_items = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "150"))
+      max_items = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "175"))
     except ValueError:
-      max_items = 150
+      max_items = 175
 
   menu_meta = {}
   source_menu = menu_payload.get("source_menu")
@@ -268,7 +268,7 @@ class WorkflowInput(BaseModel):
   input_as_text: str
 
 
-# Main code entrypoint
+
 async def run_workflow(workflow_input: WorkflowInput):
   state = {
 
