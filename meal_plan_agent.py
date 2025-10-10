@@ -35,8 +35,6 @@ web_search_preview = WebSearchTool(
   filters={
     "allowed_domains": [
       "nutritionsource.hsph.harvard.edu",
-      "www.healthline.com",
-      "pmc.ncbi.nlm.nih.gov"
     ]
   },
   search_context_size="medium",
@@ -217,7 +215,7 @@ Nutrition Targets
 - Meals must be realistic, balanced, appetizing.
 - Explanation field: 1–3 sentences on overall balance, noting any insights drawn from the web sources you consulted and any unavoidable shortfall/excess.
 """,
-    model="gpt-5-nano",
+    model="gpt-5",
     tools=[web_search_preview],
     output_type=DormdishMealPlannerSchema,
     model_settings=ModelSettings(

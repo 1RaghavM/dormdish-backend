@@ -17,7 +17,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import bcrypt
@@ -1510,8 +1510,6 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):",
         "",
         "{",
-        ' "user_stats": { "bmr": "<float>", "tdee": "<float>", "goal": "<cut|maintain|bulk>", "dietary_preference": "<vegan|vegetarian|null>" },',
-        ' "goals": { "calories": "<int>", "protein_g": "<int>" },',
         ' "totals": { "calories": "<int>", "protein_g": "<int>" },',
         ' "meals": {',
         '   "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
@@ -1723,6 +1721,12 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
 
+        selected_activity_metrics: Dict[str, Any] = {}
+        if isinstance(user_act_breakdown, dict):
+            selected_entry = user_act_breakdown.get(user.activity_level)
+            if isinstance(selected_entry, dict):
+                selected_activity_metrics = {user.activity_level: selected_entry}
+
         agent_user_payload = {
             "age": user.age,
             "height_feet": user.height_feet,
@@ -1733,7 +1737,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "dietary_preference": user.dietary_preference,
             "bmr": user_bmr,
             "tdee": user_tdee,
-            "activity_breakdown": user_act_breakdown,
+            "activity_breakdown": selected_activity_metrics or None,
         }
         agent_menu_payload = {
             "requested_dining_hall": meal_plan_request.dining_hall,
@@ -1747,7 +1751,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "bmr": user_bmr,
             "tdee": user_tdee,
             "goal": goal_mode,
-            "activity_breakdown": user_act_breakdown,
+            "activity_breakdown": selected_activity_metrics or None,
         }
 
         ai_start = time.time()
@@ -1818,7 +1822,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         plan_json['user_stats']['tdee'] = user_tdee
         plan_json['user_stats']['goal'] = goal_mode
         plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
-        plan_json['user_stats']['activity_breakdown'] = user_act_breakdown
+        plan_json['user_stats']['activity_breakdown'] = selected_activity_metrics or None
 
         
         totals = plan_json.get('totals')
@@ -1852,7 +1856,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         safe_user = {k: authenticated_user[k] for k in authenticated_user.keys() if k != 'password_hash'}
         safe_user['bmr'] = user_bmr
         safe_user['tdee'] = user_tdee
-        safe_user['activity_breakdown'] = user_act_breakdown
+        safe_user['activity_breakdown'] = selected_activity_metrics or None
 
         generation_id = str(uuid4())
         meta_payload = {}
@@ -1868,7 +1872,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "bmr_tdee": {
                 "bmr": user_bmr,
                 "tdee": user_tdee,
-                "activity_breakdown": user_act_breakdown,
+                "activity_breakdown": selected_activity_metrics or None,
                 "bmr_precise": metrics.get("bmr_precise"),
                 "tdee_precise": metrics.get("tdee_precise"),
             },
