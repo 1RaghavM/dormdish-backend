@@ -37,7 +37,7 @@ web_search_preview = WebSearchTool(
       "nutritionsource.hsph.harvard.edu",
     ]
   },
-  search_context_size="medium",
+  search_context_size="low",
   user_location={
     "type": "approximate"
   }
