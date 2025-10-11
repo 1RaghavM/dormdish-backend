@@ -215,7 +215,7 @@ Nutrition Targets
 - Meals must be realistic, balanced, appetizing.
 - Explanation field: 1–3 sentences on overall balance, noting any insights drawn from the web sources you consulted and any unavoidable shortfall/excess.
 """,
-    model="gpt-5",
+    model="gpt-5-mini",
     tools=[web_search_preview],
     output_type=DormdishMealPlannerSchema,
     model_settings=ModelSettings(
