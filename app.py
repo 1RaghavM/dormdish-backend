@@ -1,34 +1,31 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Header, Body, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, EmailStr
-import requests
+import asyncio
 import json
+import logging
 import os
+import random
 import re
-import time
 import secrets
-import bcrypt
-import requests
-import json
-import os
 import time
-import hashlib
-import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-from supabase import create_client, Client
-from dotenv import load_dotenv
+from uuid import UUID, uuid4
+
 import bcrypt
 import csv
-from functools import lru_cache
-import base64
-from fastapi import Request
-from uuid import UUID, uuid4
-import secrets as _secrets_for_google  
-from difflib import get_close_matches
+import httpx
 import traceback
+from difflib import get_close_matches
+from dotenv import load_dotenv
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, EmailStr
+from supabase import Client, create_client
+
+import secrets as _secrets_for_google
 
 try:
     from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
@@ -39,35 +36,72 @@ except Exception as exc:
     fp_fetch = None  
     fp_parse_menu = None  
 
-
-import contextlib
-import random
 from zoneinfo import ZoneInfo
-
-def _fetch_with_retries(url: str, attempts: int = 3, base_delay: float = 0.6):
-    if not fp_fetch:
-        raise RuntimeError("FoodPro fetch function unavailable")
-    last_err = None
-    for i in range(attempts):
-        try:
-            print(f"[FoodPro] Attempt {i+1}/{attempts} GET {url}")
-            return fp_fetch(url)  
-        except Exception as e:
-            last_err = e
-            sleep_for = base_delay * (2 ** i) + random.uniform(0, 0.25)
-            print(f"[FoodPro] attempt {i+1} failed: {e} (sleep {sleep_for:.2f}s)")
-            time.sleep(sleep_for)
-    raise last_err  
-
-
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
 load_dotenv()
 
+logger = logging.getLogger("dormdish.api")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+HTTP_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
+HTTP_CLIENT_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=20)
+HTTP_CLIENT_HEADERS = {
+    "User-Agent": "DormDishBackend/1.0 (+https://dormdish.com)",
+    "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    client = httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT, limits=HTTP_CLIENT_LIMITS, headers=HTTP_CLIENT_HEADERS)
+    app.state.http = client
+    try:
+        yield
+    finally:
+        try:
+            await client.aclose()
+        finally:
+            app.state.http = None
+
+
 from meal_plan_agent import generate_meal_plan_with_agent
 
-app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
+app = FastAPI(
+    title="DormDish API",
+    description="Meal planning API for college students",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    client = getattr(app.state, "http", None)
+    if client is None:
+        raise RuntimeError("Shared HTTP client not initialized")
+    return client
+
+
+async def _fetch_with_retries(url: str, attempts: int = 3, base_delay: float = 0.6) -> str:
+    client = _get_http_client()
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            sleep_for = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+            logger.warning("http_retry url=%s attempt=%s/%s sleep=%.2fs", url, attempt, attempts, sleep_for)
+            await asyncio.sleep(sleep_for)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Failed to fetch URL without specific exception")
 
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
@@ -277,21 +311,34 @@ def _brevo_headers() -> Dict[str, str]:
     }
 
 
-
-def _brevo_get_account() -> Dict:
+async def _brevo_get_account() -> Dict[str, Any]:
+    client = _get_http_client()
     try:
-        r = requests.get(f"{_brevo_base_url()}/account", headers=_brevo_headers(), timeout=10)
-        return {"status": r.status_code, "body": r.json() if r.content else None}
-    except Exception as e:
-        return {"status": 0, "error": str(e)}
+        response = await client.get(f"{_brevo_base_url()}/account", headers=_brevo_headers())
+        body: Optional[Any] = None
+        if response.content:
+            try:
+                body = response.json()
+            except Exception:
+                body = {"raw": response.text[:200]}
+        return {"status": response.status_code, "body": body}
+    except Exception as exc:
+        return {"status": 0, "error": str(exc)}
 
 
-def _brevo_get_template(template_id: int) -> Dict:
+async def _brevo_get_template(template_id: int) -> Dict[str, Any]:
+    client = _get_http_client()
     try:
-        r = requests.get(f"{_brevo_base_url()}/smtp/templates/{template_id}", headers=_brevo_headers(), timeout=10)
-        return {"status": r.status_code, "body": r.json() if r.content else None}
-    except Exception as e:
-        return {"status": 0, "error": str(e)}
+        response = await client.get(f"{_brevo_base_url()}/smtp/templates/{template_id}", headers=_brevo_headers())
+        body: Optional[Any] = None
+        if response.content:
+            try:
+                body = response.json()
+            except Exception:
+                body = {"raw": response.text[:200]}
+        return {"status": response.status_code, "body": body}
+    except Exception as exc:
+        return {"status": 0, "error": str(exc)}
 
 
 def _guess_name_from_email(email: str) -> Dict[str, str]:
@@ -304,22 +351,19 @@ def _guess_name_from_email(email: str) -> Dict[str, str]:
     if len(parts) == 1:
         return {"first": parts[0].capitalize(), "last": ""}
     return {"first": parts[0].capitalize(), "last": parts[-1].capitalize()}
-
-
-def upsert_brevo_contact(
+async def upsert_brevo_contact(
     email: str,
     attributes: Optional[Dict[str, str]] = None,
     list_ids: Optional[List[int]] = None,
-) -> Dict:
-    """Create or update a Brevo contact and optionally add to lists."""
-    url = f"{_brevo_base_url()}/contacts"
-    payload: Dict = {
+) -> Dict[str, Any]:
+    client = _get_http_client()
+    payload: Dict[str, Any] = {
         "email": email,
         "updateEnabled": True,
     }
     if attributes:
         payload["attributes"] = attributes
-    
+
     env_list_id = os.getenv("BREVO_LIST_ID")
     resolved_list_ids: List[int] = []
     if env_list_id:
@@ -332,28 +376,28 @@ def upsert_brevo_contact(
             if isinstance(lid, int):
                 resolved_list_ids.append(lid)
     if resolved_list_ids:
-        payload["listIds"] = list(dict.fromkeys(resolved_list_ids))  
+        payload["listIds"] = list(dict.fromkeys(resolved_list_ids))
 
     try:
-        resp = requests.post(url, headers=_brevo_headers(), data=json.dumps(payload), timeout=12)
-        
-        if resp.status_code not in (200, 201):
-            raise HTTPException(status_code=502, detail=f"Brevo contact upsert failed: {resp.text}")
-        return resp.json()
+        response = await client.post(f"{_brevo_base_url()}/contacts", headers=_brevo_headers(), json=payload)
+        if response.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Brevo contact upsert failed: {response.text}")
+        return response.json()
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Brevo error: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Brevo error: {exc}")
 
 
-def send_brevo_template(
+def build_brevo_template_payload(
     email: str,
+    *,
     first_name: Optional[str] = None,
     last_name: Optional[str] = None,
     subject: Optional[str] = None,
     tags: Optional[List[str]] = None,
-) -> Dict:
-    """Send a Brevo transactional email using a stored template to a single recipient."""
+    contact_attributes: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     from_email = os.getenv("BREVO_FROM_EMAIL")
     from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
     template_raw = os.getenv("BREVO_TEMPLATE_ID", "").strip()
@@ -368,58 +412,73 @@ def send_brevo_template(
     if not (from_email and template_id):
         raise HTTPException(status_code=500, detail="Brevo env vars missing (FROM_EMAIL, TEMPLATE_ID)")
 
-    
     if not first_name or not last_name:
         guess = _guess_name_from_email(email)
         first_name = first_name or guess["first"]
         last_name = last_name or guess["last"]
 
-    attributes = {
-        "FIRSTNAME": first_name or "",
-        "LASTNAME": last_name or "",
-    }
-    upsert_brevo_contact(email, attributes=attributes)
-
-    payload: Dict = {
+    payload: Dict[str, Any] = {
         "templateId": template_id,
         "to": [{"email": email, "name": f"{first_name or ''} {last_name or ''}".strip()}],
         "sender": {"email": from_email, "name": from_name},
+        "_contact_attributes": {
+            "FIRSTNAME": first_name or "",
+            "LASTNAME": last_name or "",
+        },
     }
+    if contact_attributes:
+        payload["_contact_attributes"].update(contact_attributes)
     if subject:
         payload["subject"] = subject
     if tags:
         payload["tags"] = tags
+    return payload
 
+
+async def _send_brevo_email_async(body: Dict[str, Any]) -> None:
+    client = _get_http_client()
+    payload = dict(body)
+    attributes = payload.pop("_contact_attributes", None)
+    recipient_email: Optional[str] = None
     try:
-        url = f"{_brevo_base_url()}/smtp/email"
-        r = requests.post(url, headers=_brevo_headers(), data=json.dumps(payload), timeout=12)
-        if r.status_code not in (200, 201):
-            raise HTTPException(status_code=502, detail=f"Failed to send Brevo email: {r.text}")
-        return {"success": True, **r.json()}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Brevo error: {e}")
+        to_entries = payload.get("to") or []
+        if to_entries and isinstance(to_entries[0], dict):
+            recipient_email = to_entries[0].get("email")
+        if attributes and recipient_email:
+            try:
+                await upsert_brevo_contact(recipient_email, attributes=attributes)
+            except HTTPException as exc:
+                logger.warning("brevo_contact_upsert_failed email=%s detail=%s", recipient_email, exc.detail)
+            except Exception as exc:
+                logger.warning("brevo_contact_upsert_error email=%s error=%s", recipient_email, exc)
+        response = await client.post(f"{_brevo_base_url()}/smtp/email", headers=_brevo_headers(), json=payload)
+        if response.status_code not in (200, 201):
+            logger.error("brevo_send_failed status=%s body=%s", response.status_code, response.text[:200])
+    except Exception as exc:
+        logger.exception("brevo_send_exception email=%s error=%s", recipient_email, exc)
 
 
-@app.post('/subscribe', summary='Subscribe to newsletter and send welcome email')
-def subscribe(req: SubscribeRequest):
+@app.post('/subscribe', summary='Subscribe to newsletter and queue welcome email')
+async def subscribe(req: SubscribeRequest, background_tasks: BackgroundTasks):
     try:
-        
         fn = (req.firstName or "").strip()
         ln = (req.lastName or "").strip()
-        res = send_brevo_template(req.email.strip().lower(), first_name=fn or None, last_name=ln or None)
-        return {"success": True, "message": "Subscription successful. Email sent.", **res}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"⚠️ Subscribe failed: {e}")
+        payload = build_brevo_template_payload(
+            req.email.strip().lower(),
+            first_name=fn or None,
+            last_name=ln or None,
+        )
+        background_tasks.add_task(_send_brevo_email_async, payload)
+        return {"success": True, "message": "Subscription successful. Email queued."}
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        logger.warning("subscribe_failed email=%s error=%s", req.email, exc)
         raise HTTPException(status_code=500, detail="Subscription failed")
 
 
-
 @app.get('/health/brevo', summary='Brevo configuration and template health check')
-def brevo_health():
+async def brevo_health():
     try:
         from_email = os.getenv("BREVO_FROM_EMAIL")
         from_name = os.getenv("BREVO_FROM_NAME")
@@ -434,8 +493,8 @@ def brevo_health():
                 except Exception:
                     template_id = None
 
-        account = _brevo_get_account()
-        template_info = _brevo_get_template(template_id) if template_id else None
+        account = await _brevo_get_account()
+        template_info = await _brevo_get_template(template_id) if template_id else None
         return {
             "ok": bool(account and account.get("status") in (200, 201)),
             "env": {
@@ -447,19 +506,20 @@ def brevo_health():
             "account": account,
             "template": template_info,
         }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.get('/email/test', summary='Send a Brevo test email using the configured template')
-def email_test(email: EmailStr):
+async def email_test(email: EmailStr):
     try:
-        res = send_brevo_template(str(email))
-        return {"success": True, **res}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Test email failed: {e}")
+        payload = build_brevo_template_payload(str(email))
+        await _send_brevo_email_async(payload)
+        return {"success": True, "message": "Test email dispatched."}
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Test email failed: {exc}")
 
 
 
@@ -541,8 +601,7 @@ class WaitlistJoinRequest(BaseModel):
     
     captchaToken: Optional[str] = None
 
-
-def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None) -> bool:
+async def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None) -> bool:
     """Verify Cloudflare Turnstile token. If TURNSTILE_SECRET_KEY is not set, skip verification (dev mode)."""
     secret = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
     
@@ -560,9 +619,9 @@ def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None)
     }
     if remoteip:
         data["remoteip"] = remoteip
-
+    client = _get_http_client()
     try:
-        resp = requests.post(url, data=data, timeout=10)
+        resp = await client.post(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Captcha verification error: {e}")
 
@@ -582,16 +641,14 @@ def verify_turnstile_token(token: Optional[str], remoteip: Optional[str] = None)
 
 
 @app.post('/waitlist/join')
-def join_waitlist(data: WaitlistJoinRequest, request: Request):
+async def join_waitlist(data: WaitlistJoinRequest, request: Request, background_tasks: BackgroundTasks):
     try:
-        
-        
         client_ip = (
             request.headers.get('CF-Connecting-IP')
             or (request.headers.get('X-Forwarded-For', '').split(',')[0].strip() if request.headers.get('X-Forwarded-For') else None)
             or (request.client.host if request.client else None)
         )
-        verify_turnstile_token(data.captchaToken, client_ip)
+        await verify_turnstile_token(data.captchaToken, client_ip)
 
         
         payload = {
@@ -609,30 +666,22 @@ def join_waitlist(data: WaitlistJoinRequest, request: Request):
         brevo_status = None
         if bool(data.notifications):
             try:
-                attributes = {
-                    "FIRSTNAME": data.firstName.strip(),
-                    "LASTNAME": data.lastName.strip(),
+                contact_attrs = {
                     "UNIVERSITY": data.university.strip(),
                     "GRADYEAR": (data.graduationYear or ""),
                 }
-                upsert_brevo_contact(
+                email_payload = build_brevo_template_payload(
                     data.email.strip().lower(),
-                    attributes=attributes,
+                    first_name=data.firstName.strip(),
+                    last_name=data.lastName.strip(),
+                    subject="You're on the DormDish waitlist!",
+                    tags=["waitlist"],
+                    contact_attributes=contact_attrs,
                 )
-                
-                try:
-                    send_brevo_template(
-                        data.email.strip().lower(),
-                        first_name=data.firstName.strip(),
-                        last_name=data.lastName.strip(),
-                        subject="You're on the DormDish waitlist!",
-                        tags=["waitlist"],
-                    )
-                    brevo_status = "sent"
-                except HTTPException:
-                    brevo_status = "queued"
-            except HTTPException as e:
-                print(f"⚠️ Brevo sync failed: {e.detail}")
+                background_tasks.add_task(_send_brevo_email_async, email_payload)
+                brevo_status = "queued"
+            except HTTPException as exc:
+                print(f"⚠️ Brevo sync failed: {exc.detail}")
 
         
         count_resp = supabase.table('waitlist_users').select('id', count='exact').eq('university', data.university.strip()).execute()
@@ -684,16 +733,16 @@ class GoogleRegisterRequest(BaseModel):
     university: str
     dietary_preference: Optional[str] = None
 
-def _verify_google_id_token(id_token: str) -> Dict[str, any]:
-    """Verify Google ID token using Google's tokeninfo endpoint.
-    Returns token payload dict or raises HTTPException.
-    """
+async def _verify_google_id_token(id_token: str) -> Dict[str, Any]:
+    """Validate a Google ID token using the shared AsyncClient."""
+    client = _get_http_client()
     try:
-        resp = requests.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token}, timeout=8)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to verify Google token: {e}")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Google ID token")
+        resp = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google ID token") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to verify Google token: {exc}") from exc
     data = resp.json()
     aud_expected = os.getenv("GOOGLE_CLIENT_ID")
     if aud_expected and data.get("aud") != aud_expected:
@@ -841,8 +890,8 @@ def auth_logout(authorization: Optional[str] = Header(None)):
     return {"success": True, "message": "Logged out"}
 
 @app.post('/auth/google/login')
-def auth_google_login(payload: GoogleIdTokenRequest):
-    token_data = _verify_google_id_token(payload.id_token)
+async def auth_google_login(payload: GoogleIdTokenRequest):
+    token_data = await _verify_google_id_token(payload.id_token)
     email = token_data.get('email', '').lower()
     given_name = token_data.get('given_name') or ''
     family_name = token_data.get('family_name') or ''
@@ -877,13 +926,13 @@ def auth_google_login(payload: GoogleIdTokenRequest):
     }
 
 @app.post('/auth/google/register')
-def auth_google_register(data: GoogleRegisterRequest):
+async def auth_google_register(data: GoogleRegisterRequest):
     """Register a new user via Google ID token.
     Enhanced with detailed logging and clearer error surfaces for frontend debugging.
     """
     try:
         print("[google.register] start")
-        token_data = _verify_google_id_token(data.id_token)
+        token_data = await _verify_google_id_token(data.id_token)
         print(f"[google.register] token aud={token_data.get('aud')} email={token_data.get('email')} sub={token_data.get('sub')}")
         email = token_data.get('email', '').lower()
         if email != str(data.email).lower():
@@ -941,7 +990,6 @@ def auth_google_register(data: GoogleRegisterRequest):
         print(f"[google.register] http_error status={he.status_code} detail={he.detail}")
         raise
     except Exception as e:
-        
         print(f"[google.register] unhandled_error: {e}")
         raise HTTPException(status_code=500, detail="Google registration failed")
 
@@ -977,58 +1025,64 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 
-def get_menu_from_supabase(university: str, dining_hall: str, date: str) -> Optional[dict]:
-    """Check if menu exists in Supabase database"""
-    try:
-        menu_id = f"{university}_{dining_hall}_{date}"
-        response = supabase.table("menus").select("*").eq("id", menu_id).execute()
-        if response.data and len(response.data) > 0:
-            print(f"📁 Found cached menu for {menu_id}")
-            return response.data[0]["menu_data"]
-        else:
+async def get_menu_from_supabase(university: str, dining_hall: str, date: str) -> Optional[dict]:
+    """Check if menu exists in Supabase database without blocking the event loop."""
+
+    def _fetch() -> Optional[dict]:
+        try:
+            menu_id = f"{university}_{dining_hall}_{date}"
+            response = supabase.table("menus").select("*").eq("id", menu_id).execute()
+            if response.data and len(response.data) > 0:
+                print(f"📁 Found cached menu for {menu_id}")
+                return response.data[0]["menu_data"]
             print(f"🔍 No cached menu found for {menu_id}")
             return None
-    except Exception as e:
-        print(f"⚠️ Error checking Supabase: {e}")
-        return None
+        except Exception as exc:
+            print(f"⚠️ Error checking Supabase: {exc}")
+            return None
+
+    return await asyncio.to_thread(_fetch)
 
 
-def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_data: dict) -> bool:
-    """Save menu data to Supabase database"""
-    try:
-        menu_id = f"{university}_{dining_hall}_{date}"
-        hall_slug = menu_data.get("hall_slug", dining_hall)
-        fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
-        items_count = 0
-        if "items" in menu_data:
-            items_count = len(menu_data["items"])
-        elif "menu" in menu_data and "items" in menu_data["menu"]:
-            items_count = len(menu_data["menu"]["items"])
-        
-        if items_count == 0:
-            print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
+async def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_data: dict) -> bool:
+    """Persist menu data to Supabase without blocking the event loop."""
+
+    def _save() -> bool:
+        try:
+            menu_id = f"{university}_{dining_hall}_{date}"
+            hall_slug = menu_data.get("hall_slug", dining_hall)
+            fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
+            items_count = 0
+            if "items" in menu_data:
+                items_count = len(menu_data["items"])
+            elif "menu" in menu_data and "items" in menu_data["menu"]:
+                items_count = len(menu_data["menu"]["items"])
+            if items_count == 0:
+                print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
+                return False
+            print(f"🔍 Saving menu with {items_count} items to Supabase")
+            print(f"🔍 Menu data keys: {list(menu_data.keys())}")
+            stored_menu_data = menu_data.get("menu", menu_data)
+            data_to_insert = {
+                "id": menu_id,
+                "university": university,
+                "dining_hall": dining_hall,
+                "hall_slug": hall_slug,
+                "date": date,
+                "fetched_at": fetched_at,
+                "menu_data": stored_menu_data,
+                "created_at": datetime.now().isoformat(),
+            }
+            response = supabase.table("menus").upsert(data_to_insert).execute()
+            print(f"💾 Saved menu to Supabase: {menu_id}")
+            print(f"💾 Supabase response data length: {len(response.data) if response.data else 0}")
+            return True
+        except Exception as exc:
+            print(f"⚠️ Error saving to Supabase: {exc}")
+            print(f"⚠️ Error type: {type(exc)}")
             return False
-        print(f"🔍 Saving menu with {items_count} items to Supabase")
-        print(f"🔍 Menu data keys: {list(menu_data.keys())}")
-        stored_menu_data = menu_data.get("menu", menu_data)
-        data_to_insert = {
-            "id": menu_id,
-            "university": university,
-            "dining_hall": dining_hall,
-            "hall_slug": hall_slug,
-            "date": date,
-            "fetched_at": fetched_at,
-            "menu_data": stored_menu_data,
-            "created_at": datetime.now().isoformat(),
-        }
-        response = supabase.table("menus").upsert(data_to_insert).execute()
-        print(f"💾 Saved menu to Supabase: {menu_id}")
-        print(f"💾 Supabase response data length: {len(response.data) if response.data else 0}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Error saving to Supabase: {e}")
-        print(f"⚠️ Error type: {type(e)}")
-        return False
+
+    return await asyncio.to_thread(_save)
 
 
 
@@ -1039,7 +1093,7 @@ def _rutgers_today_str():
         return datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
+async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
     
     dh_norm = dining_hall.strip().lower()
@@ -1102,7 +1156,7 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         print(f"✅ Using in-memory cached menu for {university}/{dining_hall}/{date}")
         return mem_cached
 
-    cached_menu = get_menu_from_supabase(university, dining_hall, date)
+    cached_menu = await get_menu_from_supabase(university, dining_hall, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
         _menu_cache_set(university, dining_hall, date, cached_menu)
@@ -1111,11 +1165,11 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
-            menu_data = fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
+            menu_data = await fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
             if not menu_data.get("items"):
                 print(f"⚠️ FoodPro returned no items, skipping cache save")
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
-            save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
+            save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
             _menu_cache_set(university, dining_hall, date, menu_data)
             return menu_data
@@ -1125,11 +1179,11 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
 
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
-        menu_data = fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
+        menu_data = await fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
         if not menu_data.get("items"):
             print(f"⚠️ Nutrislice returned no items, skipping cache save")
             return {"error": f"No menu items available for {hall_slug} on {date}"}
-        save_result = save_menu_to_supabase(university, dining_hall, date, menu_data)
+        save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
         _menu_cache_set(university, dining_hall, date, menu_data)
         return menu_data
@@ -1137,11 +1191,11 @@ def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         return {"error": f"Failed to fetch menu: {str(e)}"}
 
 
-def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> dict:
+async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> dict:
     """Fetch menu from Rutgers FoodPro pickmenu pages and format like Nutrislice output.
     Now aggregates breakfast, lunch, and dinner by invoking the scraper per meal.
     """
-    if not (fp_build_menu_url and fp_fetch and fp_parse_menu):
+    if not (fp_build_menu_url and fp_parse_menu):
         raise RuntimeError("FoodPro scraper not available")
 
     
@@ -1197,9 +1251,9 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
             out_item["serving_size"] = sv
         items.append(out_item)
 
-    def _attempt_all_meals(location_num: str, location_name: str) -> dict:
-        base_url = fp_build_menu_url(date, location_num, location_name)  
-        print(f"🔗 FoodPro base URL: {base_url}")
+    async def _attempt_all_meals(location_num: str, location_name: str) -> dict:
+        base_url = fp_build_menu_url(date, location_num, location_name)
+        logger.debug("foodpro_base_url=%s", base_url)
         all_items: List[dict] = []
         meal_sources: List[str] = []
         warnings: List[str] = []
@@ -1216,16 +1270,16 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
 
         for meal in meals_sequence:
             meal_url = _set_meal_in_url(base_url, meal)
-            print(f"   ↳ Fetching meal '{meal}' with URL: {meal_url}")
+            logger.debug("foodpro_meal_request meal=%s url=%s", meal, meal_url)
             try:
-                soup = _fetch_with_retries(meal_url)
-            except Exception as e:
-                warnings.append(f"Failed to fetch {meal}: {e}")
+                html_text = await _fetch_with_retries(meal_url)
+            except Exception as exc:
+                warnings.append(f"Failed to fetch {meal}: {exc}")
                 continue
             try:
-                parsed = fp_parse_menu(str(soup), meal_type=meal, date=date, base_url=meal_url)  
-            except Exception as e:
-                warnings.append(f"Failed to parse {meal}: {e}")
+                parsed = fp_parse_menu(html_text, meal_type=meal, date=date, base_url=meal_url)
+            except Exception as exc:
+                warnings.append(f"Failed to parse {meal}: {exc}")
                 continue
 
             
@@ -1269,7 +1323,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
 
         return {"items": all_items, "meal_sources": meal_sources, "warnings": warnings, "url": base_url}
 
-    attempt = _attempt_all_meals(params["locationNum"], params["locationName"])  
+    attempt = await _attempt_all_meals(params["locationNum"], params["locationName"])
 
     
     if hall_slug == "the-atrium" and not attempt["items"]:
@@ -1279,12 +1333,12 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
             "The Atrium at Livingston Campus",
         ]:
             try:
-                print(f"🔁 Retrying The Atrium with locationName='{alt_name}'")
-                attempt = _attempt_all_meals(params["locationNum"], alt_name)
+                logger.info("foodpro_atrium_retry alt_name=%s", alt_name)
+                attempt = await _attempt_all_meals(params["locationNum"], alt_name)
                 if attempt["items"]:
                     break
-            except Exception as e:
-                print(f"⚠️ Retry failed for Atrium alt name '{alt_name}': {e}")
+            except Exception as exc:
+                logger.warning("foodpro_atrium_retry_failed alt_name=%s error=%s", alt_name, exc)
 
     
     all_items = attempt["items"]
@@ -1299,7 +1353,6 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     warnings: List[str] = attempt.get("warnings", [])
     if not unique_items:
         warnings.append("No items parsed from FoodPro")
-        
         raise RuntimeError("FoodPro returned zero items")
 
     meal_sources = attempt.get("meal_sources", [])
@@ -1317,7 +1370,7 @@ def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> d
     }
 
 
-def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, date: str) -> dict:
+async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, date: str) -> dict:
     """Fetch menu directly from Nutrislice API"""
     api_bases = {
         "rutgers": "https://rutgers.api.nutrislice.com/menu/api/weeks/school",
@@ -1346,7 +1399,7 @@ def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, dat
     warnings: List[str] = []
     for meal_slug in meal_slugs:
         try:
-            items = fetch_meal_items(api_base, hall_slug, meal_slug, date)
+            items = await fetch_meal_items(api_base, hall_slug, meal_slug, date)
             if items:
                 all_items.extend(items)
                 meal_name = meal_slug.split("-")[-1] if "-" in meal_slug else meal_slug
@@ -1389,13 +1442,14 @@ def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, dat
     }
 
 
-def fetch_meal_items(api_base: str, hall_slug: str, meal_slug: str, date: str) -> list:
+async def fetch_meal_items(api_base: str, hall_slug: str, meal_slug: str, date: str) -> list:
     """Fetch items for a specific meal from Nutrislice API"""
     year, month, day = date.split("-")
     url = f"{api_base}/{hall_slug}/menu-type/{meal_slug}/{year}/{month}/{day}/"
-    print(f"🔗 Fetching: {url}")
+    logger.debug("nutrislice_fetch url=%s", url)
     try:
-        response = requests.get(url, timeout=12)
+        client = _get_http_client()
+        response = await client.get(url)
         response.raise_for_status()
         data = response.json()
         day_obj = None
@@ -1434,7 +1488,7 @@ def fetch_meal_items(api_base: str, hall_slug: str, meal_slug: str, date: str) -
                                         items.append(processed_item)
         return items
     except Exception as e:
-        print(f"❌ Error fetching meal items from {url}: {e}")
+        logger.warning("nutrislice_fetch_failed url=%s error=%s", url, e)
         return []
 
 
@@ -1633,7 +1687,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         authenticated_user = None
         if authorization and authorization.startswith('Bearer '):
             token = authorization.replace('Bearer ', '')
-            authenticated_user = verify_session_token(token)
+            authenticated_user = await asyncio.to_thread(verify_session_token, token)
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
         user = User(
@@ -1668,16 +1722,18 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
         if stored_bmr_val != user_bmr or stored_tdee_val != user_tdee:
             try:
-                supabase.table("users").update({
-                    "bmr": user_bmr,
-                    "tdee": user_tdee,
-                }).eq("id", authenticated_user['id']).execute()
+                await asyncio.to_thread(
+                    lambda: supabase.table("users").update({
+                        "bmr": user_bmr,
+                        "tdee": user_tdee,
+                    }).eq("id", authenticated_user['id']).execute()
+                )
                 authenticated_user['bmr'] = user_bmr
                 authenticated_user['tdee'] = user_tdee
             except Exception as update_exc:
                 print(f"⚠️ Failed to persist refreshed BMR/TDEE: {update_exc}")
 
-        menu_data = get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
+        menu_data = await get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
         if menu_data.get("error"):
             raise HTTPException(status_code=400, detail=menu_data.get("error"))
         items_list = menu_data.get("items", []) or []
@@ -1887,6 +1943,14 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             },
             "meta": meta_payload,
         }
+
+        logger.info(
+            "meal_plan_timing menu=%.2fs ai=%.2fs total=%.2fs allowed_items=%d",
+            menu_fetch_time,
+            ai_time,
+            total_time,
+            len(allowed_for_prompt),
+        )
         return response_payload
 
     except HTTPException:
@@ -1950,7 +2014,7 @@ async def get_supported_dining_halls():
 async def get_menu(dining_hall: str, date: str):
     """Get menu for a specific dining hall and date (with Supabase caching)"""
     try:
-        menu_data = get_dining_hall_menu(dining_hall, date)
+        menu_data = await get_dining_hall_menu(dining_hall, date)
         if "error" in menu_data and menu_data["error"] is not None:
             raise HTTPException(status_code=500, detail=menu_data["error"])
         return menu_data
@@ -2260,63 +2324,70 @@ async def stripe_webhook(request: Request):
 
     return PlainTextResponse("ok", status_code=200)
 
-BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()  
+BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()
+
+
+async def _send_meal_plan_generation_email_async(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str) -> None:
+    if not user_row or not user_row.get("email"):
+        return
+    if not BREVO_MEAL_PLAN_TEMPLATE_ID:
+        return
+    try:
+        template_id = int(re.match(r"(\d+)", BREVO_MEAL_PLAN_TEMPLATE_ID).group(1))
+    except Exception:
+        print("[brevo] Invalid BREVO_MEAL_PLAN_TEMPLATE_ID value; skipping meal plan email")
+        return
+
+    try:
+        guess = _guess_name_from_email(user_row.get("email") or "")
+        await upsert_brevo_contact(
+            user_row["email"],
+            attributes={
+                "FIRSTNAME": (user_row.get("username") or guess.get("first") or ""),
+                "LASTNAME": guess.get("last") or "",
+            },
+        )
+    except Exception as exc:
+        print(f"[brevo] contact upsert failed (continuing): {exc}")
+
+    from_email = os.getenv("BREVO_FROM_EMAIL")
+    from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
+    if not from_email:
+        print("[brevo] BREVO_FROM_EMAIL not set; skipping meal plan email")
+        return
+
+    params = {
+        "USERNAME": user_row.get("username") or guess.get("first") or "",
+        "GENERATION_ID": generation_id or "",
+        "DINING_HALL": dining_hall,
+        "DATE": date,
+    }
+    payload = {
+        "templateId": template_id,
+        "to": [{"email": user_row["email"], "name": user_row.get("username") or guess.get("first") or None}],
+        "sender": {"email": from_email, "name": from_name},
+        "params": params,
+        "tags": ["meal_plan_generated"],
+    }
+    client = _get_http_client()
+    try:
+        response = await client.post(f"{_brevo_base_url()}/smtp/email", headers=_brevo_headers(), json=payload)
+        if response.status_code not in (200, 201):
+            print(f"[brevo] meal plan email send failed status={response.status_code} body={response.text[:200]}")
+        else:
+            print(f"[brevo] meal plan email sent generation_id={generation_id}")
+    except Exception as exc:
+        print(f"[brevo] meal plan email error: {exc}")
+
 
 def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str):
-    """Send Brevo email notifying user their meal plan was generated.
-    Uses BREVO_MEAL_PLAN_TEMPLATE_ID. Silently returns if misconfigured.
-    """
+    """Dispatch background task to send meal plan generation email."""
     try:
-        if not user_row or not user_row.get("email"):
-            return
-        if not BREVO_MEAL_PLAN_TEMPLATE_ID:
-            return
-        try:
-            template_id = int(re.match(r"(\d+)", BREVO_MEAL_PLAN_TEMPLATE_ID).group(1))  
-        except Exception:
-            print("[brevo] Invalid BREVO_MEAL_PLAN_TEMPLATE_ID value; skipping meal plan email")
-            return
-        
-        try:
-            guess = _guess_name_from_email(user_row["email"]) if user_row.get("email") else {"first": "", "last": ""}
-            upsert_brevo_contact(
-                user_row["email"],
-                attributes={
-                    "FIRSTNAME": (user_row.get("username") or guess.get("first") or ""),
-                    "LASTNAME": guess.get("last") or "",
-                },
-            )
-        except Exception as e:
-            print(f"[brevo] contact upsert failed (continuing): {e}")
-        
-        from_email = os.getenv("BREVO_FROM_EMAIL")
-        from_name = os.getenv("BREVO_FROM_NAME", "DormDish")
-        if not from_email:
-            print("[brevo] BREVO_FROM_EMAIL not set; skipping meal plan email")
-            return
-        params = {
-            "USERNAME": user_row.get("username") or guess.get("first") or "",
-            "GENERATION_ID": generation_id or "",
-            "DINING_HALL": dining_hall,
-            "DATE": date,
-        }
-        body = {
-            "templateId": template_id,
-            "to": [{"email": user_row["email"], "name": user_row.get("username") or guess.get("first") or None}],
-            "sender": {"email": from_email, "name": from_name},
-            "params": params,
-            "tags": ["meal_plan_generated"],
-        }
-        try:
-            r = requests.post(f"{_brevo_base_url()}/smtp/email", headers=_brevo_headers(), data=json.dumps(body), timeout=12)
-            if r.status_code not in (200, 201):
-                print(f"[brevo] meal plan email send failed status={r.status_code} body={r.text[:200]}")
-            else:
-                print(f"[brevo] meal plan email sent generation_id={generation_id}")
-        except Exception as e:
-            print(f"[brevo] meal plan email error: {e}")
-    except Exception as outer:
-        print(f"[brevo] unexpected meal plan email error: {outer}")
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
+    else:
+        loop.create_task(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
 
 if __name__ == '__main__':
     import uvicorn

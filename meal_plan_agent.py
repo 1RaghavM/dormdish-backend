@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import hashlib
+import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -9,6 +10,7 @@ from agents import WebSearchTool, Agent, ModelSettings, TResponseInputItem
 from openai import AsyncOpenAI
 from types import SimpleNamespace
 from pydantic import BaseModel
+
 
 try:  
   from openai.types.shared.reasoning import Reasoning  
@@ -89,9 +91,23 @@ def _build_mealplan_cache_key(
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]]
 ) -> str:
+  trimmed_menu_payload: Dict[str, Any] = {
+    "requested_dining_hall": menu_payload.get("requested_dining_hall"),
+    "requested_date": menu_payload.get("requested_date"),
+    "hall": menu_payload.get("hall"),
+    "allowed_items": menu_payload.get("allowed_items"),
+  }
+  source_menu = menu_payload.get("source_menu")
+  if isinstance(source_menu, dict):
+    trimmed_menu_payload["source_menu"] = {
+      "hall_slug": source_menu.get("hall_slug"),
+      "fetched_at": source_menu.get("fetched_at"),
+      "meal_sources": (source_menu.get("menu", {}) or {}).get("meal_sources"),
+    }
+
   serializable_payload = {
     "user_payload": user_payload,
-    "menu_payload": menu_payload,
+    "menu_payload": trimmed_menu_payload,
     "nutrition_targets": nutrition_targets,
     "extra_system_messages": list(extra_system_messages) if extra_system_messages else None,
   }
@@ -216,7 +232,7 @@ Nutrition Targets
 - Explanation field: 1–3 sentences on overall balance, noting any insights drawn from the web sources you consulted and any unavoidable shortfall/excess.
 """,
     model="gpt-5-mini",
-    tools=[web_search_preview],
+    #tools=[web_search_preview],
     output_type=DormdishMealPlannerSchema,
     model_settings=ModelSettings(
         store=True,
@@ -314,6 +330,14 @@ async def generate_meal_plan_with_agent(
     user_payload,
     menu_payload,
     nutrition_targets,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  # Lightweight telemetry to help diagnose latency in downstream model calls.
+  print(
+    f"[meal_plan_agent] prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
   )
   cache_key = _build_mealplan_cache_key(
     user_payload,
