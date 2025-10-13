@@ -228,7 +228,7 @@ Nutrition Targets
 - Calories & protein must be within ±5% of goals.
 - Prioritize protein target first, then adjust calories.
 - Meals must be realistic, balanced, appetizing.
-- Explanation field: 1–3 sentences on overall balance, noting any insights drawn from the web sources you consulted and any unavoidable shortfall/excess.
+- Explanation field: 1–3 sentences on how meal plan is beneficial and balanced, noting any unavoidable shortfall/excess.
 """,
     model="gpt-5-mini",
     #tools=[web_search_preview],
