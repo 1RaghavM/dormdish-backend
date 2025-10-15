@@ -2093,7 +2093,7 @@ def _get_stripe_api_key() -> Optional[str]:
 STRIPE_API_KEY = _get_stripe_api_key()
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dormdish.com")  
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")  
 if STRIPE_API_KEY and stripe:
     stripe.api_key = STRIPE_API_KEY
     try:

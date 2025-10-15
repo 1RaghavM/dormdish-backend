@@ -149,16 +149,12 @@ async def _run_guardrails_parallel(input_text: str) -> List[Any]:
     elif result is not None:
       combined.append(result)
   return combined
-class DormdishMealPlannerSchema__UserStats(BaseModel):
-    bmr: float
-    tdee: float
-    goal: str
-    dietary_preference: Optional[str] = None
 
 
-class DormdishMealPlannerSchema__Goals(BaseModel):
-    calories: float
-    protein_g: float
+
+# class DormdishMealPlannerSchema__Goals(BaseModel):
+#     calories: float
+#     protein_g: float
 
 
 class DormdishMealPlannerSchema__Totals(BaseModel):
@@ -186,8 +182,8 @@ class DormdishMealPlannerSchema__Meals(BaseModel):
 
 
 class DormdishMealPlannerSchema(BaseModel):
-    user_stats: DormdishMealPlannerSchema__UserStats
-    goals: DormdishMealPlannerSchema__Goals
+    # user_stats: DormdishMealPlannerSchema__UserStats
+    # goals: DormdishMealPlannerSchema__Goals
     totals: DormdishMealPlannerSchema__Totals
     meals: DormdishMealPlannerSchema__Meals
     explanation: str
@@ -202,8 +198,6 @@ Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed ite
 
 STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):
 {
-  "user_stats": { "bmr": "<float>", "tdee": "<float>", "goal": "<cut|maintain|bulk>", "dietary_preference": "<vegan|vegetarian|null>" },
-  "goals": { "calories": "<int>", "protein_g": "<int>" },
   "totals": { "calories": "<int>", "protein_g": "<int>" },
   "meals": {
     "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },
@@ -297,9 +291,9 @@ def _build_agent_prompt(
     }
 
   prompt_sections = [
-    "# USER PROFILE",
-    json.dumps(user_payload, indent=2, ensure_ascii=False),
-    "",
+    # "# USER PROFILE",
+    # json.dumps(user_payload, indent=2, ensure_ascii=False),
+    # "",
     "# NUTRITION TARGETS",
     json.dumps(nutrition_targets, indent=2, ensure_ascii=False),
     "",
