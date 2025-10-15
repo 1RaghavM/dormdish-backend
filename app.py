@@ -753,16 +753,28 @@ class GoogleRegisterRequest(BaseModel):
     dietary_preference: Optional[str] = None
 
 async def _verify_google_id_token(id_token: str) -> Dict[str, Any]:
-    """Validate a Google ID token using the shared AsyncClient."""
-    client = _get_http_client()
+    """Validate a Google ID token.
+
+    Historically this used the shared AsyncClient which can fail with
+    "Event loop is closed" if some other code called ``asyncio.run()`` and
+    closed the loop. To make verification robust from both sync and async
+    contexts, perform the HTTP request using httpx's synchronous API inside
+    ``asyncio.to_thread`` so it doesn't depend on the current event loop.
+    """
+    url = "https://oauth2.googleapis.com/tokeninfo"
     try:
-        resp = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
-        resp.raise_for_status()
+        def _sync_get():
+            # small timeout to keep things responsive
+            resp = httpx.get(url, params={"id_token": id_token}, timeout=httpx.Timeout(5.0))
+            resp.raise_for_status()
+            return resp
+
+        resp = await asyncio.to_thread(_sync_get)
+        data = resp.json()
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=401, detail="Invalid Google ID token") from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to verify Google token: {exc}") from exc
-    data = resp.json()
     aud_expected = os.getenv("GOOGLE_CLIENT_ID")
     if aud_expected and data.get("aud") != aud_expected:
         raise HTTPException(status_code=401, detail="Google token audience mismatch")
