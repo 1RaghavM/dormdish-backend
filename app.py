@@ -940,12 +940,12 @@ async def auth_google_login(payload: GoogleIdTokenRequest):
         try:
             supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
         except Exception as e:
-            #print(f"[auth.google.login] warning: failed to update last_login: {e}")
+            print(f"[auth.google.login] warning: failed to update last_login: {e}")
         return {
-            "success": True,
-            "message": "Login successful",
-            "user": user_row,
-            "session_token": token,
+                "success": True,
+                "message": "Login successful",
+                "user": user_row,
+                "session_token": token,
         }
     except HTTPException:
         raise
