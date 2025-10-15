@@ -78,9 +78,28 @@ app = FastAPI(
 
 
 def _get_http_client() -> httpx.AsyncClient:
+    """Return the shared AsyncClient, creating a fallback client when the
+    app lifespan wasn't executed (common in serverless environments).
+
+    The original code expected the shared client to be created in the
+    `lifespan` asynccontextmanager. Some serverless adapters don't run
+    that lifespan hook, so create and cache a client on-demand to avoid
+    a RuntimeError and to ensure outbound HTTP calls (to Google tokeninfo,
+    Brevo, Nutrislice, etc.) work.
+    """
     client = getattr(app.state, "http", None)
     if client is None:
-        raise RuntimeError("Shared HTTP client not initialized")
+        # Lazy-init a client and stash it on app.state for reuse. We don't
+        # await close() here because serverless runtimes often don't provide
+        # a reliable shutdown hook; relying on the process exit cleanup is
+        # acceptable for short-lived functions.
+        try:
+            client = httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT, limits=HTTP_CLIENT_LIMITS, headers=HTTP_CLIENT_HEADERS)
+            app.state.http = client
+            print("[http] lazily initialized AsyncClient on app.state")
+        except Exception:
+            # If creation fails, surface the original helpful error
+            raise RuntimeError("Shared HTTP client not initialized and lazy creation failed")
     return client
 
 
