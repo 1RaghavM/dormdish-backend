@@ -891,39 +891,55 @@ def auth_logout(authorization: Optional[str] = Header(None)):
 
 @app.post('/auth/google/login')
 async def auth_google_login(payload: GoogleIdTokenRequest):
-    token_data = await _verify_google_id_token(payload.id_token)
-    email = token_data.get('email', '').lower()
-    given_name = token_data.get('given_name') or ''
-    family_name = token_data.get('family_name') or ''
-    if not email:
-        raise HTTPException(status_code=400, detail="Google token missing email")
-    
-    res = supabase.table("users").select("*").eq("email", email).execute()
-    if not res.data:
-        
+    try:
+        token_data = await _verify_google_id_token(payload.id_token)
+        # minimal non-sensitive logging for debugging
+        email = token_data.get('email', '').lower()
+        given_name = token_data.get('given_name') or ''
+        family_name = token_data.get('family_name') or ''
+        print(f"[auth.google.login] token verified for email={email}")
+        if not email:
+            raise HTTPException(status_code=400, detail="Google token missing email")
+
+        res = supabase.table("users").select("*").eq("email", email).execute()
+        if not res.data:
+            print(f"[auth.google.login] no user found for email={email}")
+            return {
+                "success": True,
+                "message": "Google account not registered",
+                "needs_registration": True,
+                "email": email,
+                "given_name": given_name,
+                "family_name": family_name,
+            }
+        user_row = res.data[0]
+
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            print(f"[auth.google.login] failed to create session for user_id={user_row.get('id')}")
+            raise HTTPException(status_code=500, detail="Failed to create session")
+        try:
+            supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
+        except Exception as e:
+            print(f"[auth.google.login] warning: failed to update last_login: {e}")
         return {
             "success": True,
-            "message": "Google account not registered",
-            "needs_registration": True,
-            "email": email,
-            "given_name": given_name,
-            "family_name": family_name,
+            "message": "Login successful",
+            "user": user_row,
+            "session_token": token,
         }
-    user_row = res.data[0]
-    
-    token = create_user_session(user_row.get("id"))
-    if not token:
-        raise HTTPException(status_code=500, detail="Failed to create session")
-    try:
-        supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
-    except Exception:
-        pass
-    return {
-        "success": True,
-        "message": "Login successful",
-        "user": user_row,
-        "session_token": token,
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"[auth.google.login] unhandled exception: {e}")
+        # Expose more detail when DEBUG flag is set, otherwise keep generic
+        debug = os.getenv("DEBUG", "0") in ("1", "true", "True")
+        if debug:
+            raise HTTPException(status_code=500, detail=f"Google login failed: {e}")
+        else:
+            raise HTTPException(status_code=500, detail="Google login failed")
 
 @app.post('/auth/google/register')
 async def auth_google_register(data: GoogleRegisterRequest):
