@@ -47,6 +47,10 @@ class ItemPolicy:
             return "vegan" in tags
         if preference is DietaryPreference.VEGETARIAN:
             return "vegetarian" in tags or "vegan" in tags
+        if preference is DietaryPreference.PESCETARIAN:
+            # Pescetarian allows fish and plant-based options.
+            # Accept items explicitly tagged pescetarian, and also vegetarian/vegan items.
+            return "pescetarian" in tags or "vegetarian" in tags or "vegan" in tags
         return True
 
     def allows_meal(self, slot: MealSlot) -> bool:

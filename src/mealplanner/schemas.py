@@ -29,6 +29,7 @@ class DietaryPreference(str, Enum):
     NONE = "none"
     VEGETARIAN = "vegetarian"
     VEGAN = "vegan"
+    PESCETARIAN = "pescetarian"
 
 
 class GoalType(str, Enum):

@@ -1688,12 +1688,13 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
     """Update user profile"""
     try:
         update_data: Dict[str, object] = {}
-        for field, value in profile_data.dict(exclude_unset=True).items():
+        # use Pydantic v2 model_dump to avoid deprecation warnings
+        for field, value in profile_data.model_dump(exclude_unset=True).items():
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
-                if field == 'dietary_preference' and value not in ['vegan', 'vegetarian']:
-                    raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan' or 'vegetarian'")
+                if field == 'dietary_preference' and value not in ['vegan', 'vegetarian', 'pescetarian']:
+                    raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', or 'pescetarian'")
                 update_data[field] = value
         if any(field in update_data for field in ['age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level']):
             current_age = update_data.get('age', current_user['age'])  
@@ -1709,6 +1710,26 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
             update_data['tdee'] = bmr_data['tdee']
         if update_data:
             response = supabase.table("users").update(update_data).eq("id", current_user['id']).execute()
+            # Supabase client surfaces Postgres errors in response.error
+            if getattr(response, 'error', None):
+                err_text = str(response.error)
+                # Detect common Postgres enum error text
+                if 'invalid input value' in err_text or 'invalid input syntax for enum' in err_text or 'cannot insert' in err_text:
+                    # Give actionable instructions to add the new enum value in Postgres
+                    guidance = (
+                        "The database rejected the new dietary preference value. "
+                        "This often means the `dietary_preference` column is a Postgres enum that doesn't include 'pescetarian'.\n"
+                        "To inspect the type of the column run:\n"
+                        "  SELECT column_name, data_type, udt_name FROM information_schema.columns\n"
+                        "  WHERE table_name='users' AND column_name='dietary_preference';\n\n"
+                        "If the column is an enum (udt_name shows the enum type), add the new value with (run as a DB admin):\n"
+                        "  ALTER TYPE <enum_type> ADD VALUE 'pescetarian';\n\n"
+                        "To find the enum_type replace <enum_type> with the udt_name from the query above. "
+                        "If you're using Supabase, run those SQL statements in the SQL editor."
+                    )
+                    raise HTTPException(status_code=500, detail=f"Failed to update profile: DB rejected value. Postgres error: {err_text}.\n{guidance}")
+                # otherwise return the raw supabase error
+                raise HTTPException(status_code=500, detail=f"Failed to update profile: {err_text}")
             if response.data:
                 updated_user = response.data[0]
                 updated_user.pop('password_hash', None)

@@ -291,9 +291,11 @@ def _build_agent_prompt(
     }
 
   prompt_sections = [
-    # "# USER PROFILE",
-    # json.dumps(user_payload, indent=2, ensure_ascii=False),
-    # "",
+    "# USER PROFILE",
+    json.dumps({
+      "dietary_preference": user_payload.get("dietary_preference") if user_payload is not None else None
+    }, indent=2, ensure_ascii=False),
+    "",
     "# NUTRITION TARGETS",
     json.dumps(nutrition_targets, indent=2, ensure_ascii=False),
     "",
