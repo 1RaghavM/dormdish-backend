@@ -17,22 +17,6 @@ try:
 except ImportError:  
   Reasoning = None  
 
-try:  
-  from guardrails.runtime import load_config_bundle, instantiate_guardrails, run_guardrails  
-  GUARDRAILS_AVAILABLE = True
-except ModuleNotFoundError:  
-  GUARDRAILS_AVAILABLE = False
-
-  def load_config_bundle(config: Dict[str, Any]) -> Dict[str, Any]:  
-    return config
-
-  def instantiate_guardrails(config: Dict[str, Any]):  
-    return None
-
-  async def run_guardrails(*_args: Any, **_kwargs: Any) -> List[Any]:  
-    return []
-
-
 web_search_preview = WebSearchTool(
   filters={
     "allowed_domains": [
@@ -46,43 +30,11 @@ web_search_preview = WebSearchTool(
 )
 
 client = AsyncOpenAI()
-ctx = SimpleNamespace(guardrail_llm=client)
-
-guardrails_config = {
-  "guardrails": [
-
-  ]
-}
 
 
 _MEAL_PLAN_CACHE_LIMIT = int(os.getenv("MEALPLAN_CACHE_SIZE", "16"))
 _MEAL_PLAN_CACHE: "OrderedDict[str, Tuple[DormdishMealPlannerSchema, str]]" = OrderedDict()
 _MEAL_PLAN_CACHE_LOCK = asyncio.Lock()
-
-
-def guardrails_has_tripwire(results):
-    return any(getattr(r, "tripwire_triggered", False) is True for r in (results or []))
-
-def get_guardrail_checked_text(results, fallback_text):
-    for r in (results or []):
-        info = getattr(r, "info", None) or {}
-        if isinstance(info, dict) and ("checked_text" in info):
-            return info.get("checked_text") or fallback_text
-    return fallback_text
-
-def build_guardrail_fail_output(results):
-    failures = []
-    for r in (results or []):
-        if getattr(r, "tripwire_triggered", False):
-            info = getattr(r, "info", None) or {}
-            failure = {
-                "guardrail_name": info.get("guardrail_name"),
-            }
-            for key in ("flagged", "confidence", "threshold", "hallucination_type", "hallucinated_statements", "verified_statements"):
-                if key in (info or {}):
-                    failure[key] = info.get(key)
-            failures.append(failure)
-    return {"failed": len(failures) > 0, "failures": failures}
 
 
 def _build_mealplan_cache_key(
@@ -115,40 +67,7 @@ def _build_mealplan_cache_key(
   return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-async def _run_guardrails_parallel(input_text: str) -> List[Any]:
-  guardrail_entries = guardrails_config.get("guardrails") or []
-  if not guardrail_entries:
-    guardrail_instance = instantiate_guardrails(load_config_bundle(guardrails_config))
-    return await run_guardrails(
-      ctx,
-      input_text,
-      "text/plain",
-      guardrail_instance,
-      suppress_tripwire=True,
-    )
 
-  tasks = []
-  for entry in guardrail_entries:
-    bundle = load_config_bundle({"guardrails": [entry]})
-    instance = instantiate_guardrails(bundle)
-    tasks.append(
-      run_guardrails(
-        ctx,
-        input_text,
-        "text/plain",
-        instance,
-        suppress_tripwire=True,
-      )
-    )
-
-  results = await asyncio.gather(*tasks, return_exceptions=False)
-  combined: List[Any] = []
-  for result in results:
-    if isinstance(result, list):
-      combined.extend(result)
-    elif result is not None:
-      combined.append(result)
-  return combined
 
 
 
@@ -384,12 +303,5 @@ async def run_workflow(workflow_input: WorkflowInput):
       ]
     }
   ]
-  guardrails_inputtext = workflow["input_as_text"]
-  guardrails_result = await _run_guardrails_parallel(guardrails_inputtext)
-  guardrails_hastripwire = guardrails_has_tripwire(guardrails_result)
-  guardrails_anonymizedtext = get_guardrail_checked_text(guardrails_result, guardrails_inputtext)
-  guardrails_output = (guardrails_hastripwire and build_guardrail_fail_output(guardrails_result or [])) or (guardrails_anonymizedtext or guardrails_inputtext)
-  if guardrails_hastripwire:
-    return guardrails_output
-  else:
-    return guardrails_output
+  # Guardrails removed. Return the input text (or a minimal workflow result).
+  return {"input_as_text": workflow["input_as_text"], "conversation_history": conversation_history}

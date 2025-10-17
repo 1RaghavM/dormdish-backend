@@ -89,16 +89,16 @@ def _get_http_client() -> httpx.AsyncClient:
     """
     client = getattr(app.state, "http", None)
     if client is None:
-        # Lazy-init a client and stash it on app.state for reuse. We don't
-        # await close() here because serverless runtimes often don't provide
-        # a reliable shutdown hook; relying on the process exit cleanup is
-        # acceptable for short-lived functions.
+        
+        
+        
+        
         try:
             client = httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT, limits=HTTP_CLIENT_LIMITS, headers=HTTP_CLIENT_HEADERS)
             app.state.http = client
             print("[http] lazily initialized AsyncClient on app.state")
         except Exception:
-            # If creation fails, surface the original helpful error
+            
             raise RuntimeError("Shared HTTP client not initialized and lazy creation failed")
     return client
 
@@ -764,7 +764,7 @@ async def _verify_google_id_token(id_token: str) -> Dict[str, Any]:
     url = "https://oauth2.googleapis.com/tokeninfo"
     try:
         def _sync_get():
-            # small timeout to keep things responsive
+            
             resp = httpx.get(url, params={"id_token": id_token}, timeout=httpx.Timeout(5.0))
             resp.raise_for_status()
             return resp
@@ -924,17 +924,17 @@ def auth_logout(authorization: Optional[str] = Header(None)):
 async def auth_google_login(payload: GoogleIdTokenRequest):
     try:
         token_data = await _verify_google_id_token(payload.id_token)
-        # minimal non-sensitive logging for debugging
+        
         email = token_data.get('email', '').lower()
         given_name = token_data.get('given_name') or ''
         family_name = token_data.get('family_name') or ''
-        #print(f"[auth.google.login] token verified for email={email}")
+        
         if not email:
             raise HTTPException(status_code=400, detail="Google token missing email")
 
         res = supabase.table("users").select("*").eq("email", email).execute()
         if not res.data:
-            #print(f"[auth.google.login] no user found for email={email}")
+            
             return {
                 "success": True,
                 "message": "Google account not registered",
@@ -947,7 +947,7 @@ async def auth_google_login(payload: GoogleIdTokenRequest):
 
         token = create_user_session(user_row.get("id"))
         if not token:
-            #print(f"[auth.google.login] failed to create session for user_id={user_row.get('id')}")
+            
             raise HTTPException(status_code=500, detail="Failed to create session")
         try:
             supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
@@ -964,8 +964,8 @@ async def auth_google_login(payload: GoogleIdTokenRequest):
     except Exception as e:
         import traceback as _tb
         _tb.print_exc()
-        #print(f"[auth.google.login] unhandled exception: {e}")
-        # Expose more detail when DEBUG flag is set, otherwise keep generic
+        
+        
         debug = os.getenv("DEBUG", "0") in ("1", "true", "True")
         if debug:
             raise HTTPException(status_code=500, detail=f"Google login failed: {e}")
@@ -1688,7 +1688,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
     """Update user profile"""
     try:
         update_data: Dict[str, object] = {}
-        # use Pydantic v2 model_dump to avoid deprecation warnings
+        
         for field, value in profile_data.model_dump(exclude_unset=True).items():
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
@@ -1710,12 +1710,12 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
             update_data['tdee'] = bmr_data['tdee']
         if update_data:
             response = supabase.table("users").update(update_data).eq("id", current_user['id']).execute()
-            # Supabase client surfaces Postgres errors in response.error
+            
             if getattr(response, 'error', None):
                 err_text = str(response.error)
-                # Detect common Postgres enum error text
+                
                 if 'invalid input value' in err_text or 'invalid input syntax for enum' in err_text or 'cannot insert' in err_text:
-                    # Give actionable instructions to add the new enum value in Postgres
+                    
                     guidance = (
                         "The database rejected the new dietary preference value. "
                         "This often means the `dietary_preference` column is a Postgres enum that doesn't include 'pescetarian'.\n"
@@ -1728,7 +1728,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                         "If you're using Supabase, run those SQL statements in the SQL editor."
                     )
                     raise HTTPException(status_code=500, detail=f"Failed to update profile: DB rejected value. Postgres error: {err_text}.\n{guidance}")
-                # otherwise return the raw supabase error
+                
                 raise HTTPException(status_code=500, detail=f"Failed to update profile: {err_text}")
             if response.data:
                 updated_user = response.data[0]
@@ -2074,7 +2074,7 @@ async def get_supported_dining_halls():
                 ],
             },
         ]
-        #print(f"⚠️ External dining halls service unavailable, using fallback: {str(e)}")
+        
     return fallback_dining_halls
 
 

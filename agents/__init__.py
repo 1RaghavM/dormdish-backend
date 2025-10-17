@@ -146,11 +146,27 @@ class Agent:
         }
         if self.temperature is not None:
             request_payload["temperature"] = self.temperature
+        # Prefer structured JSON object responses when supported by the model runtime.
+        # Newer API versions accept response_format={"type": "json_object"} to return
+        # a parsed JSON object directly which avoids manual extraction/parsing.
+        try:
+            request_payload["response_format"] = {"type": "json_object"}
+        except Exception:
+            # Defensive: if the client doesn't accept this parameter, ignore it.
+            pass
 
         response = await self._client.chat.completions.create(**request_payload)
 
-        content = response.choices[0].message.content or ""
-        parsed_json = self._extract_first_json_block(content)
+        # The model may return a parsed object directly when response_format is used,
+        # or it may return a string containing JSON. Handle both cases gracefully.
+        raw_choice = response.choices[0].message.content
+        # If the SDK has already parsed the object, it may be a dict/list.
+        if isinstance(raw_choice, (dict, list)):
+            parsed_json = raw_choice
+            content = json.dumps(raw_choice, ensure_ascii=False)
+        else:
+            content = raw_choice or ""
+            parsed_json = self._extract_first_json_block(content)
         validated = self.output_type.model_validate(parsed_json)
         return validated, content
 
