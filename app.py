@@ -1690,6 +1690,11 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
         update_data: Dict[str, object] = {}
         
         for field, value in profile_data.model_dump(exclude_unset=True).items():
+            # Special-case: allow clearing dietary_preference by explicitly setting it to null/None
+            if field == 'dietary_preference' and value is None:
+                update_data[field] = None
+                continue
+
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
