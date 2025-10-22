@@ -1133,6 +1133,20 @@ class MealPlanFeedbackRequest(BaseModel):
     generation_id: str
     liked: bool
 
+class SaveMealPlanRequest(BaseModel):
+    """Request to save or update a meal plan"""
+    dining_hall: str
+    date: str
+    meal_plan_data: dict  # Contains meals, totals, goals, etc.
+    plan_id: Optional[str] = None  # If provided, updates existing plan
+
+class MealPlanItemUpdate(BaseModel):
+    """Individual meal item for editing"""
+    name: str
+    calories: Optional[float] = None
+    protein_g: Optional[float] = None
+    serving_size: Optional[str] = None
+    servings: Optional[float] = 1.0
 class TokenData(BaseModel):
     user_id: str
 
@@ -2122,6 +2136,163 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to record feedback: {e}")
+
+
+@app.post("/meal-plan/save", summary="Save or update a meal plan")
+async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_current_user)):
+    """Save a new meal plan or update an existing one"""
+    try:
+        plan_id = payload.plan_id or str(uuid4())
+        
+        # Prepare data to save
+        save_data = {
+            "id": plan_id,
+            "user_id": current_user["id"],
+            "dining_hall": payload.dining_hall,
+            "date": payload.date,
+            "meal_plan_data": payload.meal_plan_data,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        
+        # Use upsert to either create or update
+        response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to save meal plan")
+        
+        return {
+            "success": True,
+            "plan_id": plan_id,
+            "message": "Meal plan saved successfully",
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error saving meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save meal plan: {str(e)}")
+
+
+@app.get("/meal-plan/history", summary="Get user's saved meal plans")
+async def get_meal_plan_history(
+    limit: int = 10,
+    offset: int = 0,
+    current_user=Depends(get_current_user)
+):
+    """Get list of user's saved meal plans, ordered by date (most recent first)"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .select("id, dining_hall, date, created_at, updated_at, meal_plan_data")\
+            .eq("user_id", current_user["id"])\
+            .order("date", desc=True)\
+            .range(offset, offset + limit - 1)\
+            .execute()
+        
+        plans = response.data if response.data else []
+        
+        return {
+            "success": True,
+            "plans": plans,
+            "count": len(plans),
+        }
+    except Exception as e:
+        print(f"Error fetching meal plan history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch meal plans: {str(e)}")
+
+
+@app.get("/meal-plan/{plan_id}", summary="Get a specific saved meal plan")
+async def get_meal_plan(plan_id: str, current_user=Depends(get_current_user)):
+    """Get a specific meal plan by ID"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .select("*")\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        return {
+            "success": True,
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch meal plan: {str(e)}")
+
+
+@app.put("/meal-plan/{plan_id}", summary="Update an existing meal plan")
+async def update_meal_plan(
+    plan_id: str,
+    payload: SaveMealPlanRequest,
+    current_user=Depends(get_current_user)
+):
+    """Update an existing meal plan"""
+    try:
+        # Verify the plan exists and belongs to the user
+        existing = supabase.table("saved_meal_plans")\
+            .select("id")\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        # Update the plan
+        update_data = {
+            "dining_hall": payload.dining_hall,
+            "date": payload.date,
+            "meal_plan_data": payload.meal_plan_data,
+            "updated_at": datetime.now().isoformat(),
+        }
+        
+        response = supabase.table("saved_meal_plans")\
+            .update(update_data)\
+            .eq("id", plan_id)\
+            .execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to update meal plan")
+        
+        return {
+            "success": True,
+            "message": "Meal plan updated successfully",
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update meal plan: {str(e)}")
+
+
+@app.delete("/meal-plan/{plan_id}", summary="Delete a saved meal plan")
+async def delete_meal_plan(plan_id: str, current_user=Depends(get_current_user)):
+    """Delete a saved meal plan"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .delete()\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        return {
+            "success": True,
+            "message": "Meal plan deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete meal plan: {str(e)}")
 
 
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
