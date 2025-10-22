@@ -840,10 +840,54 @@ def auth_register(data: RegisterRequest):
             "created_at": datetime.now().isoformat(),
         }
 
-        inserted = supabase.table("users").insert(payload).execute()
-        if not inserted.data:
-            raise HTTPException(status_code=500, detail="Failed to create user")
-        user_row = inserted.data[0]
+        # Try inserting the user. If the DB rejects due to a unique constraint on
+        # username (common when users share the same display name), automatically
+        # attempt a small number of retries by appending a numeric suffix to the
+        # username. This avoids returning an internal server error for a
+        # username collision while preserving the email-uniqueness check above.
+        max_attempts = 5
+        base_username = (payload.get("username") or "user").strip()
+        if not base_username:
+            # Fall back to a name derived from email local-part if username empty
+            base_username = str(data.email).split("@")[0]
+
+        user_row = None
+        for attempt in range(max_attempts):
+            try:
+                try_username = base_username if attempt == 0 else f"{base_username}-{attempt}"
+                payload["username"] = try_username
+                inserted = supabase.table("users").insert(payload).execute()
+
+                # supabase client may return an object with .error or raise an Exception.
+                insert_error = getattr(inserted, "error", None)
+                if insert_error:
+                    msg = str(insert_error)
+                    # Detect username-unique violations from message text
+                    if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
+                        # Collision on username, try next suffix
+                        logger.info("username collision detected for %s (attempt %s): %s", try_username, attempt + 1, msg)
+                        continue
+                    # If it's a different DB error, surface it
+                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+
+                if inserted.data and len(inserted.data) > 0:
+                    user_row = inserted.data[0]
+                    break
+                # If no data was returned but no explicit error, treat as failure and retry once
+                logger.warning("Insert returned no data for username=%s on attempt=%s", try_username, attempt + 1)
+            except Exception as e:
+                emsg = str(e)
+                # Psycopg / Postgres unique constraint error code often surfaces as 23505;
+                # also check for textual duplicate-key message referencing username.
+                if ("23505" in emsg) or ("users_username_key" in emsg) or ("Key (username)" in emsg) or ("duplicate key value" in emsg):
+                    logger.info("caught unique-constraint username collision (attempt %s) for username=%s: %s", attempt + 1, payload.get("username"), emsg)
+                    continue
+                print(f"⚠️ Register insert error (non-username): {e}")
+                raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
+
+        if not user_row:
+            # All attempts exhausted
+            raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
 
         
         token = create_user_session(user_row.get("id"))
@@ -1015,13 +1059,39 @@ async def auth_google_register(data: GoogleRegisterRequest):
             "created_at": datetime.now().isoformat(),
         }
         print(f"[google.register] inserting user payload keys={list(payload.keys())}")
-        inserted = supabase.table("users").insert(payload).execute()
-        if getattr(inserted, 'error', None):
-            
-            raise HTTPException(status_code=500, detail=f"Supabase insert error: {inserted.error}")
-        if not inserted.data:
-            raise HTTPException(status_code=500, detail="Failed to create user (no data returned)")
-        user_row = inserted.data[0]
+        # Same username-collision handling as auth_register: try a few suffixes
+        max_attempts = 5
+        base_username = (payload.get("username") or "user").strip()
+        if not base_username:
+            base_username = email.split("@")[0]
+
+        user_row = None
+        for attempt in range(max_attempts):
+            try:
+                try_username = base_username if attempt == 0 else f"{base_username}-{attempt}"
+                payload["username"] = try_username
+                inserted = supabase.table("users").insert(payload).execute()
+                insert_error = getattr(inserted, "error", None)
+                if insert_error:
+                    msg = str(insert_error)
+                    if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
+                        logger.info("[google.register] username collision for %s attempt=%s: %s", try_username, attempt + 1, msg)
+                        continue
+                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                if inserted.data and len(inserted.data) > 0:
+                    user_row = inserted.data[0]
+                    break
+                logger.warning("[google.register] insert returned no data for username=%s on attempt=%s", try_username, attempt + 1)
+            except Exception as e:
+                emsg = str(e)
+                if ("23505" in emsg) or ("users_username_key" in emsg) or ("Key (username)" in emsg) or ("duplicate key value" in emsg):
+                    logger.info("[google.register] caught unique-constraint username collision attempt=%s username=%s: %s", attempt + 1, payload.get("username"), emsg)
+                    continue
+                print(f"[google.register] insert error (non-username): {e}")
+                raise HTTPException(status_code=500, detail=f"Google registration failed: {e}")
+
+        if not user_row:
+            raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
         token = create_user_session(user_row.get("id"))
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
