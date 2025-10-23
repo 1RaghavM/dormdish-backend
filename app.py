@@ -154,31 +154,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-_MENU_CACHE: Dict[str, Tuple[float, dict]] = {}
-_MENU_CACHE_TTL = int(os.getenv("MENU_CACHE_TTL_SECONDS", "600"))
-
-
-def _menu_cache_key(university: str, dining_hall: str, date: str) -> str:
-    return f"{university}|{dining_hall}|{date}"
-
-
-def _menu_cache_get(university: str, dining_hall: str, date: str) -> Optional[dict]:
-    key = _menu_cache_key(university, dining_hall, date)
-    cached = _MENU_CACHE.get(key)
-    if not cached:
-        return None
-    ts, payload = cached
-    if (time.time() - ts) <= _MENU_CACHE_TTL:
-        return payload
-    _MENU_CACHE.pop(key, None)
-    return None
-
-
-def _menu_cache_set(university: str, dining_hall: str, date: str, payload: dict) -> None:
-    key = _menu_cache_key(university, dining_hall, date)
-    _MENU_CACHE[key] = (time.time(), payload)
-
-
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
     salt = bcrypt.gensalt()
@@ -1156,6 +1131,13 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 
+def _rutgers_today_str():
+    try:
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
+
 async def get_menu_from_supabase(university: str, dining_hall: str, date: str) -> Optional[dict]:
     """Check if menu exists in Supabase database without blocking the event loop."""
 
@@ -1216,14 +1198,6 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
     return await asyncio.to_thread(_save)
 
 
-
-def _rutgers_today_str():
-    try:
-        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    except Exception:
-        return datetime.utcnow().strftime("%Y-%m-%d")
-
-
 async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
     
@@ -1282,15 +1256,9 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
-    mem_cached = _menu_cache_get(university, dining_hall, date)
-    if mem_cached is not None:
-        print(f"✅ Using in-memory cached menu for {university}/{dining_hall}/{date}")
-        return mem_cached
-
     cached_menu = await get_menu_from_supabase(university, dining_hall, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
-        _menu_cache_set(university, dining_hall, date, cached_menu)
         return cached_menu
 
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
@@ -1302,7 +1270,6 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
             save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
-            _menu_cache_set(university, dining_hall, date, menu_data)
             return menu_data
         except Exception as e:
             print(f"❌ FoodPro fetch failed: {e}")
@@ -1316,7 +1283,6 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             return {"error": f"No menu items available for {hall_slug} on {date}"}
         save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
-        _menu_cache_set(university, dining_hall, date, menu_data)
         return menu_data
     except Exception as e:
         return {"error": f"Failed to fetch menu: {str(e)}"}
@@ -2011,8 +1977,9 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 sanitized_item = {**item}
                 sanitized_item["name"] = nutrition_lookup[key_match]["name"]
                 sanitized_item["servings"] = round(servings, 2)
+                # Strict schema requires serving_size to be a string, not None
                 if not sanitized_item.get("serving_size"):
-                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or None
+                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
 
                 for macro_key in ("calories", "protein_g"):
                     value = sanitized_item.get(macro_key)
@@ -2025,9 +1992,11 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
                 new_items.append(sanitized_item)
             meal["items"] = new_items
+        
+        # Store unknown_items in separate meta dict (not part of strict schema)
+        dropped_items_meta = {}
         if unknown_items:
-            plan_json.setdefault('meta', {})['dropped_unknown'] = unknown_items
-
+            dropped_items_meta['dropped_unknown'] = unknown_items
 
         plan_json.setdefault('goals', {})['calories'] = calorie_target
         plan_json['goals']['protein_g'] = protein_target
@@ -2072,11 +2041,11 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         safe_user['activity_breakdown'] = selected_activity_metrics or None
 
         generation_id = str(uuid4())
-        meta_payload = {}
-        if isinstance(plan_json.get('meta'), dict):
-            meta_payload = dict(plan_json.get('meta'))
-        meta_payload.setdefault('agent_raw_response', agent_raw_text)
-        plan_json['meta'] = meta_payload
+        # Build meta payload separately (not part of strict schema)
+        meta_payload = {
+            'agent_raw_response': agent_raw_text,
+            **dropped_items_meta  # Include dropped items if any
+        }
 
         response_payload = {
             "success": True,
@@ -2338,31 +2307,6 @@ async def get_menu(dining_hall: str, date: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
 
 
-@app.delete("/cache/clear/{dining_hall}/{date}", summary="Clear Menu Cache")
-async def clear_menu_cache(dining_hall: str, date: str):
-    """Clear cached menu for a specific dining hall and date"""
-    try:
-        university = "hopkins" if ("hopkins" in dining_hall or "nolans" in dining_hall or "peabody" in dining_hall) else "rutgers"
-        menu_id = f"{university}_{dining_hall}_{date}"
-        response = supabase.table("menus").delete().eq("id", menu_id).execute()
-        return {
-            "success": True,
-            "message": f"Cache cleared for {menu_id}",
-            "deleted_count": len(response.data) if response.data else 0,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
-
-
-@app.get("/cache/status", summary="Get Cache Status")
-async def cache_status():
-    """Get cache statistics"""
-    try:
-        response = supabase.table("menus").select("id, university, dining_hall, date, created_at").execute()
-        cached_menus = response.data if response.data else []
-        return {"total_cached_menus": len(cached_menus), "cached_menus": cached_menus}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get cache status: {str(e)}")
 
 import logging
 try:

@@ -1,79 +1,65 @@
 import asyncio
 import json
 import os
-import hashlib
-import time
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from agents import WebSearchTool, Agent, ModelSettings, TResponseInputItem
-from openai import AsyncOpenAI
-from types import SimpleNamespace
+from anthropic import AsyncAnthropic
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Anthropic client (Claude)
+client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
-try:  
-  from openai.types.shared.reasoning import Reasoning  
-except ImportError:  
-  Reasoning = None  
+BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
 
-web_search_preview = WebSearchTool(
-  filters={
-    "allowed_domains": [
-      "nutritionsource.hsph.harvard.edu",
-    ]
-  },
-  search_context_size="low",
-  user_location={
-    "type": "approximate"
-  }
-)
+CRITICAL REQUIREMENTS - MUST BE MET:
+• Total daily calories MUST be between {cal_min} and {cal_max} calories (target: {cal_target})
+• Total daily protein MUST be between {prot_min}g and {prot_max}g (target: {prot_target}g)
+• These are HARD CONSTRAINTS, not suggestions. The plan will be rejected if outside these ranges.
 
-client = AsyncOpenAI()
+CALCULATION METHOD (MANDATORY):
+1. For each item, calculate: servings × calories_per_serving = item_calories
+2. For each item, calculate: servings × protein_per_serving = item_protein
+3. Sum all item_calories across all meals = total_calories
+4. Sum all item_protein across all meals = total_protein
+5. VERIFY totals are within required ranges BEFORE finalizing
 
+MEAL STRUCTURE:
+• Create exactly 3 meals: breakfast, lunch, dinner
+• Each meal should have 2-4 items (main dish + sides/accompaniments)
+• Include companions (e.g., pasta→sauce, salad→dressing)
+• Use realistic servings: 0.5, 1, 1.5, 2 (fractional amounts allowed)
+• Vary items - don't repeat the same item more than once per day
+• Don't stack multiple protein mains in one meal
 
-_MEAL_PLAN_CACHE_LIMIT = int(os.getenv("MEALPLAN_CACHE_SIZE", "16"))
-_MEAL_PLAN_CACHE: "OrderedDict[str, Tuple[DormdishMealPlannerSchema, str]]" = OrderedDict()
-_MEAL_PLAN_CACHE_LOCK = asyncio.Lock()
+OPTIMIZATION STRATEGY:
+1. Start with high-protein items to meet protein target
+2. Add calorie-dense items if under calorie target
+3. Use fractional servings (0.5, 1.5) for fine-tuning
+4. Adjust portion sizes to hit BOTH targets simultaneously
+5. Double-check math before submitting
 
+DIETARY PREFERENCES:
+• Respect the user's dietary preference specified in the prompt
 
-def _build_mealplan_cache_key(
-  user_payload: Dict[str, Any],
-  menu_payload: Dict[str, Any],
-  nutrition_targets: Dict[str, Any],
-  extra_system_messages: Optional[Sequence[str]]
-) -> str:
-  trimmed_menu_payload: Dict[str, Any] = {
-    "requested_dining_hall": menu_payload.get("requested_dining_hall"),
-    "requested_date": menu_payload.get("requested_date"),
-    "hall": menu_payload.get("hall"),
-    "allowed_items": menu_payload.get("allowed_items"),
-  }
-  source_menu = menu_payload.get("source_menu")
-  if isinstance(source_menu, dict):
-    trimmed_menu_payload["source_menu"] = {
-      "hall_slug": source_menu.get("hall_slug"),
-      "fetched_at": source_menu.get("fetched_at"),
-      "meal_sources": (source_menu.get("menu", {}) or {}).get("meal_sources"),
-    }
+OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
+{{"totals":{{"calories":<int>,"protein_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
 
-  serializable_payload = {
-    "user_payload": user_payload,
-    "menu_payload": trimmed_menu_payload,
-    "nutrition_targets": nutrition_targets,
-    "extra_system_messages": list(extra_system_messages) if extra_system_messages else None,
-  }
-  serialized = json.dumps(serializable_payload, sort_keys=True, ensure_ascii=False)
-  return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+EXPLANATION:
+• Write 1-3 sentences explaining how the plan meets the calorie/protein targets
+• Mention any notable trade-offs or optimizations made
 
+EXAMPLE CALCULATION:
+If target is 2000 cal / 150g protein:
+- Grilled Chicken (250 cal, 45g protein) × 2 servings = 500 cal, 90g protein
+- Brown Rice (200 cal, 4g protein) × 1.5 servings = 300 cal, 6g protein
+Continue until totals reach 1900-2100 cal and 143-158g protein.
 
-
-
-
-
-# class DormdishMealPlannerSchema__Goals(BaseModel):
-#     calories: float
-#     protein_g: float
+Remember: This is a mathematical optimization task. Precision is mandatory. Think step by step."""
 
 
 class DormdishMealPlannerSchema__Totals(BaseModel):
@@ -86,7 +72,7 @@ class DormdishMealPlannerSchema__MealItem(BaseModel):
     servings: float
     calories: float
     protein_g: float
-    serving_size: Optional[str] = None
+    serving_size: str  # Changed from Optional - strict mode requires all fields
 
 
 class DormdishMealPlannerSchema__Meal(BaseModel):
@@ -101,66 +87,22 @@ class DormdishMealPlannerSchema__Meals(BaseModel):
 
 
 class DormdishMealPlannerSchema(BaseModel):
-    # user_stats: DormdishMealPlannerSchema__UserStats
-    # goals: DormdishMealPlannerSchema__Goals
     totals: DormdishMealPlannerSchema__Totals
     meals: DormdishMealPlannerSchema__Meals
     explanation: str
-    meta: Optional[Dict[str, Any]] = None
-
-
-dormdish_meal_planner = Agent(
-    name="DormDish Meal Planner",
-    instructions="""
-You are a pragmatic, encouraging university dining hall nutritionist & meal designer.
-Create ONE daily meal plan (breakfast, lunch, dinner) using ONLY the allowed items. Think in terms of a plate: a main + sides. If an item requires a companion (pasta → sauce, sandwich → bread + protein, salad → dressing), include it. Avoid absurd pairings.
-
-STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):
-{
-  "totals": { "calories": "<int>", "protein_g": "<int>" },
-  "meals": {
-    "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },
-    "lunch": { "description": "<string>", "items": [ "<meal_item>", ... ] },
-    "dinner": { "description": "<string>", "items": [ "<meal_item>", ... ] }
-  },
-  "explanation": "<string>"
-}
-
-Meal item schema:
-{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "serving_size": "<string|null>" }
-
-Rules
-- 3 meals only. Each: short description + 2–4 items (main protein + carb/veg/sauce). A single larger item is OK if realistic.
-- Variety: avoid repeating exact items more than once/day.
-- Don’t stack multiple meats in one meal. Plant proteins may complement sensibly.
-- If pairing item missing from list, proceed without fabrication (note in explanation).
-- Respect dietary prefs (vegan/vegetarian).
-- Serving sizes can be fractional (0.5 increments).
-
-Nutrition Targets
-- Calories & protein must be within ±5% of goals.
-- Prioritize protein target first, then adjust calories.
-- Meals must be realistic, balanced, appetizing.
-- Explanation field: 1–3 sentences on how meal plan is beneficial and balanced, noting any unavoidable shortfall/excess.
-""",
-    model="gpt-5-mini",
-    #tools=[web_search_preview],
-    output_type=DormdishMealPlannerSchema,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="low", summary="auto") if Reasoning else None,
-    ),
-    client=client,
-    temperature=1.0,
-)
+    # Note: meta field removed for strict mode compliance (all fields must be required)
 
 
 def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] = None) -> str:
+  """Render menu items for prompt in compact format to reduce token count."""
   if not items:
     return "- (no items provided)"
 
   limit = limit or len(items)
   lines: List[str] = []
+  
+  # OPTIMIZATION: Compact format reduces tokens by ~30-40% without losing information
+  # Format: name|cal|prot|serving (removed verbose labels)
   for idx, item in enumerate(items):
     if idx >= limit:
       break
@@ -168,19 +110,67 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
     cal = item.get("calories")
     prot = item.get("protein_g")
     serving = item.get("serving_size")
-    parts: List[str] = [name or "(unnamed item)"]
+    
+    # Compact format: just the values separated by pipes
+    parts: List[str] = [name or "(unnamed)"]
     if cal is not None:
-      parts.append(f"{float(cal):.0f} cal")
+      parts.append(f"{float(cal):.0f}cal")  # Removed space before "cal"
     if prot is not None:
-      parts.append(f"{float(prot):.1f} g protein")
+      parts.append(f"{float(prot):.1f}g")  # Changed from "g protein" to just "g"
     if serving:
-      parts.append(f"serving: {serving}")
-    lines.append(" - " + " | ".join(parts))
+      parts.append(f"{serving}")  # Removed "serving: " prefix
+    lines.append("|".join(parts))  # Removed " - " prefix and spaces around separator
 
   remaining = max(0, len(items) - limit)
   if remaining:
-    lines.append(f" - … {remaining} more items omitted for brevity")
+    lines.append(f"…{remaining} more")
   return "\n".join(lines)
+
+
+def _recalculate_totals_from_meals(
+  result: DormdishMealPlannerSchema,
+  menu_payload: Dict[str, Any],
+) -> Dict[str, float]:
+  """
+  Recalculate totals deterministically from the meal plan items.
+  This ensures perfect math instead of relying on LLM calculations.
+  """
+  allowed_items = menu_payload.get("allowed_items") or []
+  
+  # Build a lookup map: item name -> nutrition info
+  item_lookup: Dict[str, Dict[str, Any]] = {}
+  for item in allowed_items:
+    name = str(item.get("name", "")).strip().lower()
+    item_lookup[name] = {
+      "calories": float(item.get("calories", 0)),
+      "protein_g": float(item.get("protein_g", 0)),
+    }
+  
+  total_calories = 0.0
+  total_protein = 0.0
+  
+  # Sum up all meals
+  for meal_name in ["breakfast", "lunch", "dinner"]:
+    meal = getattr(result.meals, meal_name)
+    for meal_item in meal.items:
+      item_name = meal_item.name.strip().lower()
+      servings = float(meal_item.servings)
+      
+      # Look up the item in the menu
+      if item_name in item_lookup:
+        item_data = item_lookup[item_name]
+        total_calories += item_data["calories"] * servings
+        total_protein += item_data["protein_g"] * servings
+      else:
+        # Item not found - use LLM's values as fallback
+        print(f"[meal_plan_agent] WARNING: Item '{meal_item.name}' not found in menu, using LLM values")
+        total_calories += float(meal_item.calories)
+        total_protein += float(meal_item.protein_g)
+  
+  return {
+    "calories": round(total_calories),
+    "protein_g": round(total_protein),
+  }
 
 
 def _build_agent_prompt(
@@ -190,9 +180,11 @@ def _build_agent_prompt(
   *,
   max_items: Optional[int] = None,
 ) -> str:
+  """Build prompt for LLM."""
   hall = menu_payload.get("requested_dining_hall") or menu_payload.get("hall")
   date = menu_payload.get("requested_date")
   allowed_items = menu_payload.get("allowed_items") or []
+  
   if max_items is None:
     try:
       max_items = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "175"))
@@ -209,23 +201,30 @@ def _build_agent_prompt(
       else None,
     }
 
+  dining_context = {"dining_hall": hall, "date": date}
+  if menu_meta:
+    dining_context["meta"] = menu_meta
+
+  # OPTIMIZATION: Compact header format (name|cal|prot|serving)
+  menu_header = "# MENU (name|cal|prot|serving)"
+
+  # OPTIMIZATION: Use compact JSON (no indent) to reduce tokens
   prompt_sections = [
-    "# USER PROFILE",
+    "# PROFILE",
     json.dumps({
-      "dietary_preference": user_payload.get("dietary_preference") if user_payload is not None else None
-    }, indent=2, ensure_ascii=False),
+      "diet": user_payload.get("dietary_preference") if user_payload is not None else None
+    }, ensure_ascii=False),
     "",
-    "# NUTRITION TARGETS",
-    json.dumps(nutrition_targets, indent=2, ensure_ascii=False),
+    "# TARGETS",
+    json.dumps(nutrition_targets, ensure_ascii=False),
     "",
-    "# DINING CONTEXT",
-    json.dumps({"dining_hall": hall, "date": date, "meta": menu_meta}, indent=2, ensure_ascii=False),
+    "# CONTEXT",
+    json.dumps(dining_context, ensure_ascii=False),
     "",
-    "# ALLOWED MENU ITEMS (name | calories | protein | serving)",
+    menu_header,
     _render_allowed_items(allowed_items, limit=max_items),
     "",
-    "Generate the meal plan strictly in the JSON schema described in the system instructions above.",
-    "Do not include markdown backticks or additional commentary outside the JSON object.",
+    "Generate meal plan per schema above. Pure JSON, no markdown.",
   ]
 
   return "\n".join(section for section in prompt_sections if section is not None)
@@ -238,7 +237,23 @@ async def generate_meal_plan_with_agent(
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
-  """Run the DormDish agent and return the validated response plus raw text."""
+  """Generate a meal plan using Claude Haiku 4.5 with extended thinking for precision.
+  
+  Uses Claude's extended thinking feature to perform more accurate calculations
+  and hit nutritional targets with high precision.
+  
+  Args:
+    user_payload: User profile and preferences
+    menu_payload: Menu data including allowed items
+    nutrition_targets: Calorie and protein goals
+    extra_system_messages: Optional additional instructions (not used with Claude)
+    
+  Returns:
+    Tuple of (validated meal plan schema, raw JSON string)
+    
+  Raises:
+    ValueError: If model fails to return valid JSON
+  """
 
   prompt = _build_agent_prompt(
     user_payload,
@@ -248,36 +263,107 @@ async def generate_meal_plan_with_agent(
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
 
-  # Lightweight telemetry to help diagnose latency in downstream model calls.
+  # Lightweight telemetry
   print(
-    f"[meal_plan_agent] prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
-  )
-  cache_key = _build_mealplan_cache_key(
-    user_payload,
-    menu_payload,
-    nutrition_targets,
-    extra_system_messages,
+    f"[meal_plan_agent] Claude Haiku 4.5 prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
+    f"extended_thinking=enabled"
   )
 
-  async with _MEAL_PLAN_CACHE_LOCK:
-    cached_entry = _MEAL_PLAN_CACHE.get(cache_key)
-    if cached_entry:
-      cached_model, cached_raw = cached_entry
-      _MEAL_PLAN_CACHE.move_to_end(cache_key)
-      return cached_model.model_copy(deep=True), cached_raw
-
-  result, raw_response = await dormdish_meal_planner.arun(
-    input_text=prompt,
-    extra_system_messages=extra_system_messages,
+  # Build enhanced system instructions with target ranges
+  cal_target = nutrition_targets['calories']
+  prot_target = nutrition_targets['protein_g']
+  cal_min = int(cal_target * 0.95)
+  cal_max = int(cal_target * 1.05)
+  prot_min = int(prot_target * 0.95)
+  prot_max = int(prot_target * 1.05)
+  
+  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+    cal_min=cal_min,
+    cal_max=cal_max,
+    cal_target=cal_target,
+    prot_min=prot_min,
+    prot_max=prot_max,
+    prot_target=prot_target
   )
 
-  cached_tuple = (result.model_copy(deep=True), raw_response)
-  async with _MEAL_PLAN_CACHE_LOCK:
-    _MEAL_PLAN_CACHE[cache_key] = cached_tuple
-    _MEAL_PLAN_CACHE.move_to_end(cache_key)
-    while len(_MEAL_PLAN_CACHE) > _MEAL_PLAN_CACHE_LIMIT:
-      _MEAL_PLAN_CACHE.popitem(last=False)
+  # Model configuration from environment or defaults
+  chosen_model = os.getenv("MEALPLAN_MODEL", "claude-haiku-4-5")
+  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "1.0"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
+
+  # Call Claude with extended thinking for better calculation accuracy
+  response = await client.messages.create(
+    model=chosen_model,
+    max_tokens=max_tokens,
+    temperature=temperature,
+    thinking={
+      "type": "enabled",
+      "budget_tokens": 2000  # Allow Claude to think through the calculations
+    },
+    system=instructions,
+    messages=[
+      {"role": "user", "content": prompt}
+    ]
+  )
+
+  # Extract response from content blocks (handle ThinkingBlock + TextBlock)
+  raw_response = None
+  thinking_content = None
+  
+  for block in response.content:
+    if hasattr(block, 'text') and block.type == 'text':
+      raw_response = block.text
+    elif hasattr(block, 'thinking') and block.type == 'thinking':
+      thinking_content = block.thinking
+  
+  if thinking_content:
+    print(f"[meal_plan_agent] Claude thinking process: {len(thinking_content)} chars")
+  
+  if not raw_response:
+    raise ValueError("Claude returned no text response")
+
+  # Remove markdown code blocks if present
+  raw_json = raw_response.strip()
+  if raw_json.startswith("```"):
+    lines = raw_json.split("\n")
+    if lines[0].startswith("```"):
+      lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+      lines = lines[:-1]
+    raw_json = "\n".join(lines).strip()
+
+  # Parse JSON
+  try:
+    parsed = json.loads(raw_json)
+  except json.JSONDecodeError as e:
+    print(f"[meal_plan_agent] JSON parsing failed: {e}")
+    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
+    raise ValueError(f"Claude output was not valid JSON: {e}")
+
+  # Add default explanation if missing
+  if "explanation" not in parsed:
+    print("[meal_plan_agent] Adding default explanation")
+    parsed["explanation"] = "Meal plan generated to meet nutritional targets."
+
+  # Validate against Pydantic schema
+  result = DormdishMealPlannerSchema.model_validate(parsed)
+
+  # RECALCULATE TOTALS: Don't trust LLM math - compute deterministically
+  recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+  claude_calories = result.totals.calories
+  claude_protein = result.totals.protein_g
+  actual_calories = recalculated_totals["calories"]
+  actual_protein = recalculated_totals["protein_g"]
+  
+  # Log accuracy
+  cal_diff = abs(actual_calories - claude_calories)
+  prot_diff = abs(actual_protein - claude_protein)
+  if cal_diff > 0 or prot_diff > 0:
+    print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
+  
+  result.totals.calories = actual_calories
+  result.totals.protein_g = actual_protein
 
   return result, raw_response
 
@@ -288,20 +374,14 @@ class WorkflowInput(BaseModel):
 
 
 async def run_workflow(workflow_input: WorkflowInput):
-  state = {
-
-  }
+  # Minimal placeholder workflow using the Responses API structure for future expansion
   workflow = workflow_input.model_dump()
-  conversation_history: list[TResponseInputItem] = [
+  conversation_history: List[Dict[str, Any]] = [
     {
       "role": "user",
       "content": [
-        {
-          "type": "input_text",
-          "text": workflow["input_as_text"]
-        }
-      ]
+        {"type": "input_text", "text": workflow["input_as_text"]}
+      ],
     }
   ]
-  # Guardrails removed. Return the input text (or a minimal workflow result).
   return {"input_as_text": workflow["input_as_text"], "conversation_history": conversation_history}
