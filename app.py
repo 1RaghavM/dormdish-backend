@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, EmailStr
 from supabase import Client, create_client
 
@@ -75,6 +76,44 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Global exception handlers
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Handle all unhandled exceptions and return proper JSON responses"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred. Please try again later.",
+            "detail": str(exc) if os.getenv("DEBUG", "false").lower() == "true" else None
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle validation errors"""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "Validation error",
+            "message": "Invalid request data",
+            "detail": exc.errors()
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "HTTP error",
+            "message": exc.detail,
+            "status_code": exc.status_code
+        }
+    )
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -1128,7 +1167,25 @@ class TokenData(BaseModel):
 @app.get("/health", summary="Health Check")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    try:
+        # Test database connection
+        supabase.table("users").select("id").limit(1).execute()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "database": "disconnected",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 
 def _rutgers_today_str():
