@@ -290,7 +290,7 @@ async def generate_meal_plan_with_agent(
   # Model configuration from environment or defaults
   chosen_model = os.getenv("MEALPLAN_MODEL", "claude-haiku-4-5")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "1.0"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "10000"))
 
   # Call Claude with extended thinking for better calculation accuracy
   response = await client.messages.create(

@@ -1802,7 +1802,9 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
-    Returns legacy MealPlanResponse wrapper expected by frontend.
+    Auto-saves the meal plan to the database. Returns legacy MealPlanResponse wrapper expected by frontend.
+    
+    Rate limit: One meal plan per day. Meal plans expire after 24 hours.
     """
     t_start = time.time()
     menu_fetch_start = t_start
@@ -1813,6 +1815,21 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             authenticated_user = await asyncio.to_thread(verify_session_token, token)
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
+        
+        # Check if user already has a meal plan for today (rate limiting)
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        existing_plan_check = supabase.table("saved_meal_plans")\
+            .select("id, created_at")\
+            .eq("user_id", authenticated_user["id"])\
+            .eq("date", today)\
+            .execute()
+        
+        if existing_plan_check.data and len(existing_plan_check.data) > 0:
+            existing = existing_plan_check.data[0]
+            raise HTTPException(
+                status_code=409,
+                detail=f"You already have a meal plan for today. You can generate a new one tomorrow or use the existing plan."
+            )
         user = User(
             age=authenticated_user['age'],
             height_feet=authenticated_user['height_feet'],
@@ -2077,6 +2094,34 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             total_time,
             len(allowed_for_prompt),
         )
+        
+        # Auto-save the generated meal plan to database
+        try:
+            plan_id = str(uuid4())
+            save_data = {
+                "id": plan_id,
+                "user_id": authenticated_user["id"],
+                "dining_hall": meal_plan_request.dining_hall,
+                "date": today,
+                "meal_plan_data": response_payload,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+            
+            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
+            
+            if save_response.data:
+                response_payload["saved_plan_id"] = plan_id
+                response_payload["auto_saved"] = True
+                print(f"✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+            else:
+                print(f"⚠️ Failed to auto-save meal plan, but generation succeeded")
+                response_payload["auto_saved"] = False
+        except Exception as save_error:
+            # Don't fail the entire request if save fails
+            print(f"⚠️ Auto-save failed: {save_error}")
+            response_payload["auto_saved"] = False
+        
         return response_payload
 
     except HTTPException:
@@ -2188,6 +2233,62 @@ async def get_meal_plan_history(
         raise HTTPException(status_code=500, detail=f"Failed to fetch meal plans: {str(e)}")
 
 
+@app.get("/meal-plan/today", summary="Get today's saved meal plan")
+async def get_todays_meal_plan(current_user=Depends(get_current_user)):
+    """Get the saved meal plan for today if it exists.
+    
+    This endpoint checks if the user has already generated a meal plan for today.
+    Meal plans expire after 24 hours (based on the date field).
+    Automatically cleans up meal plans older than 24 hours.
+    """
+    try:
+        # Get today's date in the user's timezone (assuming US Eastern for Rutgers)
+        # In production, you might want to store user timezone preference
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        # Auto-cleanup: Delete meal plans older than today (background operation)
+        try:
+            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+            cleanup_response = supabase.table("saved_meal_plans")\
+                .delete()\
+                .eq("user_id", current_user["id"])\
+                .lt("date", cutoff_date)\
+                .execute()
+            deleted_count = len(cleanup_response.data) if cleanup_response.data else 0
+            if deleted_count > 0:
+                print(f"🧹 Auto-cleaned {deleted_count} old meal plan(s) for user {current_user['id']}")
+        except Exception as cleanup_error:
+            # Don't fail the request if cleanup fails
+            print(f"⚠️ Auto-cleanup failed: {cleanup_error}")
+        
+        # Query for today's meal plan
+        response = supabase.table("saved_meal_plans")\
+            .select("*")\
+            .eq("user_id", current_user["id"])\
+            .eq("date", today)\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            return {
+                "success": True,
+                "has_plan": False,
+                "meal_plan": None,
+                "message": "No meal plan found for today"
+            }
+        
+        meal_plan = response.data[0]
+        
+        return {
+            "success": True,
+            "has_plan": True,
+            "meal_plan": meal_plan,
+            "date": today
+        }
+    except Exception as e:
+        print(f"Error fetching today's meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch today's meal plan: {str(e)}")
+
+
 @app.get("/meal-plan/{plan_id}", summary="Get a specific saved meal plan")
 async def get_meal_plan(plan_id: str, current_user=Depends(get_current_user)):
     """Get a specific meal plan by ID"""
@@ -2280,6 +2381,41 @@ async def delete_meal_plan(plan_id: str, current_user=Depends(get_current_user))
     except Exception as e:
         print(f"Error deleting meal plan: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete meal plan: {str(e)}")
+
+
+@app.post("/meal-plan/cleanup-old", summary="Cleanup meal plans older than 24 hours")
+async def cleanup_old_meal_plans(current_user=Depends(get_current_user)):
+    """Delete meal plans older than 24 hours for the current user.
+    
+    This endpoint is automatically called when fetching today's meal plan,
+    but can also be called manually to clean up old data.
+    """
+    try:
+        # Calculate cutoff date (yesterday)
+        cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+        
+        # Delete all meal plans before today
+        response = supabase.table("saved_meal_plans")\
+            .delete()\
+            .eq("user_id", current_user["id"])\
+            .lt("date", cutoff_date)\
+            .execute()
+        
+        deleted_count = len(response.data) if response.data else 0
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Cleaned up {deleted_count} old meal plan(s)"
+        }
+    except Exception as e:
+        print(f"Error cleaning up old meal plans: {e}")
+        # Don't fail hard on cleanup errors
+        return {
+            "success": False,
+            "deleted_count": 0,
+            "message": f"Cleanup failed: {str(e)}"
+        }
 
 
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
