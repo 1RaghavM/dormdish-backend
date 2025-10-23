@@ -297,10 +297,10 @@ async def generate_meal_plan_with_agent(
     model=chosen_model,
     max_tokens=max_tokens,
     temperature=temperature,
-    thinking={
-      "type": "enabled",
-      "budget_tokens": 2000  # Allow Claude to think through the calculations
-    },
+    # thinking={
+    #   "type": "enabled",
+    #   "budget_tokens": 2000  # Allow Claude to think through the calculations
+    # },
     system=instructions,
     messages=[
       {"role": "user", "content": prompt}
