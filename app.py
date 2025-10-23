@@ -116,6 +116,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+hi="hi"
+
 def _get_http_client() -> httpx.AsyncClient:
     """Return the shared AsyncClient, creating a fallback client when the
     app lifespan wasn't executed (common in serverless environments).
