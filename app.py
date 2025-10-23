@@ -2109,8 +2109,26 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
 
 @app.post("/meal-plan/save", summary="Save or update a meal plan")
 async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_current_user)):
-    """Save a new meal plan or update an existing one"""
+    """Save a new meal plan or update an existing one. Enforces one meal plan per day limit."""
     try:
+        # Check if this is a new plan or an update
+        is_update = payload.plan_id is not None
+        
+        if not is_update:
+            # For new plans, check if a meal plan already exists for this date
+            existing_plan = supabase.table("saved_meal_plans")\
+                .select("id, dining_hall")\
+                .eq("user_id", current_user["id"])\
+                .eq("date", payload.date)\
+                .execute()
+            
+            if existing_plan.data and len(existing_plan.data) > 0:
+                existing = existing_plan.data[0]
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"You already have a meal plan for {payload.date} at {existing['dining_hall']}. Please update or delete it first."
+                )
+        
         plan_id = payload.plan_id or str(uuid4())
         
         # Prepare data to save
