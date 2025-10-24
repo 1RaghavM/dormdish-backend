@@ -35,6 +35,8 @@ MEAL STRUCTURE:
 • Use realistic servings: 0.5, 1, 1.5, 2 (fractional amounts allowed)
 • Vary items - don't repeat the same item more than once per day
 • Don't stack multiple protein mains in one meal
+• Do not include drinks, or desserts.
+Do not repeat items in the same meal, do not give multiple variations of the same item in the same meal (ex. hard-boiled eggs and scrambled eggs).
 
 OPTIMIZATION STRATEGY:
 1. Start with high-protein items to meet protein target
@@ -297,10 +299,11 @@ async def generate_meal_plan_with_agent(
     model=chosen_model,
     max_tokens=max_tokens,
     temperature=temperature,
-    # thinking={
-    #   "type": "enabled",
-    #   "budget_tokens": 2000  # Allow Claude to think through the calculations
-    # },
+    thinking={
+      "type": "enabled",
+      "budget_tokens": 8000  # Allow Claude to think through the calculations
+    },
+    #service_tier="priority",
     system=instructions,
     messages=[
       {"role": "user", "content": prompt}
