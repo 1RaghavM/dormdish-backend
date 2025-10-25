@@ -12,7 +12,7 @@ Options:
     --date: Specific date to clean up (default: yesterday)
     --dry-run: Show what would be deleted without actually deleting
 """
-
+hi="hi"
 import os
 import argparse
 from datetime import datetime, timedelta, timezone
