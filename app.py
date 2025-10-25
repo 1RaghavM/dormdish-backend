@@ -1858,6 +1858,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
         raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
 
 
+hi="hi"
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
@@ -1910,6 +1911,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 status_code=409,
                 detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
             )
+
 
         user = User(
             age=authenticated_user['age'],
