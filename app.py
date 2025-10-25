@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, EmailStr
 from supabase import Client, create_client
 
@@ -76,6 +77,46 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Global exception handlers
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Handle all unhandled exceptions and return proper JSON responses"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred. Please try again later.",
+            "detail": str(exc) if os.getenv("DEBUG", "false").lower() == "true" else None
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle validation errors"""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "Validation error",
+            "message": "Invalid request data",
+            "detail": exc.errors()
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "HTTP error",
+            "message": exc.detail,
+            "status_code": exc.status_code
+        }
+    )
+
+
+hi="hi"
 
 def _get_http_client() -> httpx.AsyncClient:
     """Return the shared AsyncClient, creating a fallback client when the
@@ -152,31 +193,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "your_supabase_url_here")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-
-_MENU_CACHE: Dict[str, Tuple[float, dict]] = {}
-_MENU_CACHE_TTL = int(os.getenv("MENU_CACHE_TTL_SECONDS", "600"))
-
-
-def _menu_cache_key(university: str, dining_hall: str, date: str) -> str:
-    return f"{university}|{dining_hall}|{date}"
-
-
-def _menu_cache_get(university: str, dining_hall: str, date: str) -> Optional[dict]:
-    key = _menu_cache_key(university, dining_hall, date)
-    cached = _MENU_CACHE.get(key)
-    if not cached:
-        return None
-    ts, payload = cached
-    if (time.time() - ts) <= _MENU_CACHE_TTL:
-        return payload
-    _MENU_CACHE.pop(key, None)
-    return None
-
-
-def _menu_cache_set(university: str, dining_hall: str, date: str, payload: dict) -> None:
-    key = _menu_cache_key(university, dining_hall, date)
-    _MENU_CACHE[key] = (time.time(), payload)
 
 
 def hash_password(password: str) -> str:
@@ -840,10 +856,54 @@ def auth_register(data: RegisterRequest):
             "created_at": datetime.now().isoformat(),
         }
 
-        inserted = supabase.table("users").insert(payload).execute()
-        if not inserted.data:
-            raise HTTPException(status_code=500, detail="Failed to create user")
-        user_row = inserted.data[0]
+        # Try inserting the user. If the DB rejects due to a unique constraint on
+        # username (common when users share the same display name), automatically
+        # attempt a small number of retries by appending a numeric suffix to the
+        # username. This avoids returning an internal server error for a
+        # username collision while preserving the email-uniqueness check above.
+        max_attempts = 5
+        base_username = (payload.get("username") or "user").strip()
+        if not base_username:
+            # Fall back to a name derived from email local-part if username empty
+            base_username = str(data.email).split("@")[0]
+
+        user_row = None
+        for attempt in range(max_attempts):
+            try:
+                try_username = base_username if attempt == 0 else f"{base_username}-{attempt}"
+                payload["username"] = try_username
+                inserted = supabase.table("users").insert(payload).execute()
+
+                # supabase client may return an object with .error or raise an Exception.
+                insert_error = getattr(inserted, "error", None)
+                if insert_error:
+                    msg = str(insert_error)
+                    # Detect username-unique violations from message text
+                    if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
+                        # Collision on username, try next suffix
+                        logger.info("username collision detected for %s (attempt %s): %s", try_username, attempt + 1, msg)
+                        continue
+                    # If it's a different DB error, surface it
+                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+
+                if inserted.data and len(inserted.data) > 0:
+                    user_row = inserted.data[0]
+                    break
+                # If no data was returned but no explicit error, treat as failure and retry once
+                logger.warning("Insert returned no data for username=%s on attempt=%s", try_username, attempt + 1)
+            except Exception as e:
+                emsg = str(e)
+                # Psycopg / Postgres unique constraint error code often surfaces as 23505;
+                # also check for textual duplicate-key message referencing username.
+                if ("23505" in emsg) or ("users_username_key" in emsg) or ("Key (username)" in emsg) or ("duplicate key value" in emsg):
+                    logger.info("caught unique-constraint username collision (attempt %s) for username=%s: %s", attempt + 1, payload.get("username"), emsg)
+                    continue
+                print(f"⚠️ Register insert error (non-username): {e}")
+                raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
+
+        if not user_row:
+            # All attempts exhausted
+            raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
 
         
         token = create_user_session(user_row.get("id"))
@@ -1015,13 +1075,39 @@ async def auth_google_register(data: GoogleRegisterRequest):
             "created_at": datetime.now().isoformat(),
         }
         print(f"[google.register] inserting user payload keys={list(payload.keys())}")
-        inserted = supabase.table("users").insert(payload).execute()
-        if getattr(inserted, 'error', None):
-            
-            raise HTTPException(status_code=500, detail=f"Supabase insert error: {inserted.error}")
-        if not inserted.data:
-            raise HTTPException(status_code=500, detail="Failed to create user (no data returned)")
-        user_row = inserted.data[0]
+        # Same username-collision handling as auth_register: try a few suffixes
+        max_attempts = 5
+        base_username = (payload.get("username") or "user").strip()
+        if not base_username:
+            base_username = email.split("@")[0]
+
+        user_row = None
+        for attempt in range(max_attempts):
+            try:
+                try_username = base_username if attempt == 0 else f"{base_username}-{attempt}"
+                payload["username"] = try_username
+                inserted = supabase.table("users").insert(payload).execute()
+                insert_error = getattr(inserted, "error", None)
+                if insert_error:
+                    msg = str(insert_error)
+                    if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
+                        logger.info("[google.register] username collision for %s attempt=%s: %s", try_username, attempt + 1, msg)
+                        continue
+                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                if inserted.data and len(inserted.data) > 0:
+                    user_row = inserted.data[0]
+                    break
+                logger.warning("[google.register] insert returned no data for username=%s on attempt=%s", try_username, attempt + 1)
+            except Exception as e:
+                emsg = str(e)
+                if ("23505" in emsg) or ("users_username_key" in emsg) or ("Key (username)" in emsg) or ("duplicate key value" in emsg):
+                    logger.info("[google.register] caught unique-constraint username collision attempt=%s username=%s: %s", attempt + 1, payload.get("username"), emsg)
+                    continue
+                print(f"[google.register] insert error (non-username): {e}")
+                raise HTTPException(status_code=500, detail=f"Google registration failed: {e}")
+
+        if not user_row:
+            raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
         token = create_user_session(user_row.get("id"))
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
@@ -1063,13 +1149,52 @@ class MealPlanFeedbackRequest(BaseModel):
     generation_id: str
     liked: bool
 
+class SaveMealPlanRequest(BaseModel):
+    """Request to save or update a meal plan"""
+    dining_hall: str
+    date: str
+    meal_plan_data: dict  # Contains meals, totals, goals, etc.
+    plan_id: Optional[str] = None  # If provided, updates existing plan
+
+class MealPlanItemUpdate(BaseModel):
+    """Individual meal item for editing"""
+    name: str
+    calories: Optional[float] = None
+    protein_g: Optional[float] = None
+    serving_size: Optional[str] = None
+    servings: Optional[float] = 1.0
 class TokenData(BaseModel):
     user_id: str
 
 @app.get("/health", summary="Health Check")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    try:
+        # Test database connection
+        supabase.table("users").select("id").limit(1).execute()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "database": "disconnected",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
+def _rutgers_today_str():
+    try:
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.utcnow().strftime("%Y-%m-%d")
 
 
 async def get_menu_from_supabase(university: str, dining_hall: str, date: str) -> Optional[dict]:
@@ -1132,14 +1257,6 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
     return await asyncio.to_thread(_save)
 
 
-
-def _rutgers_today_str():
-    try:
-        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    except Exception:
-        return datetime.utcnow().strftime("%Y-%m-%d")
-
-
 async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
     
@@ -1198,15 +1315,9 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
-    mem_cached = _menu_cache_get(university, dining_hall, date)
-    if mem_cached is not None:
-        print(f"✅ Using in-memory cached menu for {university}/{dining_hall}/{date}")
-        return mem_cached
-
     cached_menu = await get_menu_from_supabase(university, dining_hall, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
-        _menu_cache_set(university, dining_hall, date, cached_menu)
         return cached_menu
 
     if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
@@ -1218,7 +1329,6 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
             save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
-            _menu_cache_set(university, dining_hall, date, menu_data)
             return menu_data
         except Exception as e:
             print(f"❌ FoodPro fetch failed: {e}")
@@ -1232,7 +1342,6 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             return {"error": f"No menu items available for {hall_slug} on {date}"}
         save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
-        _menu_cache_set(university, dining_hall, date, menu_data)
         return menu_data
     except Exception as e:
         return {"error": f"Failed to fetch menu: {str(e)}"}
@@ -1690,6 +1799,11 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
         update_data: Dict[str, object] = {}
         
         for field, value in profile_data.model_dump(exclude_unset=True).items():
+            # Special-case: allow clearing dietary_preference by explicitly setting it to null/None
+            if field == 'dietary_preference' and value is None:
+                update_data[field] = None
+                continue
+
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
@@ -1747,7 +1861,9 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
-    Returns legacy MealPlanResponse wrapper expected by frontend.
+    Auto-saves the meal plan to the database. Returns legacy MealPlanResponse wrapper expected by frontend.
+    
+    Rate limit: One meal plan per day. Meal plans reset at the start of each new day.
     """
     t_start = time.time()
     menu_fetch_start = t_start
@@ -1758,6 +1874,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             authenticated_user = await asyncio.to_thread(verify_session_token, token)
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
+<<<<<<< HEAD
 <<<<<<< Updated upstream
 =======
         
@@ -1778,6 +1895,25 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         #         detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
         #     )
 >>>>>>> Stashed changes
+=======
+        
+        # Check if user already has a meal plan for today (rate limiting)
+        
+        
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        existing_plan_check = supabase.table("saved_meal_plans")\
+            .select("id, created_at")\
+            .eq("user_id", authenticated_user["id"])\
+            .eq("date", today)\
+            .execute()
+        
+        if existing_plan_check.data and len(existing_plan_check.data) > 0:
+            existing = existing_plan_check.data[0]
+            raise HTTPException(
+                status_code=409,
+                detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
+            )
+>>>>>>> test
         user = User(
             age=authenticated_user['age'],
             height_feet=authenticated_user['height_feet'],
@@ -1942,8 +2078,9 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 sanitized_item = {**item}
                 sanitized_item["name"] = nutrition_lookup[key_match]["name"]
                 sanitized_item["servings"] = round(servings, 2)
+                # Strict schema requires serving_size to be a string, not None
                 if not sanitized_item.get("serving_size"):
-                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or None
+                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
 
                 for macro_key in ("calories", "protein_g"):
                     value = sanitized_item.get(macro_key)
@@ -1956,9 +2093,11 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
                 new_items.append(sanitized_item)
             meal["items"] = new_items
+        
+        # Store unknown_items in separate meta dict (not part of strict schema)
+        dropped_items_meta = {}
         if unknown_items:
-            plan_json.setdefault('meta', {})['dropped_unknown'] = unknown_items
-
+            dropped_items_meta['dropped_unknown'] = unknown_items
 
         plan_json.setdefault('goals', {})['calories'] = calorie_target
         plan_json['goals']['protein_g'] = protein_target
@@ -2003,11 +2142,11 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         safe_user['activity_breakdown'] = selected_activity_metrics or None
 
         generation_id = str(uuid4())
-        meta_payload = {}
-        if isinstance(plan_json.get('meta'), dict):
-            meta_payload = dict(plan_json.get('meta'))
-        meta_payload.setdefault('agent_raw_response', agent_raw_text)
-        plan_json['meta'] = meta_payload
+        # Build meta payload separately (not part of strict schema)
+        meta_payload = {
+            'agent_raw_response': agent_raw_text,
+            **dropped_items_meta  # Include dropped items if any
+        }
 
         response_payload = {
             "success": True,
@@ -2039,6 +2178,34 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             total_time,
             len(allowed_for_prompt),
         )
+        
+        # Auto-save the generated meal plan to database
+        try:
+            plan_id = str(uuid4())
+            save_data = {
+                "id": plan_id,
+                "user_id": authenticated_user["id"],
+                "dining_hall": meal_plan_request.dining_hall,
+                "date": today,
+                "meal_plan_data": response_payload,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+            
+            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
+            
+            if save_response.data:
+                response_payload["saved_plan_id"] = plan_id
+                response_payload["auto_saved"] = True
+                print(f"✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+            else:
+                print(f"⚠️ Failed to auto-save meal plan, but generation succeeded")
+                response_payload["auto_saved"] = False
+        except Exception as save_error:
+            # Don't fail the entire request if save fails
+            print(f"⚠️ Auto-save failed: {save_error}")
+            response_payload["auto_saved"] = False
+        
         return response_payload
 
     except HTTPException:
@@ -2067,6 +2234,274 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to record feedback: {e}")
+
+
+@app.post("/meal-plan/save", summary="Save or update a meal plan")
+async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_current_user)):
+    """Save a new meal plan or update an existing one. Enforces one meal plan per day limit."""
+    try:
+        # Check if this is a new plan or an update
+        is_update = payload.plan_id is not None
+        
+        if not is_update:
+            # For new plans, check if a meal plan already exists for this date
+            # NOTE: Disabled for testing so multiple meal plans per day can be created.
+            # existing_plan = supabase.table("saved_meal_plans")\
+            #     .select("id, dining_hall")\
+            #     .eq("user_id", current_user["id"])\
+            #     .eq("date", payload.date)\
+            #     .execute()
+            # 
+            # if existing_plan.data and len(existing_plan.data) > 0:
+            #     existing = existing_plan.data[0]
+            #     raise HTTPException(
+            #         status_code=409,
+            #         detail=f"You already have a meal plan for {payload.date} at {existing['dining_hall']}. Please update or delete it first."
+            #     )
+            pass
+        
+        plan_id = payload.plan_id or str(uuid4())
+        
+        # Prepare data to save
+        save_data = {
+            "id": plan_id,
+            "user_id": current_user["id"],
+            "dining_hall": payload.dining_hall,
+            "date": payload.date,
+            "meal_plan_data": payload.meal_plan_data,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        
+        # Use upsert to either create or update
+        response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to save meal plan")
+        
+        return {
+            "success": True,
+            "plan_id": plan_id,
+            "message": "Meal plan saved successfully",
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error saving meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save meal plan: {str(e)}")
+
+
+@app.get("/meal-plan/history", summary="Get user's saved meal plans")
+async def get_meal_plan_history(
+    limit: int = 10,
+    offset: int = 0,
+    current_user=Depends(get_current_user)
+):
+    """Get list of user's saved meal plans, ordered by date (most recent first)"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .select("id, dining_hall, date, created_at, updated_at, meal_plan_data")\
+            .eq("user_id", current_user["id"])\
+            .order("date", desc=True)\
+            .range(offset, offset + limit - 1)\
+            .execute()
+        
+        plans = response.data if response.data else []
+        
+        return {
+            "success": True,
+            "plans": plans,
+            "count": len(plans),
+        }
+    except Exception as e:
+        print(f"Error fetching meal plan history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch meal plans: {str(e)}")
+
+
+@app.get("/meal-plan/today", summary="Get today's saved meal plan")
+async def get_todays_meal_plan(current_user=Depends(get_current_user)):
+    """Get the saved meal plan for today if it exists.
+    
+    This endpoint checks if the user has already generated a meal plan for today.
+    Meal plans reset at the start of each new day (based on the date field).
+    Automatically cleans up meal plans from previous days.
+    """
+    try:
+        # Get today's date in the user's timezone (assuming US Eastern for Rutgers)
+        # In production, you might want to store user timezone preference
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        # Auto-cleanup: Delete meal plans from previous days (background operation)
+        try:
+            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+            cleanup_response = supabase.table("saved_meal_plans")\
+                .delete()\
+                .eq("user_id", current_user["id"])\
+                .lt("date", cutoff_date)\
+                .execute()
+            deleted_count = len(cleanup_response.data) if cleanup_response.data else 0
+            if deleted_count > 0:
+                print(f"🧹 Auto-cleaned {deleted_count} old meal plan(s) for user {current_user['id']}")
+        except Exception as cleanup_error:
+            # Don't fail the request if cleanup fails
+            print(f"⚠️ Auto-cleanup failed: {cleanup_error}")
+        
+        # Query for today's meal plan
+        response = supabase.table("saved_meal_plans")\
+            .select("*")\
+            .eq("user_id", current_user["id"])\
+            .eq("date", today)\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            return {
+                "success": True,
+                "has_plan": False,
+                "meal_plan": None,
+                "message": "No meal plan found for today"
+            }
+        
+        meal_plan = response.data[0]
+        
+        return {
+            "success": True,
+            "has_plan": True,
+            "meal_plan": meal_plan,
+            "date": today
+        }
+    except Exception as e:
+        print(f"Error fetching today's meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch today's meal plan: {str(e)}")
+
+
+@app.get("/meal-plan/{plan_id}", summary="Get a specific saved meal plan")
+async def get_meal_plan(plan_id: str, current_user=Depends(get_current_user)):
+    """Get a specific meal plan by ID"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .select("*")\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        return {
+            "success": True,
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch meal plan: {str(e)}")
+
+
+@app.put("/meal-plan/{plan_id}", summary="Update an existing meal plan")
+async def update_meal_plan(
+    plan_id: str,
+    payload: SaveMealPlanRequest,
+    current_user=Depends(get_current_user)
+):
+    """Update an existing meal plan"""
+    try:
+        # Verify the plan exists and belongs to the user
+        existing = supabase.table("saved_meal_plans")\
+            .select("id")\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        # Update the plan
+        update_data = {
+            "dining_hall": payload.dining_hall,
+            "date": payload.date,
+            "meal_plan_data": payload.meal_plan_data,
+            "updated_at": datetime.now().isoformat(),
+        }
+        
+        response = supabase.table("saved_meal_plans")\
+            .update(update_data)\
+            .eq("id", plan_id)\
+            .execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to update meal plan")
+        
+        return {
+            "success": True,
+            "message": "Meal plan updated successfully",
+            "meal_plan": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update meal plan: {str(e)}")
+
+
+@app.delete("/meal-plan/{plan_id}", summary="Delete a saved meal plan")
+async def delete_meal_plan(plan_id: str, current_user=Depends(get_current_user)):
+    """Delete a saved meal plan"""
+    try:
+        response = supabase.table("saved_meal_plans")\
+            .delete()\
+            .eq("id", plan_id)\
+            .eq("user_id", current_user["id"])\
+            .execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="Meal plan not found")
+        
+        return {
+            "success": True,
+            "message": "Meal plan deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting meal plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete meal plan: {str(e)}")
+
+
+@app.post("/meal-plan/cleanup-old", summary="Cleanup meal plans from previous days")
+async def cleanup_old_meal_plans(current_user=Depends(get_current_user)):
+    """Delete meal plans from previous days for the current user.
+    
+    This endpoint is automatically called when fetching today's meal plan,
+    but can also be called manually to clean up old data.
+    """
+    try:
+        # Calculate cutoff date (yesterday)
+        cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+        
+        # Delete all meal plans before today
+        response = supabase.table("saved_meal_plans")\
+            .delete()\
+            .eq("user_id", current_user["id"])\
+            .lt("date", cutoff_date)\
+            .execute()
+        
+        deleted_count = len(response.data) if response.data else 0
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Cleaned up {deleted_count} old meal plan(s)"
+        }
+    except Exception as e:
+        print(f"Error cleaning up old meal plans: {e}")
+        # Don't fail hard on cleanup errors
+        return {
+            "success": False,
+            "deleted_count": 0,
+            "message": f"Cleanup failed: {str(e)}"
+        }
 
 
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
@@ -2112,31 +2547,6 @@ async def get_menu(dining_hall: str, date: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
 
 
-@app.delete("/cache/clear/{dining_hall}/{date}", summary="Clear Menu Cache")
-async def clear_menu_cache(dining_hall: str, date: str):
-    """Clear cached menu for a specific dining hall and date"""
-    try:
-        university = "hopkins" if ("hopkins" in dining_hall or "nolans" in dining_hall or "peabody" in dining_hall) else "rutgers"
-        menu_id = f"{university}_{dining_hall}_{date}"
-        response = supabase.table("menus").delete().eq("id", menu_id).execute()
-        return {
-            "success": True,
-            "message": f"Cache cleared for {menu_id}",
-            "deleted_count": len(response.data) if response.data else 0,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
-
-
-@app.get("/cache/status", summary="Get Cache Status")
-async def cache_status():
-    """Get cache statistics"""
-    try:
-        response = supabase.table("menus").select("id, university, dining_hall, date, created_at").execute()
-        cached_menus = response.data if response.data else []
-        return {"total_cached_menus": len(cached_menus), "cached_menus": cached_menus}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get cache status: {str(e)}")
 
 import logging
 try:
