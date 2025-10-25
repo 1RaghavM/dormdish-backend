@@ -1874,9 +1874,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             authenticated_user = await asyncio.to_thread(verify_session_token, token)
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-=======
+
         
         # Check if user already has a meal plan for today (rate limiting)
         # NOTE: Disabled for testing so multiple meal plans per day can be created.
@@ -1894,8 +1892,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         #         status_code=409,
         #         detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
         #     )
->>>>>>> Stashed changes
-=======
+
         
         # Check if user already has a meal plan for today (rate limiting)
         
@@ -1913,7 +1910,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 status_code=409,
                 detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
             )
->>>>>>> test
+
         user = User(
             age=authenticated_user['age'],
             height_feet=authenticated_user['height_feet'],
