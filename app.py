@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
             app.state.http = None
 
 
-from meal_plan_agent import generate_meal_plan_with_agent
+from meal_plan_agent import generate_meal_plan_with_subscription_check
 
 app = FastAPI(
     title="DormDish API",
@@ -2000,45 +2000,65 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
 
+        # Check subscription status
+        subscription_status = authenticated_user.get("subscription_status")
+        is_subscribed = subscription_status == "active"
+        
+        print(f"[meal_plan_generation] User subscription status: {subscription_status}, is_subscribed: {is_subscribed}")
+
         selected_activity_metrics: Dict[str, Any] = {}
         if isinstance(user_act_breakdown, dict):
             selected_entry = user_act_breakdown.get(user.activity_level)
             if isinstance(selected_entry, dict):
                 selected_activity_metrics = {user.activity_level: selected_entry}
 
-        agent_user_payload = {
-            "age": user.age,
-            "height_feet": user.height_feet,
-            "height_inches": user.height_inches,
-            "weight_lbs": user.weight_lbs,
-            "activity_level": user.activity_level,
-            "goal": goal_mode,
-            "dietary_preference": user.dietary_preference,
-            "bmr": user_bmr,
-            "tdee": user_tdee,
-            "activity_breakdown": selected_activity_metrics or None,
-        }
+        # Prepare user payload - filter based on subscription status
+        if is_subscribed:
+            # Subscribed users get full profile data
+            agent_user_payload = {
+                "age": user.age,
+                "height_feet": user.height_feet,
+                "height_inches": user.height_inches,
+                "weight_lbs": user.weight_lbs,
+                "activity_level": user.activity_level,
+                "goal": goal_mode,
+                "dietary_preference": user.dietary_preference,
+                "bmr": user_bmr,
+                "tdee": user_tdee,
+                "activity_breakdown": selected_activity_metrics or None,
+            }
+        else:
+            # Non-subscribed users only get dietary preference
+            agent_user_payload = {
+                "dietary_preference": user.dietary_preference,
+            }
+        
         agent_menu_payload = {
             "requested_dining_hall": meal_plan_request.dining_hall,
             "requested_date": meal_plan_request.date,
             "source_menu": menu_data,
             "allowed_items": allowed_for_prompt,
         }
-        agent_nutrition_targets = {
-            "calories": calorie_target,
-            "protein_g": protein_target,
-            "bmr": user_bmr,
-            "tdee": user_tdee,
-            "goal": goal_mode,
-            "activity_breakdown": selected_activity_metrics or None,
-        }
+        
+        # Only include nutrition targets for subscribed users
+        agent_nutrition_targets = None
+        if is_subscribed:
+            agent_nutrition_targets = {
+                "calories": calorie_target,
+                "protein_g": protein_target,
+                "bmr": user_bmr,
+                "tdee": user_tdee,
+                "goal": goal_mode,
+                "activity_breakdown": selected_activity_metrics or None,
+            }
 
         ai_start = time.time()
         try:
-            agent_result, agent_raw_text = await generate_meal_plan_with_agent(
+            agent_result, agent_raw_text = await generate_meal_plan_with_subscription_check(
                 user_payload=agent_user_payload,
                 menu_payload=agent_menu_payload,
                 nutrition_targets=agent_nutrition_targets,
+                is_subscribed=is_subscribed,
             )
         except ValueError as e:
             raise HTTPException(status_code=500, detail=f"Agent execution failed: {e}")
@@ -2098,13 +2118,17 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         if unknown_items:
             dropped_items_meta['dropped_unknown'] = unknown_items
 
-        plan_json.setdefault('goals', {})['calories'] = calorie_target
-        plan_json['goals']['protein_g'] = protein_target
-        plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
-        plan_json['user_stats']['tdee'] = user_tdee
-        plan_json['user_stats']['goal'] = goal_mode
-        plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
-        plan_json['user_stats']['activity_breakdown'] = selected_activity_metrics or None
+        # Only include nutrition goals and detailed stats for subscribed users
+        if is_subscribed:
+            plan_json.setdefault('goals', {})['calories'] = calorie_target
+            plan_json['goals']['protein_g'] = protein_target
+            plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
+            plan_json['user_stats']['tdee'] = user_tdee
+            plan_json['user_stats']['goal'] = goal_mode
+            plan_json['user_stats']['activity_breakdown'] = selected_activity_metrics or None
+        
+        # Always include dietary preference
+        plan_json.setdefault('user_stats', {})['dietary_preference'] = user.dietary_preference or None
 
         
         totals = plan_json.get('totals')
@@ -2117,14 +2141,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             raise HTTPException(status_code=500, detail="Model response missing valid totals")
         totals['calories'] = final_cal
         totals['protein_g'] = final_prot
-        cal_diff = final_cal - calorie_target
-        prot_diff = final_prot - protein_target
-        cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
-        prot_pct = (prot_diff / protein_target * 100) if protein_target else 0
         
-        print(f"📊 Final Plan Metrics:")
-        print(f"   Calories: {final_cal:.0f} / {calorie_target} ({cal_pct:+.1f}%)")
-        print(f"   Protein:  {final_prot:.0f}g / {protein_target}g ({prot_pct:+.1f}%)")
+        if is_subscribed:
+            cal_diff = final_cal - calorie_target
+            prot_diff = final_prot - protein_target
+            cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
+            prot_pct = (prot_diff / protein_target * 100) if protein_target else 0
+            
+            print(f"📊 Final Plan Metrics (Subscribed User):")
+            print(f"   Calories: {final_cal:.0f} / {calorie_target} ({cal_pct:+.1f}%)")
+            print(f"   Protein:  {final_prot:.0f}g / {protein_target}g ({prot_pct:+.1f}%)")
+        else:
+            print(f"📊 Final Plan Metrics (Non-Subscribed User):")
+            print(f"   Calories: {final_cal:.0f}")
+            print(f"   Protein:  {final_prot:.0f}g")
 
         if not plan_json.get('explanation'):
             plan_json['explanation'] = "Balanced plan targeting protein and calories with available items."
@@ -2135,10 +2165,19 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         total_time = t_end - t_start
 
         
-        safe_user = {k: authenticated_user[k] for k in authenticated_user.keys() if k != 'password_hash'}
-        safe_user['bmr'] = user_bmr
-        safe_user['tdee'] = user_tdee
-        safe_user['activity_breakdown'] = selected_activity_metrics or None
+        # Filter user profile based on subscription status
+        if is_subscribed:
+            safe_user = {k: authenticated_user[k] for k in authenticated_user.keys() if k != 'password_hash'}
+            safe_user['bmr'] = user_bmr
+            safe_user['tdee'] = user_tdee
+            safe_user['activity_breakdown'] = selected_activity_metrics or None
+        else:
+            # Non-subscribed users only get basic info
+            safe_user = {
+                "id": authenticated_user["id"],
+                "email": authenticated_user.get("email"),
+                "dietary_preference": authenticated_user.get("dietary_preference"),
+            }
 
         generation_id = str(uuid4())
         # Build meta payload separately (not part of strict schema)
@@ -2147,17 +2186,10 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             **dropped_items_meta  # Include dropped items if any
         }
 
+        # Build response payload based on subscription status
         response_payload = {
             "success": True,
             "user_profile": safe_user,
-            "nutrition_targets": {"calories": calorie_target, "protein_g": protein_target},
-            "bmr_tdee": {
-                "bmr": user_bmr,
-                "tdee": user_tdee,
-                "activity_breakdown": selected_activity_metrics or None,
-                "bmr_precise": metrics.get("bmr_precise"),
-                "tdee_precise": metrics.get("tdee_precise"),
-            },
             "available_items": allowed_for_prompt,
             "meal_plan": plan_json,
             "generation_id": generation_id,
@@ -2169,6 +2201,17 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             },
             "meta": meta_payload,
         }
+        
+        # Only include nutrition targets and BMR/TDEE for subscribed users
+        if is_subscribed:
+            response_payload["nutrition_targets"] = {"calories": calorie_target, "protein_g": protein_target}
+            response_payload["bmr_tdee"] = {
+                "bmr": user_bmr,
+                "tdee": user_tdee,
+                "activity_breakdown": selected_activity_metrics or None,
+                "bmr_precise": metrics.get("bmr_precise"),
+                "tdee_precise": metrics.get("tdee_precise"),
+            }
 
         logger.info(
             "meal_plan_timing menu=%.2fs ai=%.2fs total=%.2fs allowed_items=%d",
@@ -2663,6 +2706,8 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
         user_id = current_user.get("id")
         email = current_user.get("email")
         
+        logging.info(f"Creating checkout session for user: {user_id}, email: {email}")
+        
         stripe_customer_id = current_user.get("stripe_customer_id")
         if not stripe_customer_id:
             customer = stripe.Customer.create(
@@ -2698,16 +2743,18 @@ async def create_checkout_session(payload: CheckoutSessionRequest = Body(default
             ],
             "success_url": f"{FRONTEND_URL}/dashboard?upgrade=success",
             "cancel_url": f"{FRONTEND_URL}/pricing?upgrade=cancel",
-            "metadata": {"user_id": user_id},
+            "metadata": {"user_id": str(user_id)},
             "subscription_data": {
-                "metadata": {"user_id": user_id}
+                "metadata": {"user_id": str(user_id)}
             }
         }
         if payload.trial:
             
             session_params["subscription_data"]["trial_period_days"] = 14
 
+        logging.info(f"Creating checkout session with params: {session_params}")
         checkout_session = stripe.checkout.Session.create(**session_params)
+        logging.info(f"Checkout session created: {checkout_session.id}")
         return {"url": checkout_session.url, "id": checkout_session.id}
     except Exception as e:  
         err_type = type(e).__name__
@@ -2750,34 +2797,53 @@ async def legacy_portal(current_user=Depends(get_current_user)):
 @app.post("/webhooks/stripe", response_class=PlainTextResponse)
 async def stripe_webhook(request: Request):
     if not (stripe and STRIPE_API_KEY):
+        logging.warning("Stripe webhook received but Stripe is disabled")
         return PlainTextResponse("stripe disabled", status_code=200)
 
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
     event = None
+    
+    # Enhanced logging for debugging
+    logging.info(f"Stripe webhook received - Headers: {dict(request.headers)}")
+    logging.info(f"Stripe webhook payload length: {len(payload)}")
+    logging.info(f"STRIPE_WEBHOOK_SECRET configured: {bool(STRIPE_WEBHOOK_SECRET)}")
+    
     try:
         if STRIPE_WEBHOOK_SECRET:
             event = stripe.Webhook.construct_event(
                 payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
             )
+            logging.info("Webhook event constructed with signature verification")
         else:
             event = stripe.Event.construct_from(json.loads(payload.decode("utf-8")), stripe.api_key)
+            logging.info("Webhook event constructed without signature verification")
     except Exception as e:
         logging.error(f"Webhook signature/parse error: {e}")
         return PlainTextResponse("invalid payload", status_code=400)
 
     etype = event.get("type")
     data_object = event.get("data", {}).get("object", {})
+    
+    logging.info(f"Processing Stripe event: {etype}")
+    logging.info(f"Event data object keys: {list(data_object.keys())}")
 
     try:
         if etype == "checkout.session.completed":
+            logging.info("Processing checkout.session.completed event")
             
             subscription_id = data_object.get("subscription")
             customer_id = data_object.get("customer")
+            logging.info(f"Subscription ID: {subscription_id}, Customer ID: {customer_id}")
+            
             if subscription_id and customer_id:
                 try:
                     sub = stripe.Subscription.retrieve(subscription_id)
+                    logging.info(f"Retrieved subscription: {sub.get('status')}")
+                    
                     user_id = (sub.get("metadata", {}) or {}).get("user_id") or (data_object.get("metadata", {}) or {}).get("user_id")
+                    logging.info(f"User ID from metadata: {user_id}")
+                    
                     current_period_end = sub.get("current_period_end")
                     update_payload = {
                         "stripe_customer_id": customer_id,
@@ -2785,13 +2851,50 @@ async def stripe_webhook(request: Request):
                         "subscription_status": sub.get("status"),
                         "subscription_current_period_end": datetime.utcfromtimestamp(current_period_end).isoformat() if current_period_end else None,
                     }
+                    logging.info(f"Update payload: {update_payload}")
+                    
                     if user_id:
                         try:
-                            supabase.table("users").update(update_payload).eq("id", user_id).execute()
+                            # Try to update with subscription data
+                            result = supabase.table("users").update(update_payload).eq("id", user_id).execute()
+                            if result.data:
+                                print(f"✅ Updated user {user_id} subscription status to {sub.get('status')}")
+                            else:
+                                print(f"⚠️ No data returned when updating user {user_id}")
                         except Exception as db_err:
-                            logging.warning(f"Failed to update user subscription columns (create them if missing): {db_err}")
+                            print(f"❌ Database update failed for user {user_id}: {db_err}")
+                            # Try updating just the basic fields that definitely exist
+                            try:
+                                basic_update = {
+                                    "stripe_customer_id": customer_id,
+                                    "stripe_subscription_id": subscription_id,
+                                }
+                                supabase.table("users").update(basic_update).eq("id", user_id).execute()
+                                print(f"✅ Updated basic Stripe fields for user {user_id}")
+                            except Exception as basic_err:
+                                print(f"❌ Even basic update failed: {basic_err}")
+                    else:
+                        print(f"❌ No user_id found in subscription metadata. Subscription: {subscription_id}, Customer: {customer_id}")
+                        # Fallback: try to find user by customer_id
+                        try:
+                            user_res = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
+                            if user_res.data:
+                                fallback_user_id = user_res.data[0]["id"]
+                                print(f"🔄 Found user by customer_id: {fallback_user_id}")
+                                try:
+                                    result = supabase.table("users").update(update_payload).eq("id", fallback_user_id).execute()
+                                    if result.data:
+                                        print(f"✅ Updated user {fallback_user_id} subscription status to {sub.get('status')}")
+                                except Exception as fallback_err:
+                                    print(f"❌ Fallback update failed: {fallback_err}")
+                            else:
+                                print(f"❌ No user found with customer_id: {customer_id}")
+                        except Exception as lookup_err:
+                            print(f"❌ Customer lookup failed: {lookup_err}")
                 except Exception as sub_err:
                     logging.error(f"Failed to process subscription: {sub_err}")
+            else:
+                logging.warning(f"Missing subscription_id or customer_id: sub={subscription_id}, cust={customer_id}")
         elif etype in ("customer.subscription.updated", "customer.subscription.deleted"):
             subscription_id = data_object.get("id")
             customer_id = data_object.get("customer")

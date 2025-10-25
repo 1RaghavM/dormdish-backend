@@ -4,14 +4,19 @@ import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Anthropic client (Claude)
-client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Initialize AI clients
+anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+openai_client = AsyncOpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+)
 
 
 BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
@@ -62,6 +67,31 @@ If target is 2000 cal / 150g protein:
 Continue until totals reach 1900-2100 cal and 143-158g protein.
 
 Remember: This is a mathematical optimization task. Precision is mandatory. Think step by step."""
+
+
+# Simplified system instructions for non-subscribed users (no calorie/protein targets)
+SIMPLIFIED_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
+
+MEAL STRUCTURE:
+• Create exactly 3 meals: breakfast, lunch, dinner
+• Each meal should have 2-4 items (main dish + sides/accompaniments)
+• Include companions (e.g., pasta→sauce, salad→dressing)
+• Use realistic servings: 0.5, 1, 1.5, 2 (fractional amounts allowed)
+• Vary items - don't repeat the same item more than once per day
+• Don't stack multiple protein mains in one meal
+• Do not include drinks, or desserts.
+Do not repeat items in the same meal, do not give multiple variations of the same item in the same meal (ex. hard-boiled eggs and scrambled eggs).
+
+DIETARY PREFERENCES:
+• Respect the user's dietary preference specified in the prompt
+
+OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
+{{"totals":{{"calories":<int>,"protein_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
+
+EXPLANATION:
+• Write 1-3 sentences explaining the meal plan and any notable choices made
+
+Generate meal plan per schema above. Pure JSON, no markdown."""
 
 
 class DormdishMealPlannerSchema__Totals(BaseModel):
@@ -232,6 +262,161 @@ def _build_agent_prompt(
   return "\n".join(section for section in prompt_sections if section is not None)
 
 
+def _build_simplified_agent_prompt(
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  *,
+  max_items: Optional[int] = None,
+) -> str:
+  """Build simplified prompt for non-subscribed users (no calorie/protein targets)."""
+  hall = menu_payload.get("requested_dining_hall") or menu_payload.get("hall")
+  date = menu_payload.get("requested_date")
+  allowed_items = menu_payload.get("allowed_items") or []
+  
+  if max_items is None:
+    try:
+      max_items = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "175"))
+    except ValueError:
+      max_items = 175
+
+  menu_meta = {}
+  source_menu = menu_payload.get("source_menu")
+  if isinstance(source_menu, dict):
+    menu_meta = {
+      "hall_slug": source_menu.get("hall_slug"),
+      "meal_sources": source_menu.get("menu", {}).get("meal_sources")
+      if isinstance(source_menu.get("menu"), dict)
+      else None,
+    }
+
+  dining_context = {"dining_hall": hall, "date": date}
+  if menu_meta:
+    dining_context["meta"] = menu_meta
+
+  # OPTIMIZATION: Compact header format (name|cal|prot|serving)
+  menu_header = "# MENU (name|cal|prot|serving)"
+
+  # OPTIMIZATION: Use compact JSON (no indent) to reduce tokens
+  prompt_sections = [
+    "# PROFILE",
+    json.dumps({
+      "diet": user_payload.get("dietary_preference") if user_payload is not None else None
+    }, ensure_ascii=False),
+    "",
+    "# CONTEXT",
+    json.dumps(dining_context, ensure_ascii=False),
+    "",
+    menu_header,
+    _render_allowed_items(allowed_items, limit=max_items),
+    "",
+    "Generate meal plan per schema above. Pure JSON, no markdown.",
+  ]
+
+  return "\n".join(section for section in prompt_sections if section is not None)
+
+
+async def generate_meal_plan_with_gpt_nano(
+  *,
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  extra_system_messages: Optional[Sequence[str]] = None,
+) -> Tuple[DormdishMealPlannerSchema, str]:
+  """Generate a meal plan using GPT-4.1 nano for non-subscribed users.
+  
+  Uses a simplified prompt without calorie/protein targets.
+  
+  Args:
+    user_payload: User profile and preferences (only dietary preference used)
+    menu_payload: Menu data including allowed items
+    extra_system_messages: Optional additional instructions
+    
+  Returns:
+    Tuple of (validated meal plan schema, raw JSON string)
+    
+  Raises:
+    ValueError: If model fails to return valid JSON
+  """
+
+  prompt = _build_simplified_agent_prompt(
+    user_payload,
+    menu_payload,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  # Lightweight telemetry
+  print(
+    f"[meal_plan_agent] GPT-4.1 nano prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
+  )
+
+  instructions = SIMPLIFIED_SYSTEM_INSTRUCTIONS_TEMPLATE
+
+  # Model configuration from environment or defaults
+  chosen_model = os.getenv("MEALPLAN_GPT_MODEL", "gpt-4.1-nano")
+  temperature = float(os.getenv("MEALPLAN_GPT_TEMPERATURE", "1.0"))
+  max_tokens = int(os.getenv("MEALPLAN_GPT_MAX_TOKENS", "15000"))
+
+  # Call GPT-4.1 nano
+  response = await openai_client.chat.completions.create(
+    model=chosen_model,
+    max_tokens=max_tokens,
+    temperature=temperature,
+    messages=[
+      {"role": "system", "content": instructions},
+      {"role": "user", "content": prompt}
+    ]
+  )
+
+  raw_response = response.choices[0].message.content
+  if not raw_response:
+    raise ValueError("GPT-4.1 nano returned no text response")
+
+  # Remove markdown code blocks if present
+  raw_json = raw_response.strip()
+  if raw_json.startswith("```"):
+    lines = raw_json.split("\n")
+    if lines[0].startswith("```"):
+      lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+      lines = lines[:-1]
+    raw_json = "\n".join(lines).strip()
+
+  # Parse JSON
+  try:
+    parsed = json.loads(raw_json)
+  except json.JSONDecodeError as e:
+    print(f"[meal_plan_agent] JSON parsing failed: {e}")
+    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
+    raise ValueError(f"GPT-4.1 nano output was not valid JSON: {e}")
+
+  # Add default explanation if missing
+  if "explanation" not in parsed:
+    print("[meal_plan_agent] Adding default explanation")
+    parsed["explanation"] = "Meal plan generated based on available menu items and dietary preferences."
+
+  # Validate against Pydantic schema
+  result = DormdishMealPlannerSchema.model_validate(parsed)
+
+  # RECALCULATE TOTALS: Don't trust LLM math - compute deterministically
+  recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+  gpt_calories = result.totals.calories
+  gpt_protein = result.totals.protein_g
+  actual_calories = recalculated_totals["calories"]
+  actual_protein = recalculated_totals["protein_g"]
+  
+  # Log accuracy
+  cal_diff = abs(actual_calories - gpt_calories)
+  prot_diff = abs(actual_protein - gpt_protein)
+  if cal_diff > 0 or prot_diff > 0:
+    print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
+  
+  result.totals.calories = actual_calories
+  result.totals.protein_g = actual_protein
+
+  return result, raw_response
+
+
 async def generate_meal_plan_with_agent(
   *,
   user_payload: Dict[str, Any],
@@ -295,7 +480,7 @@ async def generate_meal_plan_with_agent(
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
 
   # Call Claude with extended thinking for better calculation accuracy
-  response = await client.messages.create(
+  response = await anthropic_client.messages.create(
     model=chosen_model,
     max_tokens=max_tokens,
     temperature=temperature,
@@ -388,3 +573,46 @@ async def run_workflow(workflow_input: WorkflowInput):
     }
   ]
   return {"input_as_text": workflow["input_as_text"], "conversation_history": conversation_history}
+
+
+async def generate_meal_plan_with_subscription_check(
+  *,
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Optional[Dict[str, Any]] = None,
+  is_subscribed: bool = False,
+  extra_system_messages: Optional[Sequence[str]] = None,
+) -> Tuple[DormdishMealPlannerSchema, str]:
+  """Generate a meal plan using subscription-based model selection.
+  
+  Args:
+    user_payload: User profile and preferences
+    menu_payload: Menu data including allowed items
+    nutrition_targets: Calorie and protein goals (only used for subscribed users)
+    is_subscribed: Whether the user has an active subscription
+    extra_system_messages: Optional additional instructions
+    
+  Returns:
+    Tuple of (validated meal plan schema, raw JSON string)
+    
+  Raises:
+    ValueError: If model fails to return valid JSON
+  """
+  
+  if is_subscribed:
+    # Subscribed users get Claude Haiku 4-5 with full nutrition targets
+    print("[meal_plan_agent] Using Claude Haiku 4-5 for subscribed user")
+    return await generate_meal_plan_with_agent(
+      user_payload=user_payload,
+      menu_payload=menu_payload,
+      nutrition_targets=nutrition_targets or {},
+      extra_system_messages=extra_system_messages,
+    )
+  else:
+    # Non-subscribed users get GPT-4.1 nano with simplified prompt (no nutrition targets)
+    print("[meal_plan_agent] Using GPT-4.1 nano for non-subscribed user")
+    return await generate_meal_plan_with_gpt_nano(
+      user_payload=user_payload,
+      menu_payload=menu_payload,
+      extra_system_messages=extra_system_messages,
+    )
