@@ -1758,6 +1758,26 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             authenticated_user = await asyncio.to_thread(verify_session_token, token)
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
+<<<<<<< Updated upstream
+=======
+        
+        # Check if user already has a meal plan for today (rate limiting)
+        # NOTE: Disabled for testing so multiple meal plans per day can be created.
+        # Keep `today` defined because it's used later when auto-saving the plan
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        # existing_plan_check = supabase.table("saved_meal_plans")\
+        #     .select("id, created_at")\
+        #     .eq("user_id", authenticated_user["id"])\
+        #     .eq("date", today)\
+        #     .execute()
+        # 
+        # if existing_plan_check.data and len(existing_plan_check.data) > 0:
+        #     existing = existing_plan_check.data[0]
+        #     raise HTTPException(
+        #         status_code=409,
+        #         detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
+        #     )
+>>>>>>> Stashed changes
         user = User(
             age=authenticated_user['age'],
             height_feet=authenticated_user['height_feet'],
