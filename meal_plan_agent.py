@@ -7,10 +7,10 @@ from anthropic import AsyncAnthropic
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-# Load environment variables
+
 load_dotenv()
 
-# Initialize Anthropic client (Claude)
+
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
@@ -74,7 +74,7 @@ class DormdishMealPlannerSchema__MealItem(BaseModel):
     servings: float
     calories: float
     protein_g: float
-    serving_size: str  # Changed from Optional - strict mode requires all fields
+    serving_size: str  
 
 
 class DormdishMealPlannerSchema__Meal(BaseModel):
@@ -92,7 +92,7 @@ class DormdishMealPlannerSchema(BaseModel):
     totals: DormdishMealPlannerSchema__Totals
     meals: DormdishMealPlannerSchema__Meals
     explanation: str
-    # Note: meta field removed for strict mode compliance (all fields must be required)
+    
 
 
 def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] = None) -> str:
@@ -103,8 +103,8 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
   limit = limit or len(items)
   lines: List[str] = []
   
-  # OPTIMIZATION: Compact format reduces tokens by ~30-40% without losing information
-  # Format: name|cal|prot|serving (removed verbose labels)
+  
+  
   for idx, item in enumerate(items):
     if idx >= limit:
       break
@@ -113,15 +113,15 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
     prot = item.get("protein_g")
     serving = item.get("serving_size")
     
-    # Compact format: just the values separated by pipes
+    
     parts: List[str] = [name or "(unnamed)"]
     if cal is not None:
-      parts.append(f"{float(cal):.0f}cal")  # Removed space before "cal"
+      parts.append(f"{float(cal):.0f}cal")  
     if prot is not None:
-      parts.append(f"{float(prot):.1f}g")  # Changed from "g protein" to just "g"
+      parts.append(f"{float(prot):.1f}g")  
     if serving:
-      parts.append(f"{serving}")  # Removed "serving: " prefix
-    lines.append("|".join(parts))  # Removed " - " prefix and spaces around separator
+      parts.append(f"{serving}")  
+    lines.append("|".join(parts))  
 
   remaining = max(0, len(items) - limit)
   if remaining:
@@ -139,7 +139,7 @@ def _recalculate_totals_from_meals(
   """
   allowed_items = menu_payload.get("allowed_items") or []
   
-  # Build a lookup map: item name -> nutrition info
+  
   item_lookup: Dict[str, Dict[str, Any]] = {}
   for item in allowed_items:
     name = str(item.get("name", "")).strip().lower()
@@ -151,20 +151,20 @@ def _recalculate_totals_from_meals(
   total_calories = 0.0
   total_protein = 0.0
   
-  # Sum up all meals
+  
   for meal_name in ["breakfast", "lunch", "dinner"]:
     meal = getattr(result.meals, meal_name)
     for meal_item in meal.items:
       item_name = meal_item.name.strip().lower()
       servings = float(meal_item.servings)
       
-      # Look up the item in the menu
+      
       if item_name in item_lookup:
         item_data = item_lookup[item_name]
         total_calories += item_data["calories"] * servings
         total_protein += item_data["protein_g"] * servings
       else:
-        # Item not found - use LLM's values as fallback
+        
         print(f"[meal_plan_agent] WARNING: Item '{meal_item.name}' not found in menu, using LLM values")
         total_calories += float(meal_item.calories)
         total_protein += float(meal_item.protein_g)
@@ -207,20 +207,20 @@ def _build_agent_prompt(
   if menu_meta:
     dining_context["meta"] = menu_meta
 
-  # OPTIMIZATION: Compact header format (name|cal|prot|serving)
-  menu_header = "# MENU (name|cal|prot|serving)"
+  
+  menu_header = "MENU (name|cal|prot|serving)"
 
-  # OPTIMIZATION: Use compact JSON (no indent) to reduce tokens
+  
   prompt_sections = [
-    "# PROFILE",
+    "PROFILE",
     json.dumps({
       "diet": user_payload.get("dietary_preference") if user_payload is not None else None
     }, ensure_ascii=False),
     "",
-    "# TARGETS",
+    "TARGETS",
     json.dumps(nutrition_targets, ensure_ascii=False),
     "",
-    "# CONTEXT",
+    "CONTEXT",
     json.dumps(dining_context, ensure_ascii=False),
     "",
     menu_header,
@@ -265,14 +265,14 @@ async def generate_meal_plan_with_agent(
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
 
-  # Lightweight telemetry
+  
   print(
     f"[meal_plan_agent] Claude Haiku 4.5 prompt_size chars={prompt_chars} "
     f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
     f"extended_thinking=enabled"
   )
 
-  # Build enhanced system instructions with target ranges
+  
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
   cal_min = int(cal_target * 0.95)
@@ -289,28 +289,28 @@ async def generate_meal_plan_with_agent(
     prot_target=prot_target
   )
 
-  # Model configuration from environment or defaults
+  
   chosen_model = os.getenv("MEALPLAN_MODEL", "claude-haiku-4-5")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "1.0"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "20000"))
 
-  # Call Claude with extended thinking for better calculation accuracy
+  
   response = await client.messages.create(
     model=chosen_model,
     max_tokens=max_tokens,
     temperature=temperature,
     thinking={
       "type": "enabled",
-      "budget_tokens": 8000  # Allow Claude to think through the calculations
+      "budget_tokens": 8000  
     },
-    #service_tier="priority",
+    
     system=instructions,
     messages=[
       {"role": "user", "content": prompt}
     ]
   )
 
-  # Extract response from content blocks (handle ThinkingBlock + TextBlock)
+  
   raw_response = None
   thinking_content = None
   
@@ -326,7 +326,7 @@ async def generate_meal_plan_with_agent(
   if not raw_response:
     raise ValueError("Claude returned no text response")
 
-  # Remove markdown code blocks if present
+  
   raw_json = raw_response.strip()
   if raw_json.startswith("```"):
     lines = raw_json.split("\n")
@@ -336,7 +336,7 @@ async def generate_meal_plan_with_agent(
       lines = lines[:-1]
     raw_json = "\n".join(lines).strip()
 
-  # Parse JSON
+  
   try:
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as e:
@@ -344,22 +344,22 @@ async def generate_meal_plan_with_agent(
     print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
     raise ValueError(f"Claude output was not valid JSON: {e}")
 
-  # Add default explanation if missing
+  
   if "explanation" not in parsed:
     print("[meal_plan_agent] Adding default explanation")
     parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
-  # Validate against Pydantic schema
+  
   result = DormdishMealPlannerSchema.model_validate(parsed)
 
-  # RECALCULATE TOTALS: Don't trust LLM math - compute deterministically
+  
   recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
   claude_calories = result.totals.calories
   claude_protein = result.totals.protein_g
   actual_calories = recalculated_totals["calories"]
   actual_protein = recalculated_totals["protein_g"]
   
-  # Log accuracy
+  
   cal_diff = abs(actual_calories - claude_calories)
   prot_diff = abs(actual_protein - claude_protein)
   if cal_diff > 0 or prot_diff > 0:
@@ -377,7 +377,7 @@ class WorkflowInput(BaseModel):
 
 
 async def run_workflow(workflow_input: WorkflowInput):
-  # Minimal placeholder workflow using the Responses API structure for future expansion
+  
   workflow = workflow_input.model_dump()
   conversation_history: List[Dict[str, Any]] = [
     {
