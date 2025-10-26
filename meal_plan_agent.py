@@ -3,7 +3,8 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
@@ -239,16 +240,15 @@ async def generate_meal_plan_with_agent(
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
-  """Generate a meal plan using Claude Haiku 4.5 with extended thinking for precision.
+  """Generate a meal plan using Gemini 2.5 Flash.
   
-  Uses Claude's extended thinking feature to perform more accurate calculations
-  and hit nutritional targets with high precision.
+  Uses Gemini's structured output for precision and accuracy.
   
   Args:
     user_payload: User profile and preferences
     menu_payload: Menu data including allowed items
     nutrition_targets: Calorie and protein goals
-    extra_system_messages: Optional additional instructions (not used with Claude)
+    extra_system_messages: Optional additional instructions (not used with Gemini)
     
   Returns:
     Tuple of (validated meal plan schema, raw JSON string)
@@ -267,9 +267,8 @@ async def generate_meal_plan_with_agent(
 
   
   print(
-    f"[meal_plan_agent] Claude Haiku 4.5 prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
-    f"extended_thinking=enabled"
+    f"[meal_plan_agent] Gemini 2.5 Flash prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
   )
 
   
@@ -290,41 +289,30 @@ async def generate_meal_plan_with_agent(
   )
 
   
-  chosen_model = os.getenv("MEALPLAN_MODEL", "claude-haiku-4-5")
-  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "1.0"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "20000"))
+  chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
+  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
 
   
-  response = await client.messages.create(
-    model=chosen_model,
-    max_tokens=max_tokens,
-    temperature=temperature,
-    thinking={
-      "type": "enabled",
-      "budget_tokens": 8000  
-    },
-    
-    system=instructions,
-    messages=[
-      {"role": "user", "content": prompt}
-    ]
-  )
+  def call_gemini():
+    return client.models.generate_content(
+      model=chosen_model,
+      contents=f"{instructions}\n\n{prompt}",
+      config=types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        response_mime_type="application/json",
+        response_schema=DormdishMealPlannerSchema,
+      )
+    )
+  
+  response = await asyncio.to_thread(call_gemini)
 
   
-  raw_response = None
-  thinking_content = None
-  
-  for block in response.content:
-    if hasattr(block, 'text') and block.type == 'text':
-      raw_response = block.text
-    elif hasattr(block, 'thinking') and block.type == 'thinking':
-      thinking_content = block.thinking
-  
-  if thinking_content:
-    print(f"[meal_plan_agent] Claude thinking process: {len(thinking_content)} chars")
+  raw_response = response.text
   
   if not raw_response:
-    raise ValueError("Claude returned no text response")
+    raise ValueError("Gemini returned no text response")
 
   
   raw_json = raw_response.strip()
@@ -342,7 +330,7 @@ async def generate_meal_plan_with_agent(
   except json.JSONDecodeError as e:
     print(f"[meal_plan_agent] JSON parsing failed: {e}")
     print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
-    raise ValueError(f"Claude output was not valid JSON: {e}")
+    raise ValueError(f"Gemini output was not valid JSON: {e}")
 
   
   if "explanation" not in parsed:
@@ -354,14 +342,14 @@ async def generate_meal_plan_with_agent(
 
   
   recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
-  claude_calories = result.totals.calories
-  claude_protein = result.totals.protein_g
+  gemini_calories = result.totals.calories
+  gemini_protein = result.totals.protein_g
   actual_calories = recalculated_totals["calories"]
   actual_protein = recalculated_totals["protein_g"]
   
   
-  cal_diff = abs(actual_calories - claude_calories)
-  prot_diff = abs(actual_protein - claude_protein)
+  cal_diff = abs(actual_calories - gemini_calories)
+  prot_diff = abs(actual_protein - gemini_protein)
   if cal_diff > 0 or prot_diff > 0:
     print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
   
@@ -369,6 +357,149 @@ async def generate_meal_plan_with_agent(
   result.totals.protein_g = actual_protein
 
   return result, raw_response
+
+
+async def generate_meal_plan_with_streaming(
+  *,
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Dict[str, Any],
+  extra_system_messages: Optional[Sequence[str]] = None,
+):
+  """Generate a meal plan using Gemini 2.5 Flash with streaming.
+  
+  This function streams the model's response in real-time,
+  providing updates on the meal plan generation progress.
+  
+  Args:
+    user_payload: User profile and preferences
+    menu_payload: Menu data including allowed items
+    nutrition_targets: Calorie and protein goals
+    extra_system_messages: Optional additional instructions (not used with Gemini)
+    
+  Yields:
+    Dict containing response updates or final meal plan data
+  """
+  import json
+  import asyncio
+  
+  prompt = _build_agent_prompt(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  print(
+    f"[meal_plan_agent] Gemini 2.5 Flash streaming prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
+    f"streaming=enabled"
+  )
+
+  cal_target = nutrition_targets['calories']
+  prot_target = nutrition_targets['protein_g']
+  cal_min = int(cal_target * 0.95)
+  cal_max = int(cal_target * 1.05)
+  prot_min = int(prot_target * 0.95)
+  prot_max = int(prot_target * 1.05)
+  
+  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+    cal_min=cal_min,
+    cal_max=cal_max,
+    cal_target=cal_target,
+    prot_min=prot_min,
+    prot_max=prot_max,
+    prot_target=prot_target
+  )
+
+  chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
+  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
+
+  try:
+    # Create streaming response
+    def call_gemini_stream():
+      return client.models.generate_content_stream(
+        model=chosen_model,
+        contents=f"{instructions}\n\n{prompt}",
+        config=types.GenerateContentConfig(
+          temperature=temperature,
+          max_output_tokens=max_tokens,
+          response_mime_type="application/json",
+          response_schema=DormdishMealPlannerSchema,
+        )
+      )
+    
+    stream = await asyncio.to_thread(call_gemini_stream)
+
+    final_response = ""
+    
+    for chunk in stream:
+      text_chunk = chunk.text
+      final_response += text_chunk
+      # Stream the text as it comes
+      yield {
+        "type": "response",
+        "content": text_chunk,
+        "full_response": final_response
+      }
+
+    # Parse and validate the final response
+    raw_json = final_response.strip()
+    if raw_json.startswith("```"):
+      lines = raw_json.split("\n")
+      if lines[0].startswith("```"):
+        lines = lines[1:]
+      if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+      raw_json = "\n".join(lines).strip()
+
+    try:
+      parsed = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+      print(f"[meal_plan_agent] JSON parsing failed: {e}")
+      print(f"[meal_plan_agent] Raw response: {final_response[:500]}")
+      yield {
+        "type": "error",
+        "error": f"Gemini output was not valid JSON: {e}"
+      }
+      return
+
+    if "explanation" not in parsed:
+      print("[meal_plan_agent] Adding default explanation")
+      parsed["explanation"] = "Meal plan generated to meet nutritional targets."
+
+    result = DormdishMealPlannerSchema.model_validate(parsed)
+
+    # Recalculate totals from meals
+    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+    gemini_calories = result.totals.calories
+    gemini_protein = result.totals.protein_g
+    actual_calories = recalculated_totals["calories"]
+    actual_protein = recalculated_totals["protein_g"]
+    
+    cal_diff = abs(actual_calories - gemini_calories)
+    prot_diff = abs(actual_protein - gemini_protein)
+    if cal_diff > 0 or prot_diff > 0:
+      print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
+    
+    result.totals.calories = actual_calories
+    result.totals.protein_g = actual_protein
+
+    # Yield final meal plan
+    yield {
+      "type": "complete",
+      "meal_plan": result.model_dump(),
+      "raw_response": final_response
+    }
+
+  except Exception as e:
+    print(f"[meal_plan_agent] Streaming error: {e}")
+    yield {
+      "type": "error",
+      "error": f"Streaming failed: {str(e)}"
+    }
 
 
 class WorkflowInput(BaseModel):
