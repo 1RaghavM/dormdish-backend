@@ -2751,7 +2751,7 @@ async def get_menu(dining_hall: str, date: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
 
 
-
+hi = "hi"
 import logging
 try:
     import stripe  
