@@ -1880,18 +1880,18 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         # NOTE: Disabled for testing so multiple meal plans per day can be created.
         # Keep `today` defined because it's used later when auto-saving the plan
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
-        existing_plan_check = supabase.table("saved_meal_plans")\
-            .select("id, created_at")\
-            .eq("user_id", authenticated_user["id"])\
-            .eq("date", today)\
-            .execute()
+        # existing_plan_check = supabase.table("saved_meal_plans")\
+        #     .select("id, created_at")\
+        #     .eq("user_id", authenticated_user["id"])\
+        #     .eq("date", today)\
+        #     .execute()
         
-        if existing_plan_check.data and len(existing_plan_check.data) > 0:
-            existing = existing_plan_check.data[0]
-            raise HTTPException(
-                status_code=409,
-                detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
-            )
+        # if existing_plan_check.data and len(existing_plan_check.data) > 0:
+        #     existing = existing_plan_check.data[0]
+        #     raise HTTPException(
+        #         status_code=409,
+        #         detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
+        #     )
 
         
         # Check if user already has a meal plan for today (rate limiting)
@@ -2209,6 +2209,137 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
     except Exception as e:
         print(f"❌ Meal plan generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {e}")
+
+
+@app.post("/generate-meal-plan-stream", summary="Generate Meal Plan with Streaming")
+async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None)):
+    """Generate a meal plan with streaming updates. Streams thinking and response generation in real-time."""
+    try:
+        from meal_plan_agent import generate_meal_plan_with_streaming
+        
+        authenticated_user = None
+        if authorization and authorization.startswith('Bearer '):
+            token = authorization.replace('Bearer ', '')
+            authenticated_user = await asyncio.to_thread(verify_session_token, token)
+        if not authenticated_user:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+
+        # Get user data
+        user = User(
+            age=authenticated_user['age'],
+            height_feet=authenticated_user['height_feet'],
+            height_inches=authenticated_user['height_inches'],
+            weight_lbs=float(authenticated_user['weight_lbs']),
+            activity_level=authenticated_user['activity_level'],
+            goal=authenticated_user['goal'],
+            preferred_dining_hall=meal_plan_request.dining_hall,
+            dietary_preference=authenticated_user.get('dietary_preference'),
+        )
+        
+        metrics = calculate_bmr_tdee(
+            age=user.age,
+            height_feet=user.height_feet,
+            height_inches=user.height_inches,
+            weight_lbs=user.weight_lbs,
+            gender=authenticated_user.get('gender'),
+            activity_level=user.activity_level,
+        )
+        user_bmr = float(metrics["bmr"])
+        user_tdee = float(metrics["tdee"])
+
+        # Get menu data
+        menu_data = await get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
+        if menu_data.get("error"):
+            raise HTTPException(status_code=400, detail=menu_data.get("error"))
+        
+        items_list = menu_data.get("items", []) or []
+        if not items_list:
+            raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
+
+        # Process nutrition data
+        nutrition_lookup: Dict[str, dict] = {}
+        allowed_for_prompt: List[dict] = []
+        for raw in items_list:
+            name = (raw.get("name") or "").strip()
+            if not name:
+                continue
+            calories = raw.get("calories")
+            protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
+            calories, protein = _estimate_missing_macros(calories, protein)
+            serving_size = raw.get("serving_size") or None
+            entry = {
+                "name": name,
+                "calories": float(calories),
+                "protein_g": float(protein),
+                "serving_size": serving_size,
+                "density": (protein / calories) if calories else 0.0,
+            }
+            key = name.upper()
+            if key not in nutrition_lookup:
+                nutrition_lookup[key] = entry
+                allowed_for_prompt.append(entry)
+
+        # Calculate targets
+        goal_mode = user.goal.lower()
+        if goal_mode == 'cut':
+            calorie_target = int(round(user_tdee * 0.85))
+        elif goal_mode == 'bulk':
+            calorie_target = int(round(user_tdee * 1.10))
+        else:
+            calorie_target = int(round(user_tdee))
+        protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+
+        # Prepare payloads for streaming agent
+        user_payload = {
+            "age": user.age,
+            "weight_lbs": user.weight_lbs,
+            "activity_level": user.activity_level,
+            "goal": user.goal,
+            "dietary_preference": user.dietary_preference,
+        }
+        
+        menu_payload = {
+            "requested_dining_hall": meal_plan_request.dining_hall,
+            "requested_date": meal_plan_request.date,
+            "allowed_items": allowed_for_prompt,
+            "source_menu": menu_data,
+        }
+        
+        nutrition_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+        }
+
+        async def event_generator():
+            """Generator function for Server-Sent Events"""
+            try:
+                async for chunk in generate_meal_plan_with_streaming(
+                    user_payload=user_payload,
+                    menu_payload=menu_payload,
+                    nutrition_targets=nutrition_targets
+                ):
+                    # Format as SSE
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except Exception as e:
+                error_chunk = {"type": "error", "error": str(e)}
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable buffering for nginx
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Streaming meal plan generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Streaming meal plan generation failed: {e}")
+
 
 @app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")
 async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depends(get_current_user)):
