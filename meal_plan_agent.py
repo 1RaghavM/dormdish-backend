@@ -294,6 +294,9 @@ async def generate_meal_plan_with_agent(
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
 
   
+  # Convert Pydantic model to JSON schema for proper schema enforcement
+  json_schema = DormdishMealPlannerSchema.model_json_schema()
+  
   def call_gemini():
     return client.models.generate_content(
       model=chosen_model,
@@ -302,7 +305,7 @@ async def generate_meal_plan_with_agent(
         temperature=temperature,
         max_output_tokens=max_tokens,
         response_mime_type="application/json",
-        response_schema=DormdishMealPlannerSchema,
+        response_schema=json_schema,
       )
     )
   
@@ -417,6 +420,9 @@ async def generate_meal_plan_with_streaming(
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
 
+  # Convert Pydantic model to JSON schema for proper schema enforcement
+  json_schema = DormdishMealPlannerSchema.model_json_schema()
+
   try:
     # Create streaming response
     def call_gemini_stream():
@@ -427,7 +433,7 @@ async def generate_meal_plan_with_streaming(
           temperature=temperature,
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
-          response_schema=DormdishMealPlannerSchema,
+          response_schema=json_schema,
         )
       )
     
