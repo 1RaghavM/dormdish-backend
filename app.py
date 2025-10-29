@@ -2459,9 +2459,9 @@ async def get_todays_meal_plan(current_user=Depends(get_current_user)):
         # In production, you might want to store user timezone preference
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         
-        # Auto-cleanup: Delete meal plans from previous days (background operation)
+        # Auto-cleanup: Delete meal plans older than 7 days (background operation)
         try:
-            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=7)).isoformat()
             cleanup_response = supabase.table("saved_meal_plans")\
                 .delete()\
                 .eq("user_id", current_user["id"])\
@@ -2469,7 +2469,7 @@ async def get_todays_meal_plan(current_user=Depends(get_current_user)):
                 .execute()
             deleted_count = len(cleanup_response.data) if cleanup_response.data else 0
             if deleted_count > 0:
-                print(f"🧹 Auto-cleaned {deleted_count} old meal plan(s) for user {current_user['id']}")
+                print(f"🧹 Auto-cleaned {deleted_count} meal plan(s) older than 7 days for user {current_user['id']}")
         except Exception as cleanup_error:
             # Don't fail the request if cleanup fails
             print(f"⚠️ Auto-cleanup failed: {cleanup_error}")
