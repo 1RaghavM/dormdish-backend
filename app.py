@@ -1141,6 +1141,10 @@ class UpdateProfileRequest(BaseModel):
     
     dietary_preference: Optional[str] = None
 
+class TrackWeightRequest(BaseModel):
+    weight_lbs: float
+    date: Optional[str] = None  # ISO format date, defaults to today if not provided
+
 class MealPlanRequest(BaseModel):
     dining_hall: str
     date: str
@@ -1856,6 +1860,116 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+
+
+@app.post("/auth/weight", summary="Track user weight")
+async def track_weight(weight_data: TrackWeightRequest, current_user=Depends(get_current_user)):
+    """
+    Track user weight for a specific date.
+    Creates or updates weight entry for the given date.
+    Also updates the user's profile weight_lbs field.
+    """
+    try:
+        # Use provided date or default to today
+        weight_date = weight_data.date or datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        # Validate weight value
+        if weight_data.weight_lbs <= 0 or weight_data.weight_lbs > 1000:
+            raise HTTPException(status_code=400, detail="Weight must be between 0 and 1000 lbs")
+        
+        # Check if weight entry already exists for this date
+        existing = supabase.table("weight_history")\
+            .select("id")\
+            .eq("user_id", current_user["id"])\
+            .eq("date", weight_date)\
+            .execute()
+        
+        if existing.data and len(existing.data) > 0:
+            # Update existing entry
+            response = supabase.table("weight_history")\
+                .update({
+                    "weight_lbs": weight_data.weight_lbs,
+                    "updated_at": datetime.now(ZoneInfo("America/New_York")).isoformat()
+                })\
+                .eq("user_id", current_user["id"])\
+                .eq("date", weight_date)\
+                .execute()
+        else:
+            # Create new entry
+            response = supabase.table("weight_history")\
+                .insert({
+                    "user_id": current_user["id"],
+                    "weight_lbs": weight_data.weight_lbs,
+                    "date": weight_date,
+                    "created_at": datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                    "updated_at": datetime.now(ZoneInfo("America/New_York")).isoformat()
+                })\
+                .execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to save weight data")
+        
+        # Also update the user's current weight in profile
+        profile_update = supabase.table("users")\
+            .update({"weight_lbs": weight_data.weight_lbs})\
+            .eq("id", current_user["id"])\
+            .execute()
+        
+        # Recalculate BMR and TDEE with new weight
+        if all(key in current_user for key in ['age', 'height_feet', 'height_inches', 'gender', 'activity_level']):
+            bmr_data = calculate_bmr_tdee(
+                current_user['age'],
+                current_user['height_feet'],
+                current_user['height_inches'],
+                weight_data.weight_lbs,
+                current_user['gender'],
+                current_user['activity_level']
+            )
+            supabase.table("users")\
+                .update({"bmr": bmr_data['bmr'], "tdee": bmr_data['tdee']})\
+                .eq("id", current_user["id"])\
+                .execute()
+        
+        return {
+            "success": True,
+            "message": "Weight tracked successfully",
+            "weight": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error tracking weight: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to track weight: {str(e)}")
+
+
+@app.get("/auth/weight/history", summary="Get user weight history")
+async def get_weight_history(
+    limit: int = 30,
+    offset: int = 0,
+    current_user=Depends(get_current_user)
+):
+    """
+    Get user's weight history, ordered by date (most recent first).
+    Returns weight entries for tracking progress over time.
+    """
+    try:
+        response = supabase.table("weight_history")\
+            .select("id, weight_lbs, date, created_at, updated_at")\
+            .eq("user_id", current_user["id"])\
+            .order("date", desc=True)\
+            .range(offset, offset + limit - 1)\
+            .execute()
+        
+        weights = response.data if response.data else []
+        
+        return {
+            "success": True,
+            "weights": weights,
+            "count": len(weights)
+        }
+    except Exception as e:
+        print(f"Error fetching weight history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch weight history: {str(e)}")
 
 
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
