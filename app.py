@@ -651,6 +651,26 @@ def get_universities():
     return {"universities": load_universities_list()}
 
 
+# Ensure `/request-school` is registered on the currently active `app` instance.
+# (There is an older definition earlier in the file that was attached to a prior
+# FastAPI instance; adding this ensures the route exists for the running app.)
+@app.post('/request-school', summary='Request a new school/university to be added')
+async def request_school_endpoint(data: SchoolRequest):
+    try:
+        payload = {
+            "name": (data.name or "").strip(),
+            "email": (data.email or "").strip().lower(),
+            "university": (data.university or "").strip(),
+            "created_at": datetime.now().isoformat(),
+        }
+        # Insert into Supabase (non-blocking wrapper handled elsewhere)
+        supabase.table('school_requests').insert(payload).execute()
+        return {"success": True, "message": "School request submitted successfully."}
+    except Exception as e:
+        logger.exception("/request-school failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to submit school request")
+
+
 
 
 class WaitlistJoinRequest(BaseModel):
