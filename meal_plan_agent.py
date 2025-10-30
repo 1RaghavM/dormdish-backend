@@ -328,8 +328,14 @@ async def generate_meal_plan_with_agent(
           print(f"[meal_plan_agent] Safety ratings: {candidate.safety_ratings}")
         raise ValueError(error_msg)
 
-  # Extract and validate response text
-  raw_response = response.text if hasattr(response, 'text') else None
+  # Extract and validate response text (defensively guard SDK None parsing)
+  raw_response = None
+  try:
+    raw_response = response.text if hasattr(response, 'text') else None
+  except TypeError as e:
+    # Some SDK versions attempt json.loads(None) internally when no content;
+    # recover by trying candidates->parts fallback below, otherwise raise a clean error
+    raw_response = None
   
   if not raw_response:
     # Check if response has any content at all
@@ -358,14 +364,21 @@ async def generate_meal_plan_with_agent(
       lines = lines[:-1]
     raw_json = "\n".join(lines).strip()
 
-  # Parse JSON with detailed error reporting
+  # Parse JSON with detailed error reporting (ensure we pass a string)
   try:
+    if not isinstance(raw_json, str):
+      raise ValueError("Model returned non-string JSON payload")
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as e:
     print(f"[meal_plan_agent] JSON parsing failed: {e}")
     print(f"[meal_plan_agent] Raw response (first 500 chars): {raw_response[:500]}")
     print(f"[meal_plan_agent] Cleaned JSON attempt (first 500 chars): {raw_json[:500]}")
     raise ValueError(f"Gemini output was not valid JSON: {e}")
+  except TypeError as e:
+    # Guard against json.loads(None) style failures from unexpected types
+    print(f"[meal_plan_agent] JSON parsing TypeError: {e}")
+    print(f"[meal_plan_agent] Raw response: {repr(raw_response)[:200]}")
+    raise ValueError(f"Gemini returned empty or invalid JSON payload: {e}")
 
   
   if "explanation" not in parsed:
