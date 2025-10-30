@@ -43,9 +43,36 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 load_dotenv()
 
+
 logger = logging.getLogger("dormdish.api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
+# ---------------------------
+# School Request endpoint
+# ---------------------------
+class SchoolRequest(BaseModel):
+    name: str
+    email: EmailStr
+    university: str
+
+@app.post('/request-school', summary='Request a new school/university to be added')
+def request_school(data: SchoolRequest):
+    try:
+        # Store the request in Supabase (table: school_requests)
+        payload = {
+            "name": data.name.strip(),
+            "email": data.email.strip().lower(),
+            "university": data.university.strip(),
+            "created_at": datetime.now().isoformat()
+        }
+        supabase.table('school_requests').insert(payload).execute()
+        return {"success": True, "message": "School request submitted successfully."}
+    except Exception as e:
+        print(f"⚠️ School request failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit school request")
+
 
 HTTP_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 HTTP_CLIENT_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=20)
