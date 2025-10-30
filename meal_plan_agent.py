@@ -182,8 +182,9 @@ def _build_agent_prompt(
   nutrition_targets: Dict[str, Any],
   *,
   max_items: Optional[int] = None,
+  user_preferences_context: Optional[str] = None,
 ) -> str:
-  """Build prompt for LLM."""
+  """Build prompt for LLM with optional user preferences from mem0."""
   hall = menu_payload.get("requested_dining_hall") or menu_payload.get("hall")
   date = menu_payload.get("requested_date")
   allowed_items = menu_payload.get("allowed_items") or []
@@ -224,11 +225,22 @@ def _build_agent_prompt(
     "CONTEXT",
     json.dumps(dining_context, ensure_ascii=False),
     "",
+  ]
+  
+  # Add user preferences from mem0 if available
+  if user_preferences_context:
+    prompt_sections.extend([
+      "USER PREFERENCES (Learned from Past Interactions)",
+      user_preferences_context,
+      "",
+    ])
+  
+  prompt_sections.extend([
     menu_header,
     _render_allowed_items(allowed_items, limit=max_items),
     "",
     "Generate meal plan per schema above. Pure JSON, no markdown.",
-  ]
+  ])
 
   return "\n".join(section for section in prompt_sections if section is not None)
 
@@ -239,8 +251,9 @@ async def generate_meal_plan_with_agent(
   menu_payload: Dict[str, Any],
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
+  user_preferences_context: Optional[str] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
-  """Generate a meal plan using Gemini 2.5 Flash.
+  """Generate a meal plan using Gemini 2.5 Flash with optional user preferences from mem0.
   
   Uses Gemini's structured output for precision and accuracy.
   
@@ -261,6 +274,7 @@ async def generate_meal_plan_with_agent(
     user_payload,
     menu_payload,
     nutrition_targets,
+    user_preferences_context=user_preferences_context,
   )
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
@@ -365,6 +379,7 @@ async def generate_meal_plan_with_streaming(
   menu_payload: Dict[str, Any],
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
+  user_preferences_context: Optional[str] = None,
 ):
   """Generate a meal plan using Gemini 2.5 Flash with streaming.
   
@@ -387,6 +402,7 @@ async def generate_meal_plan_with_streaming(
     user_payload,
     menu_payload,
     nutrition_targets,
+    user_preferences_context=user_preferences_context,
   )
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
