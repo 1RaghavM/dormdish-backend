@@ -316,13 +316,39 @@ async def generate_meal_plan_with_agent(
   
   response = await asyncio.to_thread(call_gemini)
 
-  
-  raw_response = response.text
+  # Check for safety blocks or finish reasons
+  if hasattr(response, 'candidates') and response.candidates:
+    candidate = response.candidates[0]
+    if hasattr(candidate, 'finish_reason'):
+      finish_reason = str(candidate.finish_reason)
+      if 'SAFETY' in finish_reason or 'BLOCKED' in finish_reason:
+        error_msg = f"Gemini response was blocked due to safety filters: {finish_reason}"
+        print(f"[meal_plan_agent] {error_msg}")
+        if hasattr(candidate, 'safety_ratings'):
+          print(f"[meal_plan_agent] Safety ratings: {candidate.safety_ratings}")
+        raise ValueError(error_msg)
+
+  # Extract and validate response text
+  raw_response = response.text if hasattr(response, 'text') else None
   
   if not raw_response:
-    raise ValueError("Gemini returned no text response")
+    # Check if response has any content at all
+    if hasattr(response, 'candidates') and response.candidates:
+      candidate = response.candidates[0]
+      if hasattr(candidate, 'content') and candidate.content:
+        if hasattr(candidate.content, 'parts') and candidate.content.parts:
+          part = candidate.content.parts[0]
+          raw_response = part.text if hasattr(part, 'text') else None
+    
+    if not raw_response:
+      error_msg = "Gemini returned no text response"
+      if hasattr(response, 'prompt_feedback'):
+        error_msg += f". Feedback: {response.prompt_feedback}"
+      print(f"[meal_plan_agent] {error_msg}")
+      print(f"[meal_plan_agent] Response object: {response}")
+      raise ValueError(error_msg)
 
-  
+  # Clean up markdown code blocks if present
   raw_json = raw_response.strip()
   if raw_json.startswith("```"):
     lines = raw_json.split("\n")
@@ -332,12 +358,13 @@ async def generate_meal_plan_with_agent(
       lines = lines[:-1]
     raw_json = "\n".join(lines).strip()
 
-  
+  # Parse JSON with detailed error reporting
   try:
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as e:
     print(f"[meal_plan_agent] JSON parsing failed: {e}")
-    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
+    print(f"[meal_plan_agent] Raw response (first 500 chars): {raw_response[:500]}")
+    print(f"[meal_plan_agent] Cleaned JSON attempt (first 500 chars): {raw_json[:500]}")
     raise ValueError(f"Gemini output was not valid JSON: {e}")
 
   
@@ -449,9 +476,30 @@ async def generate_meal_plan_with_streaming(
     stream = await asyncio.to_thread(call_gemini_stream)
 
     final_response = ""
+    chunk_count = 0
     
     for chunk in stream:
-      text_chunk = chunk.text
+      chunk_count += 1
+      # Check for safety blocks
+      if hasattr(chunk, 'candidates') and chunk.candidates:
+        candidate = chunk.candidates[0]
+        if hasattr(candidate, 'finish_reason'):
+          finish_reason = str(candidate.finish_reason)
+          if 'SAFETY' in finish_reason or 'BLOCKED' in finish_reason:
+            error_msg = f"Gemini response was blocked due to safety filters: {finish_reason}"
+            print(f"[meal_plan_agent] {error_msg}")
+            if hasattr(candidate, 'safety_ratings'):
+              print(f"[meal_plan_agent] Safety ratings: {candidate.safety_ratings}")
+            yield {
+              "type": "error",
+              "error": error_msg
+            }
+            return
+      
+      text_chunk = chunk.text if hasattr(chunk, 'text') and chunk.text else ""
+      if not text_chunk:
+        continue
+        
       final_response += text_chunk
       # Stream the text as it comes
       yield {
@@ -459,6 +507,16 @@ async def generate_meal_plan_with_streaming(
         "content": text_chunk,
         "full_response": final_response
       }
+
+    # Check if we got any response at all
+    if not final_response:
+      error_msg = f"Gemini streaming returned no text after {chunk_count} chunks"
+      print(f"[meal_plan_agent] {error_msg}")
+      yield {
+        "type": "error",
+        "error": error_msg
+      }
+      return
 
     # Parse and validate the final response
     raw_json = final_response.strip()
