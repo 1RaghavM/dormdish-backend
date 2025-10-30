@@ -20,17 +20,14 @@ BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritio
 CRITICAL REQUIREMENTS - MUST BE MET:
 • Total daily calories MUST be between {cal_min} and {cal_max} calories (target: {cal_target})
 • Total daily protein MUST be between {prot_min}g and {prot_max}g (target: {prot_target}g)
-• Total daily fat should aim for {fat_target}g (±10g flexibility)
-• Total daily carbs should aim for {carbs_target}g (±15g flexibility)
-• Calories and protein are HARD CONSTRAINTS. Fat and carbs are targets for balance.
+• These are HARD CONSTRAINTS, not suggestions. The plan will be rejected if outside these ranges.
 
 CALCULATION METHOD (MANDATORY):
 1. For each item, calculate: servings × calories_per_serving = item_calories
 2. For each item, calculate: servings × protein_per_serving = item_protein
-3. For each item, calculate: servings × fat_per_serving = item_fat
-4. For each item, calculate: servings × carbs_per_serving = item_carbs
-5. Sum all values across all meals to get totals
-6. VERIFY calories and protein are within required ranges BEFORE finalizing
+3. Sum all item_calories across all meals = total_calories
+4. Sum all item_protein across all meals = total_protein
+5. VERIFY totals are within required ranges BEFORE finalizing
 
 MEAL STRUCTURE:
 • Create exactly 3 meals: breakfast, lunch, dinner
@@ -44,20 +41,26 @@ Do not repeat items in the same meal, do not give multiple variations of the sam
 
 OPTIMIZATION STRATEGY:
 1. Start with high-protein items to meet protein target
-2. Balance fat and carbs to meet those targets while hitting calories
+2. Add calorie-dense items if under calorie target
 3. Use fractional servings (0.5, 1.5) for fine-tuning
-4. Adjust portion sizes to hit ALL targets simultaneously
+4. Adjust portion sizes to hit BOTH targets simultaneously
 5. Double-check math before submitting
 
 DIETARY PREFERENCES:
 • Respect the user's dietary preference specified in the prompt
 
 OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
-{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"fat_g":<float>,"carbs_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
+{{"totals":{{"calories":<int>,"protein_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
 
 EXPLANATION:
-• Write 1-3 sentences explaining how the plan meets all macro targets
+• Write 1-3 sentences explaining how the plan meets the calorie/protein targets
 • Mention any notable trade-offs or optimizations made
+
+EXAMPLE CALCULATION:
+If target is 2000 cal / 150g protein:
+- Grilled Chicken (250 cal, 45g protein) × 2 servings = 500 cal, 90g protein
+- Brown Rice (200 cal, 4g protein) × 1.5 servings = 300 cal, 6g protein
+Continue until totals reach 1900-2100 cal and 143-158g protein.
 
 Remember: This is a mathematical optimization task. Precision is mandatory. Think step by step."""
 
@@ -65,8 +68,6 @@ Remember: This is a mathematical optimization task. Precision is mandatory. Thin
 class DormdishMealPlannerSchema__Totals(BaseModel):
     calories: float
     protein_g: float
-    fat_g: float
-    carbs_g: float
 
 
 class DormdishMealPlannerSchema__MealItem(BaseModel):
@@ -74,8 +75,6 @@ class DormdishMealPlannerSchema__MealItem(BaseModel):
     servings: float
     calories: float
     protein_g: float
-    fat_g: float
-    carbs_g: float
     serving_size: str  
 
 
@@ -275,8 +274,6 @@ async def generate_meal_plan_with_agent(
   
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
-  fat_target = nutrition_targets.get('fat_g', 60)  # Default if not provided
-  carbs_target = nutrition_targets.get('carbs_g', 200)  # Default if not provided
   cal_min = int(cal_target * 0.95)
   cal_max = int(cal_target * 1.05)
   prot_min = int(prot_target * 0.95)
@@ -288,9 +285,7 @@ async def generate_meal_plan_with_agent(
     cal_target=cal_target,
     prot_min=prot_min,
     prot_max=prot_max,
-    prot_target=prot_target,
-    fat_target=fat_target,
-    carbs_target=carbs_target
+    prot_target=prot_target
   )
 
   
@@ -298,6 +293,7 @@ async def generate_meal_plan_with_agent(
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
 
+  
   def call_gemini():
     return client.models.generate_content(
       model=chosen_model,
@@ -305,72 +301,20 @@ async def generate_meal_plan_with_agent(
       config=types.GenerateContentConfig(
         temperature=temperature,
         max_output_tokens=max_tokens,
+        response_mime_type="application/json",
+        response_schema=DormdishMealPlannerSchema,
       )
     )
   
   response = await asyncio.to_thread(call_gemini)
 
-  # Check for safety blocks or finish reasons
-  if hasattr(response, 'candidates') and response.candidates:
-    candidate = response.candidates[0]
-    if hasattr(candidate, 'finish_reason'):
-      finish_reason = str(candidate.finish_reason)
-      if 'SAFETY' in finish_reason or 'BLOCKED' in finish_reason:
-        error_msg = f"Gemini response was blocked due to safety filters: {finish_reason}"
-        print(f"[meal_plan_agent] {error_msg}")
-        if hasattr(candidate, 'safety_ratings'):
-          print(f"[meal_plan_agent] Safety ratings: {candidate.safety_ratings}")
-        raise ValueError(error_msg)
-
-  # Extract and validate response text (defensively guard SDK None parsing)
-  raw_response = None
-  try:
-    raw_response = response.text if hasattr(response, 'text') else None
-  except TypeError as e:
-    # Some SDK versions attempt json.loads(None) internally when no content;
-    # recover by trying candidates->parts fallback below, otherwise raise a clean error
-    raw_response = None
-  except Exception as e:
-    raw_response = None
+  
+  raw_response = response.text
   
   if not raw_response:
-    # Check if response has any content at all
-    if hasattr(response, 'candidates') and response.candidates:
-      try:
-        for candidate in response.candidates:
-          content = getattr(candidate, 'content', None)
-          if not content:
-            continue
-          parts = getattr(content, 'parts', None)
-          if not parts:
-            continue
-          for part in parts:
-            # Prefer text
-            if hasattr(part, 'text') and part.text:
-              raw_response = part.text
-              break
-            # Fallback: some SDKs expose JSON on a json/inline_data field
-            json_payload = getattr(part, 'json', None)
-            if json_payload is not None:
-              try:
-                raw_response = json.dumps(json_payload, ensure_ascii=False)
-                break
-              except Exception:
-                pass
-          if raw_response:
-            break
-      except Exception:
-        raw_response = None
-    
-    if not raw_response:
-      error_msg = "Gemini returned no text response"
-      if hasattr(response, 'prompt_feedback'):
-        error_msg += f". Feedback: {response.prompt_feedback}"
-      print(f"[meal_plan_agent] {error_msg}")
-      print(f"[meal_plan_agent] Response object: {response}")
-      raise ValueError(error_msg)
+    raise ValueError("Gemini returned no text response")
 
-  # Clean up markdown code blocks if present
+  
   raw_json = raw_response.strip()
   if raw_json.startswith("```"):
     lines = raw_json.split("\n")
@@ -380,21 +324,13 @@ async def generate_meal_plan_with_agent(
       lines = lines[:-1]
     raw_json = "\n".join(lines).strip()
 
-  # Parse JSON with detailed error reporting (ensure we pass a string)
+  
   try:
-    if not isinstance(raw_json, str):
-      raise ValueError("Model returned non-string JSON payload")
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as e:
     print(f"[meal_plan_agent] JSON parsing failed: {e}")
-    print(f"[meal_plan_agent] Raw response (first 500 chars): {raw_response[:500]}")
-    print(f"[meal_plan_agent] Cleaned JSON attempt (first 500 chars): {raw_json[:500]}")
+    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
     raise ValueError(f"Gemini output was not valid JSON: {e}")
-  except TypeError as e:
-    # Guard against json.loads(None) style failures from unexpected types
-    print(f"[meal_plan_agent] JSON parsing TypeError: {e}")
-    print(f"[meal_plan_agent] Raw response: {repr(raw_response)[:200]}")
-    raise ValueError(f"Gemini returned empty or invalid JSON payload: {e}")
 
   
   if "explanation" not in parsed:
@@ -463,8 +399,6 @@ async def generate_meal_plan_with_streaming(
 
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
-  fat_target = nutrition_targets.get('fat_g', 60)  # Default if not provided
-  carbs_target = nutrition_targets.get('carbs_g', 200)  # Default if not provided
   cal_min = int(cal_target * 0.95)
   cal_max = int(cal_target * 1.05)
   prot_min = int(prot_target * 0.95)
@@ -476,17 +410,12 @@ async def generate_meal_plan_with_streaming(
     cal_target=cal_target,
     prot_min=prot_min,
     prot_max=prot_max,
-    prot_target=prot_target,
-    fat_target=fat_target,
-    carbs_target=carbs_target
+    prot_target=prot_target
   )
 
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
-
-  # Convert Pydantic model to JSON schema for proper schema enforcement
-  json_schema = DormdishMealPlannerSchema.model_json_schema()
 
   try:
     # Create streaming response
@@ -498,37 +427,16 @@ async def generate_meal_plan_with_streaming(
           temperature=temperature,
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
-          response_schema=json_schema,
+          response_schema=DormdishMealPlannerSchema,
         )
       )
     
     stream = await asyncio.to_thread(call_gemini_stream)
 
     final_response = ""
-    chunk_count = 0
     
     for chunk in stream:
-      chunk_count += 1
-      # Check for safety blocks
-      if hasattr(chunk, 'candidates') and chunk.candidates:
-        candidate = chunk.candidates[0]
-        if hasattr(candidate, 'finish_reason'):
-          finish_reason = str(candidate.finish_reason)
-          if 'SAFETY' in finish_reason or 'BLOCKED' in finish_reason:
-            error_msg = f"Gemini response was blocked due to safety filters: {finish_reason}"
-            print(f"[meal_plan_agent] {error_msg}")
-            if hasattr(candidate, 'safety_ratings'):
-              print(f"[meal_plan_agent] Safety ratings: {candidate.safety_ratings}")
-            yield {
-              "type": "error",
-              "error": error_msg
-            }
-            return
-      
-      text_chunk = chunk.text if hasattr(chunk, 'text') and chunk.text else ""
-      if not text_chunk:
-        continue
-        
+      text_chunk = chunk.text
       final_response += text_chunk
       # Stream the text as it comes
       yield {
@@ -536,16 +444,6 @@ async def generate_meal_plan_with_streaming(
         "content": text_chunk,
         "full_response": final_response
       }
-
-    # Check if we got any response at all
-    if not final_response:
-      error_msg = f"Gemini streaming returned no text after {chunk_count} chunks"
-      print(f"[meal_plan_agent] {error_msg}")
-      yield {
-        "type": "error",
-        "error": error_msg
-      }
-      return
 
     # Parse and validate the final response
     raw_json = final_response.strip()
