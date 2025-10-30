@@ -298,10 +298,6 @@ async def generate_meal_plan_with_agent(
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
 
-  
-  # Convert Pydantic model to JSON schema for proper schema enforcement
-  json_schema = DormdishMealPlannerSchema.model_json_schema()
-  
   def call_gemini():
     return client.models.generate_content(
       model=chosen_model,
@@ -309,8 +305,6 @@ async def generate_meal_plan_with_agent(
       config=types.GenerateContentConfig(
         temperature=temperature,
         max_output_tokens=max_tokens,
-        response_mime_type="application/json",
-        response_schema=json_schema,
       )
     )
   
@@ -336,15 +330,37 @@ async def generate_meal_plan_with_agent(
     # Some SDK versions attempt json.loads(None) internally when no content;
     # recover by trying candidates->parts fallback below, otherwise raise a clean error
     raw_response = None
+  except Exception as e:
+    raw_response = None
   
   if not raw_response:
     # Check if response has any content at all
     if hasattr(response, 'candidates') and response.candidates:
-      candidate = response.candidates[0]
-      if hasattr(candidate, 'content') and candidate.content:
-        if hasattr(candidate.content, 'parts') and candidate.content.parts:
-          part = candidate.content.parts[0]
-          raw_response = part.text if hasattr(part, 'text') else None
+      try:
+        for candidate in response.candidates:
+          content = getattr(candidate, 'content', None)
+          if not content:
+            continue
+          parts = getattr(content, 'parts', None)
+          if not parts:
+            continue
+          for part in parts:
+            # Prefer text
+            if hasattr(part, 'text') and part.text:
+              raw_response = part.text
+              break
+            # Fallback: some SDKs expose JSON on a json/inline_data field
+            json_payload = getattr(part, 'json', None)
+            if json_payload is not None:
+              try:
+                raw_response = json.dumps(json_payload, ensure_ascii=False)
+                break
+              except Exception:
+                pass
+          if raw_response:
+            break
+      except Exception:
+        raw_response = None
     
     if not raw_response:
       error_msg = "Gemini returned no text response"

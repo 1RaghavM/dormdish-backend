@@ -2549,8 +2549,12 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Meal plan generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {e}")
+        err_msg = str(e)
+        print(f"❌ Meal plan generation error: {err_msg}")
+        # Normalize opaque SDK JSON errors to a clearer message
+        if "must be str, bytes or bytearray, not NoneType" in err_msg:
+            raise HTTPException(status_code=500, detail="Upstream model returned empty JSON payload. Please try again.")
+        raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {err_msg}")
 
 
 @app.post("/generate-meal-plan-stream", summary="Generate Meal Plan with Streaming")
