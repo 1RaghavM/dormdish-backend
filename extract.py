@@ -403,6 +403,8 @@ def fetch_nutrition(url: str) -> dict:
 
     calories = None
     protein_g = None
+    fat_g = None
+    carbs_g = None
     serving = None
 
     # Regex across full text as fallback
@@ -425,6 +427,34 @@ def fetch_nutrition(url: str) -> dict:
             m2 = re.search(r"(\d+(?:\.\d+)?)\s*g", val)
             if m2:
                 protein_g = float(m2.group(1))
+    
+    # Extract fat
+    m = re.search(r"Total\s+Fat\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*g", text, re.I)
+    if m:
+        fat_g = float(m.group(1))
+    else:
+        val = table_lookup("Total Fat")
+        if val:
+            m2 = re.search(r"(\d+(?:\.\d+)?)\s*g", val)
+            if m2:
+                fat_g = float(m2.group(1))
+    
+    # Extract carbs
+    m = re.search(r"Total\s+Carb(?:ohydrate)?s?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*g", text, re.I)
+    if m:
+        carbs_g = float(m.group(1))
+    else:
+        val = table_lookup("Total Carbohydrate")
+        if not val:
+            val = table_lookup("Total Carbs")
+        if not val:
+            val = table_lookup("Carbohydrate")
+        if not val:
+            val = table_lookup("Carbs")
+        if val:
+            m2 = re.search(r"(\d+(?:\.\d+)?)\s*g", val)
+            if m2:
+                carbs_g = float(m2.group(1))
 
     m = re.search(r"Serving\s*Size\s*[:\-]?\s*([^|\n\r]+)", text, re.I)
     if m:
@@ -443,6 +473,10 @@ def fetch_nutrition(url: str) -> dict:
         out["calories"] = calories
     if protein_g is not None:
         out["protein_g"] = protein_g
+    if fat_g is not None:
+        out["g_fat"] = fat_g
+    if carbs_g is not None:
+        out["g_carbs"] = carbs_g
     if serving:
         out["serving_size"] = serving
     if item_name:
@@ -483,6 +517,8 @@ def to_meals_output(categorized: dict, meal_type: str, date: str) -> dict:
                 "name": f.get("name"),
                 "calories": f.get("calories"),
                 "g_protein": f.get("protein_g"),
+                "g_fat": f.get("g_fat"),
+                "g_carbs": f.get("g_carbs"),
                 "meal_type": meal_type,
                 "date": date,
             }
@@ -616,6 +652,8 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                     "name": item.get("name"),
                     "calories": item.get("calories"),
                     "protein_g": item.get("protein_g"),
+                    "g_fat": item.get("g_fat"),
+                    "g_carbs": item.get("g_carbs"),
                     "serving_size": item.get("serving_size"),
                     "nutrition_url": item.get("nutrition_url"),
                 })
@@ -680,6 +718,10 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 item["calories"] = nut.get("calories")
             if nut.get("protein_g") is not None:
                 item["protein_g"] = nut.get("protein_g")
+            if nut.get("g_fat") is not None:
+                item["g_fat"] = nut.get("g_fat")
+            if nut.get("g_carbs") is not None:
+                item["g_carbs"] = nut.get("g_carbs")
             if nut.get("serving_size"):
                 item["serving_size"] = nut.get("serving_size")
 
@@ -699,6 +741,8 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 "name": item.get("name"),
                 "calories": item.get("calories"),
                 "protein_g": item.get("protein_g"),
+                "g_fat": item.get("g_fat"),
+                "g_carbs": item.get("g_carbs"),
                 "serving_size": item.get("serving_size"),
                 "nutrition_url": item.get("nutrition_url"),
             })

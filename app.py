@@ -1236,9 +1236,23 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
             if items_count == 0:
                 print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
                 return False
-            print(f"🔍 Saving menu with {items_count} items to Supabase")
-            print(f"🔍 Menu data keys: {list(menu_data.keys())}")
+            print(f"� Saving menu with {items_count} items to Supabase")
+            print(f"� Menu data keys: {list(menu_data.keys())}")
             stored_menu_data = menu_data.get("menu", menu_data)
+            
+            # DEBUG: Check if fat_g and carbs_g are in the items being saved
+            if "items" in stored_menu_data and len(stored_menu_data["items"]) > 0:
+                sample_item = stored_menu_data["items"][0]
+                print(f"� SAMPLE ITEM BEFORE SAVE: {sample_item.get('name')}")
+                print(f"� SAMPLE MACROS: protein={sample_item.get('protein_g')}, fat={sample_item.get('fat_g')}, carbs={sample_item.get('carbs_g')}, cal={sample_item.get('calories')}")
+                
+                # Count items with complete macros
+                complete_count = sum(1 for item in stored_menu_data["items"] 
+                                   if item.get('fat_g') is not None and item.get('carbs_g') is not None)
+                print(f"💾 Items with fat_g and carbs_g: {complete_count}/{len(stored_menu_data['items'])}")
+            else:
+                print(f"⚠️ No items found in stored_menu_data")
+                
             data_to_insert = {
                 "id": menu_id,
                 "university": university,
@@ -1250,12 +1264,14 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
                 "created_at": datetime.now().isoformat(),
             }
             response = supabase.table("menus").upsert(data_to_insert).execute()
-            print(f"💾 Saved menu to Supabase: {menu_id}")
-            print(f"💾 Supabase response data length: {len(response.data) if response.data else 0}")
+            print(f"✅ Saved menu to Supabase: {menu_id}")
+            print(f"✅ Supabase response data length: {len(response.data) if response.data else 0}")
             return True
         except Exception as exc:
             print(f"⚠️ Error saving to Supabase: {exc}")
             print(f"⚠️ Error type: {type(exc)}")
+            import traceback
+            traceback.print_exc()
             return False
 
     return await asyncio.to_thread(_save)
@@ -1271,8 +1287,9 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         dh_norm = "neilson"
     dining_hall = dh_norm
 
+    # University and dining hall mapping - extensible for multiple universities
     dining_hall_mapping = {
-        
+        # Hopkins University
         "hopkins-cafe": ("hopkins", "hopkins-cafe"),
         "hopkins cafe": ("hopkins", "hopkins-cafe"),
         "hopkins": ("hopkins", "hopkins-cafe"),
@@ -1282,13 +1299,10 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
         
+        # Rutgers University - Nutrislice halls
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
-        "livingston": ("rutgers", "livingston-dining-commons"),
-        "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining commons": ("rutgers", "livingston-dining-commons"),
         "brower": ("rutgers", "brower-commons"),
         "brower-commons": ("rutgers", "brower-commons"),
         "brower commons": ("rutgers", "brower-commons"),
@@ -1296,6 +1310,7 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "college ave": ("rutgers", "brower-commons"),
         "college avenue": ("rutgers", "brower-commons"),
         
+        # Rutgers University - Now using Nutrislice instead of FoodPro for Neilson
         "neilson": ("rutgers", "neilson-dining-hall"),
         "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
         "neilson dining hall": ("rutgers", "neilson-dining-hall"),
@@ -1306,6 +1321,11 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
         
+        # Rutgers University - FoodPro halls (legacy)
+        "livingston": ("rutgers", "livingston-dining-commons"),
+        "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
+        "livingston dining hall": ("rutgers", "livingston-dining-commons"),
+        "livingston dining commons": ("rutgers", "livingston-dining-commons"),
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
@@ -1324,7 +1344,10 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
 
-    if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
+    # FoodPro halls (legacy Rutgers halls that still use FoodPro scraper)
+    foodpro_halls = {"livingston-dining-commons", "the-atrium"}
+    
+    if university == "rutgers" and hall_slug in foodpro_halls:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
             menu_data = await fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
@@ -1338,6 +1361,7 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             print(f"❌ FoodPro fetch failed: {e}")
             return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
 
+    # All other halls use Nutrislice API (including Neilson)
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = await fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
@@ -1393,6 +1417,13 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
             prot = food.get("protein_g")
         if prot is not None:
             out_item["protein_g"] = prot
+        # include fat and carbs if present in new FoodPro schema
+        fat = food.get("g_fat") or food.get("fat_g")
+        if fat is not None:
+            out_item["fat_g"] = fat
+        carbs = food.get("g_carbs") or food.get("carbs_g") or food.get("carbohydrates")
+        if carbs is not None:
+            out_item["carbs_g"] = carbs
         cals = food.get("calories")
         if cals is not None:
             out_item["calories"] = cals
@@ -1458,9 +1489,18 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                         out_item["protein_g"] = it.get("protein_g")
                     if it.get("calories") is not None:
                         out_item["calories"] = it.get("calories")
+                    if it.get("fat_g") is not None:
+                        out_item["fat_g"] = it.get("fat_g")
+                    if it.get("carbs_g") is not None:
+                        out_item["carbs_g"] = it.get("carbs_g")
                     if it.get("serving_size"):
                         out_item["serving_size"] = it.get("serving_size")
                     items.append(out_item)
+                    
+                    # DEBUG: Log first item with macros
+                    if len(items) == 1:
+                        print(f"🔍 FIRST ITEM PROCESSED: {out_item.get('name')}")
+                        print(f"🔍 FIRST ITEM MACROS: protein={out_item.get('protein_g')}, fat={out_item.get('fat_g')}, carbs={out_item.get('carbs_g')}, cal={out_item.get('calories')}")
             else:
                 
                 if isinstance(parsed, dict):
@@ -1515,6 +1555,12 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         warnings.append("No items parsed from FoodPro")
         raise RuntimeError("FoodPro returned zero items")
 
+    # DEBUG: Check unique_items has fat_g and carbs_g
+    print(f"🔍 UNIQUE_ITEMS COUNT: {len(unique_items)}")
+    if unique_items:
+        sample = unique_items[0]
+        print(f"🔍 UNIQUE_ITEMS SAMPLE: name={sample.get('name')}, fat_g={sample.get('fat_g', 'MISSING')}, carbs_g={sample.get('carbs_g', 'MISSING')}")
+
     meal_sources = attempt.get("meal_sources", [])
 
     return {
@@ -1536,24 +1582,42 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         "rutgers": "https://rutgers.api.nutrislice.com/menu/api/weeks/school",
         "hopkins": "https://hopkinsdining.api.nutrislice.com/menu/api/weeks/school",
     }
+    
+    # Configure meal slugs per university and hall
     meal_configs = {
-        "rutgers": ["breakfast", "lunch-test", "dinner"],
+        "rutgers": {
+            # Default meals for most Rutgers halls
+            "default": ["breakfast", "lunch-test", "dinner"],
+            # Neilson/Cook-Douglass specific meals
+            "neilson-dining-hall": ["breakfast", "lunch-test", "dinner"],
+            # Busch specific meals  
+            "busch-dining-hall": ["breakfast", "lunch-test", "dinner"],
+            # Brower specific meals
+            "brower-commons": ["breakfast", "lunch-test", "dinner"],
+        },
         "hopkins": {
             "nolans-on-33rd": ["nolans-breakfast", "nolans-dinner-2", "nolans-dinner"],
             "peabody-institute": ["peabody-breakfast", "peabody-lunch", "peabody-dinner"],
             "hopkins-cafe": ["hopkins-cafe-breakfast", "hopkins-cafe-lunch", "hopkins-cafe-dinner"],
         },
     }
+    
     api_base = api_bases.get(university)
     if not api_base:
         raise ValueError(f"Unsupported university: {university}")
+    
     if university == "hopkins":
         meal_slugs = meal_configs["hopkins"].get(hall_slug, [])
         if not meal_slugs:
             prefix = hall_slug.split("-")[0]
             meal_slugs = [f"{prefix}-breakfast", f"{prefix}-lunch", f"{prefix}-dinner"]
+    elif university == "rutgers":
+        # Use hall-specific config if available, otherwise use default
+        meal_slugs = meal_configs["rutgers"].get(hall_slug, meal_configs["rutgers"]["default"])
     else:
-        meal_slugs = meal_configs[university]
+        # Fallback for any other university
+        meal_slugs = ["breakfast", "lunch", "dinner"]
+    
     all_items: List[dict] = []
     meal_sources: List[str] = []
     warnings: List[str] = []
@@ -1653,7 +1717,7 @@ async def fetch_meal_items(api_base: str, hall_slug: str, meal_slug: str, date: 
 
 
 def process_menu_item(item: dict) -> Optional[dict]:
-    """Process a menu item and extract nutritional information"""
+    """Process a menu item and extract nutritional information including fats and carbs"""
     name = None
     if isinstance(item.get("food"), dict):
         name = item["food"].get("name")
@@ -1661,7 +1725,10 @@ def process_menu_item(item: dict) -> Optional[dict]:
         name = item.get("name") or item.get("item_name")
     if not name:
         return None
+    
     nutrition: Dict[str, Optional[float]] = {}
+    
+    # Extract nutrition from nested 'food' object (Nutrislice format)
     if isinstance(item.get("food"), dict):
         food = item["food"]
         rni = food.get("rounded_nutrition_info") or {}
@@ -1669,27 +1736,49 @@ def process_menu_item(item: dict) -> Optional[dict]:
         nutrition = {
             "protein_g": rni.get("g_protein"),
             "calories": rni.get("calories"),
+            "fat_g": rni.get("g_fat"),  # Extract fat
+            "carbs_g": rni.get("g_carbs"),  # Extract carbs
             "serving_size": f"{serving_info.get('serving_size_amount', '')} {serving_info.get('serving_size_unit', '')}".strip(),
         }
     else:
+        # Extract from flat structure (alternative format)
         nutrition = {
             "protein_g": item.get("g_protein") or item.get("protein"),
             "calories": item.get("calories") or item.get("kcal"),
+            "fat_g": item.get("g_fat") or item.get("fat"),  # Extract fat
+            "carbs_g": item.get("g_carbs") or item.get("carbs") or item.get("carbohydrates"),  # Extract carbs
             "serving_size": item.get("serving_size") or item.get("portion_size"),
         }
+    
     result: Dict[str, object] = {"name": name}
+    
+    # Add required macros (protein and calories)
     if nutrition.get("protein_g") is not None:
         try:
-            result["protein_g"] = float(nutrition["protein_g"])  
+            result["protein_g"] = float(nutrition["protein_g"])
         except (ValueError, TypeError):
             pass
     if nutrition.get("calories") is not None:
         try:
-            result["calories"] = float(nutrition["calories"])  
+            result["calories"] = float(nutrition["calories"])
         except (ValueError, TypeError):
             pass
     if nutrition.get("serving_size"):
-        result["serving_size"] = str(nutrition["serving_size"])  
+        result["serving_size"] = str(nutrition["serving_size"])
+    
+    # Add optional macros (fats and carbs) - IMPORTANT for complete nutrition tracking
+    if nutrition.get("fat_g") is not None:
+        try:
+            result["fat_g"] = float(nutrition.get("fat_g"))
+        except (ValueError, TypeError):
+            pass
+
+    if nutrition.get("carbs_g") is not None:
+        try:
+            result["carbs_g"] = float(nutrition.get("carbs_g"))
+        except (ValueError, TypeError):
+            pass
+    
     return result
 
 
@@ -1709,10 +1798,18 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
             continue
         cal = it.get("calories")
         prot = it.get("protein_g")
+        fat = it.get("fat_g")
+        carbs = it.get("carbs_g")
         if cal is None or prot is None:
             continue
         try:
-            lines.append(f"{nm} | {int(round(cal))} cal | {int(round(prot))} g protein")
+            # Include fats and carbs if available
+            parts = [f"{nm}", f"{int(round(cal))} cal", f"{int(round(prot))}g protein"]
+            if fat is not None:
+                parts.append(f"{int(round(fat))}g fat")
+            if carbs is not None:
+                parts.append(f"{int(round(carbs))}g carbs")
+            lines.append(" | ".join(parts))
         except Exception:
             continue
     allowed_block = "\n".join(lines) if lines else "(none)"
@@ -1724,7 +1821,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):",
         "",
         "{",
-        ' "totals": { "calories": "<int>", "protein_g": "<int>" },',
+        ' "totals": { "calories": "<int>", "protein_g": "<int>", "fat_g": "<int>", "carbs_g": "<int>" },',
         ' "meals": {',
         '   "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
         '   "lunch": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
@@ -1735,7 +1832,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "",
         "Meal item schema:",
         "",
-        '{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "serving_size": "<string|null>" }',
+        '{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "fat_g": "<number>", "carbs_g": "<number>", "serving_size": "<string|null>" }',
         "",
         "Rules",
         "",
@@ -1753,7 +1850,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "",
         "Nutrition Targets",
         "",
-        "Calories & protein must be within ±5% of goals.",
+        "Calories & protein must be within ±5% of goals. Track fats and carbs when available.",
         "",
         "Prioritize protein target first, then adjust calories.",
         "",
@@ -1782,6 +1879,60 @@ def _estimate_missing_macros(calories: Optional[float], protein: Optional[float]
         calories = 50.0
         protein = 2.0
     return float(calories), float(protein)
+
+
+def calculate_macro_targets(weight_lbs: float, total_calories: int, protein_g: int, goal: str) -> dict:
+    """
+    Calculate fat and carbs targets based on calories, protein, weight, and fitness goal.
+    
+    Standard approach:
+    - Fat: 0.4-0.5g per lb bodyweight (varies by goal)
+    - Carbs: Remaining calories after protein and fat are allocated
+    
+    Calorie conversion:
+    - Protein: 4 cal/g
+    - Fat: 9 cal/g
+    - Carbs: 4 cal/g
+    
+    Args:
+        weight_lbs: User's body weight in pounds
+        total_calories: Daily calorie target
+        protein_g: Daily protein target in grams
+        goal: 'cut', 'maintain', or 'bulk'
+    
+    Returns:
+        dict with 'fat_g' and 'carbs_g' targets
+    """
+    goal_lower = goal.lower()
+    
+    # Calculate fat target based on goal
+    # Cut: 0.4g/lb (lower fat to maximize deficit)
+    # Maintain: 0.45g/lb (moderate fat)
+    # Bulk: 0.5g/lb (higher fat for surplus)
+    if goal_lower == 'cut':
+        fat_per_lb = 0.4
+    elif goal_lower == 'bulk':
+        fat_per_lb = 0.5
+    else:  # maintain
+        fat_per_lb = 0.45
+    
+    fat_target = weight_lbs * fat_per_lb
+    
+    # Calculate calories from protein and fat
+    protein_calories = protein_g * 4  # 4 cal per gram of protein
+    fat_calories = fat_target * 9  # 9 cal per gram of fat
+    
+    # Remaining calories go to carbs
+    carbs_calories = total_calories - protein_calories - fat_calories
+    
+    # Ensure carbs don't go negative (minimum 50g for brain function)
+    carbs_calories = max(carbs_calories, 200)  # 50g * 4 cal/g = 200 cal minimum
+    carbs_target = carbs_calories / 4  # 4 cal per gram of carbs
+    
+    return {
+        'fat_g': int(round(fat_target)),
+        'carbs_g': int(round(carbs_target))
+    }
 
 
 def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
@@ -2085,6 +2236,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             calories = raw.get("calories")
             protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
             calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
             serving_size = raw.get("serving_size") or None
             entry = {
                 "name": name,
@@ -2093,6 +2246,17 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "serving_size": serving_size,
                 "density": (protein / calories) if calories else 0.0,
             }
+            # Add optional macros if available
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
             key = name.upper()
             if key not in nutrition_lookup:  
                 nutrition_lookup[key] = entry
@@ -2110,6 +2274,16 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         else:
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+        
+        # Calculate fat and carbs targets
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
 
         selected_activity_metrics: Dict[str, Any] = {}
         if isinstance(user_act_breakdown, dict):
@@ -2138,6 +2312,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         agent_nutrition_targets = {
             "calories": calorie_target,
             "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
             "bmr": user_bmr,
             "tdee": user_tdee,
             "goal": goal_mode,
@@ -2192,7 +2368,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 if not sanitized_item.get("serving_size"):
                     sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
 
-                for macro_key in ("calories", "protein_g"):
+                for macro_key in ("calories", "protein_g", "fat_g", "carbs_g"):
                     value = sanitized_item.get(macro_key)
                     if value is None:
                         continue
@@ -2211,6 +2387,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
         plan_json.setdefault('goals', {})['calories'] = calorie_target
         plan_json['goals']['protein_g'] = protein_target
+        plan_json['goals']['fat_g'] = fat_target
+        plan_json['goals']['carbs_g'] = carbs_target
         plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
         plan_json['user_stats']['tdee'] = user_tdee
         plan_json['user_stats']['goal'] = goal_mode
@@ -2228,6 +2406,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             raise HTTPException(status_code=500, detail="Model response missing valid totals")
         totals['calories'] = final_cal
         totals['protein_g'] = final_prot
+        
+        # Handle optional fat_g and carbs_g in totals
+        if 'fat_g' in totals and totals['fat_g'] is not None:
+            try:
+                totals['fat_g'] = float(totals['fat_g'])
+            except (TypeError, ValueError):
+                totals['fat_g'] = 0
+        
+        if 'carbs_g' in totals and totals['carbs_g'] is not None:
+            try:
+                totals['carbs_g'] = float(totals['carbs_g'])
+            except (TypeError, ValueError):
+                totals['carbs_g'] = 0
+        
         cal_diff = final_cal - calorie_target
         prot_diff = final_prot - protein_target
         cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
@@ -2236,6 +2428,10 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         print(f"📊 Final Plan Metrics:")
         print(f"   Calories: {final_cal:.0f} / {calorie_target} ({cal_pct:+.1f}%)")
         print(f"   Protein:  {final_prot:.0f}g / {protein_target}g ({prot_pct:+.1f}%)")
+        if totals.get('fat_g'):
+            print(f"   Fat:      {totals['fat_g']:.0f}g")
+        if totals.get('carbs_g'):
+            print(f"   Carbs:    {totals['carbs_g']:.0f}g")
 
         if not plan_json.get('explanation'):
             plan_json['explanation'] = "Balanced plan targeting protein and calories with available items."
@@ -2261,7 +2457,12 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         response_payload = {
             "success": True,
             "user_profile": safe_user,
-            "nutrition_targets": {"calories": calorie_target, "protein_g": protein_target},
+            "nutrition_targets": {
+                "calories": calorie_target,
+                "protein_g": protein_target,
+                "fat_g": fat_target,
+                "carbs_g": carbs_target,
+            },
             "bmr_tdee": {
                 "bmr": user_bmr,
                 "tdee": user_tdee,
@@ -2380,6 +2581,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             calories = raw.get("calories")
             protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
             calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
             serving_size = raw.get("serving_size") or None
             entry = {
                 "name": name,
@@ -2388,6 +2591,17 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                 "serving_size": serving_size,
                 "density": (protein / calories) if calories else 0.0,
             }
+            # Add optional macros if available
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
             key = name.upper()
             if key not in nutrition_lookup:
                 nutrition_lookup[key] = entry
@@ -2402,6 +2616,16 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         else:
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+        
+        # Calculate fat and carbs targets
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
 
         # Prepare payloads for streaming agent
         user_payload = {
@@ -2422,6 +2646,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         nutrition_targets = {
             "calories": calorie_target,
             "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
         }
 
         async def event_generator():
