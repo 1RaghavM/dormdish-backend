@@ -1215,12 +1215,6 @@ class FavoriteRequest(BaseModel):
     meal_type: str  # "breakfast", "lunch", "dinner"
     meal_plan_id: Optional[str] = None
 
-class LikeRequest(BaseModel):
-    item_name: str
-    item_type: str  # "meal_plan" or "food_item"
-    meal_type: str
-    context: Optional[str] = None
-
 class DislikeRequest(BaseModel):
     item_name: str
     item_type: str  # "meal_plan" or "food_item"
@@ -2027,6 +2021,43 @@ def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
         return lower_map[candidates[0]]
     return None
 
+
+def _normalize_preference_key(metadata: Dict[str, Any]) -> Optional[str]:
+    """Normalize metadata into a front-end friendly favorite/dislike key."""
+    item_name = (metadata.get("item_name") or metadata.get("food_item") or "").strip().lower()
+    if not item_name:
+        return None
+    item_type = metadata.get("preference_type") or metadata.get("item_type") or "food_item"
+    if item_type not in ("meal_plan", "food_item"):
+        item_type = "food_item"
+    return f"{item_type}:{item_name}"
+
+
+def _build_preferences_snapshot(
+    favorites: List[Dict[str, Any]],
+    dislikes: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    favorite_keys: List[str] = []
+    for fav in favorites or []:
+        metadata = fav.get("metadata") or {}
+        key = _normalize_preference_key(metadata)
+        if key and key not in favorite_keys:
+            favorite_keys.append(key)
+
+    dislike_keys: List[str] = []
+    for dislike in dislikes or []:
+        metadata = dislike.get("metadata") or {}
+        key = _normalize_preference_key(metadata)
+        if key and key not in dislike_keys:
+            dislike_keys.append(key)
+
+    return {
+        "favorites": favorites or [],
+        "dislikes": dislikes or [],
+        "favorite_keys": favorite_keys,
+        "dislike_keys": dislike_keys,
+    }
+
 @app.put("/auth/profile", summary="Update User Profile")
 async def update_profile(profile_data: UpdateProfileRequest, current_user=Depends(get_current_user)):
     """Update user profile"""
@@ -2402,27 +2433,43 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
         # Retrieve user preferences from mem0 (if available)
         user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
         try:
             from memory.preference_manager import PreferenceManager, build_preference_context
             preference_manager = PreferenceManager()
             user_id = str(authenticated_user["id"])
             
-            # Retrieve all preference types
+            print(f"[mem0] Meal Plan Generation - User ID from auth: {user_id}")
+            print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+            
+            # Retrieve all preference types (only favorites and dislikes)
             favorites = await preference_manager.get_favorites(user_id)
-            likes = await preference_manager.get_likes(user_id)
             dislikes = await preference_manager.get_dislikes(user_id)
             profile = await preference_manager.get_user_profile(user_id)
             prefs = [profile] if profile else []
             
             # Build context string for LLM
-            user_preferences_context = build_preference_context(prefs, favorites, dislikes, likes)
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
             
             if user_preferences_context:
-                print(f"[mem0] Retrieved {len(favorites)} favorites, {len(likes)} likes, {len(dislikes)} dislikes for user {user_id}")
+                print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as mem_error:
             # Don't fail meal plan generation if mem0 is unavailable
             print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
             user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
 
         ai_start = time.time()
         try:
@@ -2489,6 +2536,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         dropped_items_meta = {}
         if unknown_items:
             dropped_items_meta['dropped_unknown'] = unknown_items
+
+        plan_json["preferences_snapshot"] = preferences_snapshot
 
         plan_json.setdefault('goals', {})['calories'] = calorie_target
         plan_json['goals']['protein_g'] = protein_target
@@ -2577,6 +2626,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             },
             "available_items": allowed_for_prompt,
             "meal_plan": plan_json,
+            "preferences_snapshot": preferences_snapshot,
             "generation_id": generation_id,
             "ask_feedback": "Please rate this meal plan",  
             "processing_info": {
@@ -2761,27 +2811,43 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
 
         # Retrieve user preferences from mem0 (if available)
         user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
         try:
             from memory.preference_manager import PreferenceManager, build_preference_context
             preference_manager = PreferenceManager()
             user_id = str(authenticated_user["id"])
             
-            # Retrieve all preference types
+            print(f"[mem0] Streaming Generation - User ID from auth: {user_id}")
+            print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+            
+            # Retrieve all preference types (only favorites and dislikes)
             favorites = await preference_manager.get_favorites(user_id)
-            likes = await preference_manager.get_likes(user_id)
             dislikes = await preference_manager.get_dislikes(user_id)
             profile = await preference_manager.get_user_profile(user_id)
             prefs = [profile] if profile else []
             
             # Build context string for LLM
-            user_preferences_context = build_preference_context(prefs, favorites, dislikes, likes)
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
             
             if user_preferences_context:
-                print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(likes)} likes, {len(dislikes)} dislikes for user {user_id}")
+                print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as mem_error:
             # Don't fail meal plan generation if mem0 is unavailable
             print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
             user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
 
         async def event_generator():
             """Generator function for Server-Sent Events"""
@@ -2792,6 +2858,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                     nutrition_targets=nutrition_targets,
                     user_preferences_context=user_preferences_context,
                 ):
+                    if isinstance(chunk, dict) and chunk.get("type") == "complete":
+                        chunk["preferences_snapshot"] = preferences_snapshot
                     # Format as SSE
                     yield f"data: {json.dumps(chunk)}\n\n"
             except Exception as e:
@@ -3229,6 +3297,8 @@ async def add_favorite(
         preference_manager = PreferenceManager()
         
         user_id = str(current_user["id"])
+        print(f"[API] /preferences/favorite - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
+        print(f"[API] Item: {favorite_data.item_name}, Type: {favorite_data.item_type}")
         
         if favorite_data.item_type == "meal_plan":
             result = await preference_manager.add_favorite_meal_plan(
@@ -3252,36 +3322,6 @@ async def add_favorite(
     except Exception as e:
         logger.error(f"Failed to add favorite: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to add favorite: {str(e)}")
-
-
-@app.post("/preferences/like", summary="Like a meal plan or food item")
-async def like_item(
-    like_data: LikeRequest,
-    current_user=Depends(get_current_user)
-):
-    """Record that user likes a meal plan or food item"""
-    try:
-        from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
-        user_id = str(current_user["id"])
-        
-        result = await preference_manager.add_like(
-            user_id=user_id,
-            item_name=like_data.item_name,
-            item_type=like_data.item_type,
-            meal_type=like_data.meal_type,
-            context=like_data.context
-        )
-        
-        return {
-            "status": "success",
-            "message": f"Recorded like for {like_data.item_name}",
-            "memory_result": result
-        }
-    except Exception as e:
-        logger.error(f"Failed to record like: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to record like: {str(e)}")
 
 
 @app.post("/preferences/dislike", summary="Dislike a meal plan or food item")
@@ -3325,6 +3365,8 @@ async def get_favorites(
         preference_manager = PreferenceManager()
         
         user_id = str(current_user["id"])
+        print(f"[API] /preferences/favorites - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
+        print(f"[API] Meal type filter: {meal_type}")
         
         favorites = await preference_manager.get_favorites(user_id, meal_type)
         
@@ -3349,9 +3391,8 @@ async def get_all_preferences(
         
         user_id = str(current_user["id"])
         
-        # Retrieve all preference categories
+        # Retrieve all preference categories (only favorites and dislikes)
         favorites = await preference_manager.get_favorites(user_id)
-        likes = await preference_manager.get_likes(user_id)
         dislikes = await preference_manager.get_dislikes(user_id)
         profile = await preference_manager.get_user_profile(user_id)
         
@@ -3359,13 +3400,41 @@ async def get_all_preferences(
             "status": "success",
             "user_id": user_id,
             "favorites": favorites,
-            "likes": likes,
             "dislikes": dislikes,
-            "profile": profile
+            "profile": profile,
+            "counts": {
+                "favorites": len(favorites),
+                "dislikes": len(dislikes)
+            }
         }
     except Exception as e:
         logger.error(f"Failed to retrieve preferences: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve preferences: {str(e)}")
+
+
+@app.get("/preferences/debug", summary="Debug: Get ALL raw memories from mem0")
+async def debug_all_memories(
+    current_user=Depends(get_current_user)
+):
+    """Get ALL raw memories for debugging (shows everything stored in mem0)"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        # Get all memories without filtering
+        all_memories = await preference_manager.get_all_memories(user_id)
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "total_memories": len(all_memories),
+            "memories": all_memories
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve debug memories: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve debug memories: {str(e)}")
 
 
 @app.post("/preferences/bmr", summary="Store user BMR and dietary info")

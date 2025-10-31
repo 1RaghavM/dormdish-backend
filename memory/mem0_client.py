@@ -4,10 +4,11 @@ Mem0 client initialization for DormDish backend.
 This module provides a singleton memory client for storing and retrieving
 user preferences, favorites, likes/dislikes, and dietary information.
 
-Configured to use Google Gemini for memory inference (same model used for meal planning).
+Properly configured for entity-based memory with user_id.
 """
 
 import os
+import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -22,20 +23,16 @@ def get_memory_client():
     """
     Get or create the mem0 client instance (singleton pattern).
     
-    This function implements lazy initialization to avoid importing mem0
-    until it's actually needed. Supports both Mem0 Platform (managed)
-    and Open Source (self-hosted) options.
-    
-    **Uses Google Gemini for memory inference** - the same API you're already using
-    for meal plan generation.
+    This function implements lazy initialization for the Mem0 Platform API.
+    Uses entity-based memory with user_id for proper memory retrieval.
     
     Returns:
-        Memory client instance (MemoryClient or Memory)
+        Memory client instance (MemoryClient)
     
     Environment Variables:
-        MEM0_API_KEY: API key for Mem0 Platform (if using managed service)
-        GEMINI_API_KEY: Google Gemini API key (required for memory inference)
-        MEM0_USE_PLATFORM: Set to "true" to use Mem0 Platform, otherwise uses Open Source
+        MEM0_API_KEY: API key for Mem0 Platform (required)
+        MEM0_ORG_ID: Organization ID (optional, for team usage)
+        MEM0_PROJECT_ID: Project ID (optional, for multi-project usage)
     """
     global _memory_client
     
@@ -43,58 +40,29 @@ def get_memory_client():
         return _memory_client
     
     try:
-        # Determine which mem0 implementation to use
-        use_platform = os.getenv("MEM0_USE_PLATFORM", "false").lower() == "true"
+        from mem0 import MemoryClient
         
-        # Get Gemini API key
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_key:
+        api_key = os.getenv("MEM0_API_KEY")
+        if not api_key:
             raise ValueError(
-                "GEMINI_API_KEY environment variable is required for memory inference. "
-                "This is the same API key you use for meal plan generation."
+                "MEM0_API_KEY environment variable is required. "
+                "Get your API key from https://app.mem0.ai"
             )
         
-        if use_platform:
-            # Option 1: Mem0 Platform (Managed - Recommended for production)
-            from mem0 import MemoryClient
-            
-            api_key = os.getenv("MEM0_API_KEY")
-            if not api_key:
-                raise ValueError(
-                    "MEM0_API_KEY environment variable is required when using Mem0 Platform. "
-                    "Get your API key from https://app.mem0.ai"
-                )
-            
-            # Note: Mem0 Platform handles LLM configuration server-side
-            # You may need to configure Gemini in the Mem0 dashboard
-            _memory_client = MemoryClient(api_key=api_key)
-            print("[mem0] Initialized Mem0 Platform client")
-        else:
-            # Option 2: Mem0 Open Source (Self-hosted with Gemini)
-            from mem0 import Memory
-            
-            # Configure mem0 to use Google Gemini for memory inference
-            config = {
-                "llm": {
-                    "provider": "gemini",
-                    "config": {
-                        "model": "gemini-1.5-flash",  # Fast and cost-effective for memory operations
-                        "temperature": 0.1,  # Low temperature for consistent memory extraction
-                        "api_key": gemini_key,
-                    }
-                },
-                # Optional: Configure embeddings (defaults to OpenAI if not specified)
-                # "embedder": {
-                #     "provider": "gemini",
-                #     "config": {
-                #         "model": "models/embedding-001",
-                #         "api_key": gemini_key,
-                #     }
-                # }
-            }
-            
-            _memory_client = Memory.from_config(config)
-            print("[mem0] Initialized Mem0 Open Source client with Google Gemini")
+        # Initialize Mem0 Platform client
+        # org_id and project_id are optional
+        client_kwargs = {"api_key": api_key}
+        
+        org_id = os.getenv("MEM0_ORG_ID")
+        if org_id:
+            client_kwargs["org_id"] = org_id
+        
+        project_id = os.getenv("MEM0_PROJECT_ID")
+        if project_id:
+            client_kwargs["project_id"] = project_id
+        
+        _memory_client = MemoryClient(**client_kwargs)
+        print(f"[mem0] ✓ Initialized Mem0 Platform client (org: {org_id or 'default'}, project: {project_id or 'default'})")
         
         return _memory_client
     
