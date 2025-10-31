@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
 
 
@@ -326,7 +326,7 @@ async def generate_meal_plan_with_agent(
   raw_response = response.text
   
   if not raw_response:
-    raise ValueError("Gemini returned no text response")
+    raise ValueError("Model returned invalid response")
 
   
   raw_json = raw_response.strip()
@@ -344,7 +344,7 @@ async def generate_meal_plan_with_agent(
   except json.JSONDecodeError as e:
     print(f"[meal_plan_agent] JSON parsing failed: {e}")
     print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
-    raise ValueError(f"Gemini output was not valid JSON: {e}")
+    raise ValueError("Model returned invalid response")
 
   
   if "explanation" not in parsed:
@@ -352,7 +352,11 @@ async def generate_meal_plan_with_agent(
     parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
   
-  result = DormdishMealPlannerSchema.model_validate(parsed)
+  try:
+    result = DormdishMealPlannerSchema.model_validate(parsed)
+  except ValidationError as e:
+    print(f"[meal_plan_agent] Model validation failed: {e}")
+    raise ValueError("Model returned invalid response")
 
   
   recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
@@ -478,7 +482,7 @@ async def generate_meal_plan_with_streaming(
       print(f"[meal_plan_agent] Raw response: {final_response[:500]}")
       yield {
         "type": "error",
-        "error": f"Gemini output was not valid JSON: {e}"
+        "error": "Please try again."
       }
       return
 
@@ -486,7 +490,15 @@ async def generate_meal_plan_with_streaming(
       print("[meal_plan_agent] Adding default explanation")
       parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
-    result = DormdishMealPlannerSchema.model_validate(parsed)
+    try:
+      result = DormdishMealPlannerSchema.model_validate(parsed)
+    except ValidationError as e:
+      print(f"[meal_plan_agent] Model validation failed: {e}")
+      yield {
+        "type": "error",
+        "error": "Please try again."
+      }
+      return
 
     # Recalculate totals from meals
     recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
@@ -514,7 +526,7 @@ async def generate_meal_plan_with_streaming(
     print(f"[meal_plan_agent] Streaming error: {e}")
     yield {
       "type": "error",
-      "error": f"Streaming failed: {str(e)}"
+      "error": "Please try again."
     }
 
 

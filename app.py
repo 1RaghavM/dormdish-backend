@@ -2480,7 +2480,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 user_preferences_context=user_preferences_context,
             )
         except ValueError as e:
-            raise HTTPException(status_code=500, detail=f"Agent execution failed: {e}")
+            raise HTTPException(status_code=500, detail="Please try again.")
         ai_end = time.time()
 
         plan_json = agent_result.model_dump()
@@ -2552,12 +2552,12 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         
         totals = plan_json.get('totals')
         if not isinstance(totals, dict):
-            raise HTTPException(status_code=500, detail="Model response missing totals block")
+            raise HTTPException(status_code=500, detail="Please try again.")
         try:
             final_cal = float(totals['calories'])
             final_prot = float(totals['protein_g'])
         except (KeyError, TypeError, ValueError):
-            raise HTTPException(status_code=500, detail="Model response missing valid totals")
+            raise HTTPException(status_code=500, detail="Please try again.")
         totals['calories'] = final_cal
         totals['protein_g'] = final_prot
         
@@ -2679,10 +2679,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
     except Exception as e:
         err_msg = str(e)
         print(f"❌ Meal plan generation error: {err_msg}")
-        # Normalize opaque SDK JSON errors to a clearer message
-        if "must be str, bytes or bytearray, not NoneType" in err_msg:
-            raise HTTPException(status_code=500, detail="Upstream model returned empty JSON payload. Please try again.")
-        raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {err_msg}")
+        # Don't expose error details to users
+        raise HTTPException(status_code=500, detail="Please try again.")
 
 
 @app.post("/generate-meal-plan-stream", summary="Generate Meal Plan with Streaming")
@@ -2863,7 +2861,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                     # Format as SSE
                     yield f"data: {json.dumps(chunk)}\n\n"
             except Exception as e:
-                error_chunk = {"type": "error", "error": str(e)}
+                print(f"❌ Streaming meal plan generation error: {e}")
+                error_chunk = {"type": "error", "error": "Please try again."}
                 yield f"data: {json.dumps(error_chunk)}\n\n"
 
         return StreamingResponse(
@@ -2880,7 +2879,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         raise
     except Exception as e:
         print(f"❌ Streaming meal plan generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Streaming meal plan generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Please try again.")
 
 
 @app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")

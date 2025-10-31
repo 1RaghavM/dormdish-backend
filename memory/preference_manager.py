@@ -68,7 +68,7 @@ class PreferenceManager:
         messages = [
             {
                 "role": "user",
-                "content": f"FAVORITE: I love {meal_plan_name} as a {meal_type} meal plan. This is one of my favorite meal plans."
+                "content": f"FAVORITE: {meal_plan_name} is my favorite {meal_type} meal plan. This is one of my favorite meal plans."
             }
         ]
         
@@ -115,7 +115,7 @@ class PreferenceManager:
         messages = [
             {
                 "role": "user",
-                "content": f"FAVORITE: I love {food_item_name} for {meal_type}. This is one of my favorite food items."
+                "content": f"FAVORITE: {food_item_name} is my favorite {meal_type} food item. This is one of my favorite food items."
             }
         ]
         
