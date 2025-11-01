@@ -453,6 +453,17 @@ class PreferenceManager:
                 ]
                 print(f"[mem0] ✓ Found {len(results)} {meal_type} favorites")
             
+            # Normalize metadata field names for frontend compatibility
+            if results:
+                for result in results:
+                    metadata = result.get("metadata", {})
+                    # Map "type" to "item_type" and "preference_type" for frontend compatibility
+                    if "type" in metadata and "item_type" not in metadata:
+                        metadata["item_type"] = metadata["type"]
+                    if "type" in metadata and "preference_type" not in metadata:
+                        metadata["preference_type"] = metadata["type"]
+                    # Metadata normalized for frontend compatibility
+            
             return results if results else []
         except Exception as e:
             print(f"[mem0] ⚠️ Error retrieving favorites: {e}")
@@ -528,6 +539,17 @@ class PreferenceManager:
                     if r.get("metadata", {}).get("meal_type") == meal_type
                 ]
                 print(f"[mem0] ✓ Found {len(results)} {meal_type} dislikes")
+            
+            # Normalize metadata field names for frontend compatibility
+            if results:
+                for result in results:
+                    metadata = result.get("metadata", {})
+                    # Map "type" to "item_type" and "preference_type" for frontend compatibility
+                    if "type" in metadata and "item_type" not in metadata:
+                        metadata["item_type"] = metadata["type"]
+                    if "type" in metadata and "preference_type" not in metadata:
+                        metadata["preference_type"] = metadata["type"]
+                    # Metadata normalized for frontend compatibility
             
             return results if results else []
         except Exception as e:
