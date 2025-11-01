@@ -15,8 +15,53 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+
+def _setup_serverless_environment():
+    """
+    Configure environment variables for serverless/read-only filesystem environments.
+    Sets TMPDIR to /tmp which is writable in Vercel and AWS Lambda.
+    Also sets HOME to /tmp if the current HOME is read-only.
+    """
+    # Set TMPDIR to /tmp for serverless environments (Vercel, AWS Lambda, etc.)
+    # /tmp is the only writable directory in these environments
+    if os.path.exists('/tmp'):
+        os.environ.setdefault('TMPDIR', '/tmp')
+        os.environ.setdefault('TMP', '/tmp')
+        os.environ.setdefault('TEMP', '/tmp')
+    
+    # Check if we're in a serverless environment (Vercel, AWS Lambda)
+    # Detect by checking if HOME is read-only or if we're in a known serverless path
+    home_dir = os.environ.get('HOME', '')
+    is_serverless = (
+        'sbx_user' in home_dir or  # Vercel sandbox
+        'LAMBDA_TASK_ROOT' in os.environ or  # AWS Lambda
+        'VERCEL' in os.environ  # Vercel environment
+    )
+    
+    # Also check if HOME is actually writable
+    if home_dir:
+        try:
+            test_file = os.path.join(home_dir, '.test_write_check')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            home_writable = True
+        except (OSError, PermissionError):
+            home_writable = False
+    else:
+        home_writable = False
+    
+    # If we're in serverless or HOME isn't writable, set HOME to /tmp
+    if (is_serverless or not home_writable) and os.path.exists('/tmp'):
+        os.environ['HOME'] = '/tmp'
+        print(f"[mem0] Configured for serverless environment: HOME={os.environ['HOME']}, TMPDIR={os.environ.get('TMPDIR')}")
+
+
 # Initialize mem0 client as None (lazy initialization)
 _memory_client: Optional[object] = None
+
+# Setup serverless environment on module import
+_setup_serverless_environment()
 
 
 def get_memory_client():
