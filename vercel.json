@@ -1,12 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/index.py": {
-      "runtime": "@vercel/python",
-      "includeFiles": "extract.py, memory/**"
-    }
-    
-  },
   "routes": [
     {
       "src": "/(.*)",
