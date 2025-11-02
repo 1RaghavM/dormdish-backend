@@ -19,9 +19,9 @@ import httpx
 import traceback
 from difflib import get_close_matches
 from dotenv import load_dotenv
-from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, EmailStr
 from supabase import Client, create_client
@@ -3796,6 +3796,393 @@ def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str]
         asyncio.run(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
     else:
         loop.create_task(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
+
+
+# ============================================================================
+# Google Calendar Integration Endpoints
+# ============================================================================
+
+from google_calendar_service import calendar_service
+
+class GoogleCalendarAuthRequest(BaseModel):
+    """Request to initiate Google Calendar OAuth"""
+    pass
+
+class GoogleCalendarCallbackRequest(BaseModel):
+    """OAuth callback data"""
+    code: str
+    state: str
+
+class GoogleCalendarEventsRequest(BaseModel):
+    """Request to get calendar events for a specific date"""
+    date: str  # ISO format YYYY-MM-DD
+
+class ExportMealPlanRequest(BaseModel):
+    """Request to export meal plan to Google Calendar"""
+    plan_id: str
+    date: str  # ISO format YYYY-MM-DD
+
+
+@app.post('/calendar/auth/initiate', summary='Initiate Google Calendar OAuth flow')
+async def initiate_google_calendar_auth(current_user=Depends(get_current_user)):
+    """
+    Start Google Calendar OAuth flow
+    Returns authorization URL for user to visit
+    """
+    try:
+        # Generate a random state for CSRF protection
+        import secrets as sec
+        state = sec.token_urlsafe(32)
+        
+        # Store state in session (you may want to use Redis or similar)
+        # For now, we'll include user_id in the state
+        state_with_user = f"{current_user['id']}:{state}"
+        
+        # Create authorization URL
+        auth_url = calendar_service.create_authorization_url(state_with_user)
+        
+        return {
+            "success": True,
+            "authorization_url": auth_url,
+            "state": state_with_user
+        }
+    except Exception as e:
+        logger.error(f"Failed to initiate Google Calendar auth: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate authorization")
+
+
+@app.get('/calendar/auth/callback', summary='Handle Google Calendar OAuth callback (GET redirect)')
+async def google_calendar_callback_get(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
+    """
+    Handle OAuth callback from Google (GET request with query params).
+    Google redirects here after user authorization. Processes callback and redirects to app.
+    """
+    if error:
+        # User denied access or error occurred
+        logger.warning(f"OAuth callback error: {error}")
+        redirect_url = f"dormdish://calendar-callback?error={error}"
+        return RedirectResponse(url=redirect_url)
+    
+    if not code or not state:
+        logger.error("OAuth callback missing code or state")
+        redirect_url = "dormdish://calendar-callback?error=missing_params"
+        return RedirectResponse(url=redirect_url)
+    
+    try:
+        # Extract user_id from state
+        state_parts = state.split(':', 1)
+        if len(state_parts) != 2:
+            logger.error(f"Invalid state format: {state}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        user_id = state_parts[0]
+        
+        # Exchange code for credentials
+        creds_dict = calendar_service.exchange_code_for_credentials(code, state)
+        
+        # Store credentials in database
+        try:
+            supabase.table("users").update({
+                "google_calendar_credentials": creds_dict,
+                "google_calendar_connected": True,
+                "google_calendar_connected_at": datetime.now().isoformat()
+            }).eq("id", user_id).execute()
+            
+            logger.info(f"Stored Google Calendar credentials for user {user_id}")
+        except Exception as db_err:
+            logger.error(f"Failed to store credentials: {db_err}")
+            redirect_url = "dormdish://calendar-callback?error=save_failed"
+            return RedirectResponse(url=redirect_url)
+        
+        # Redirect to app with success
+        redirect_url = "dormdish://calendar-callback?success=true"
+        return RedirectResponse(url=redirect_url)
+        
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        import traceback
+        traceback.print_exc()
+        redirect_url = "dormdish://calendar-callback?error=callback_failed"
+        return RedirectResponse(url=redirect_url)
+
+
+@app.post('/calendar/auth/callback', summary='Handle Google Calendar OAuth callback (POST)')
+async def google_calendar_callback_post(payload: GoogleCalendarCallbackRequest):
+    """
+    Handle OAuth callback via POST (for manual API calls if needed)
+    """
+    try:
+        # Extract user_id from state
+        state_parts = payload.state.split(':', 1)
+        if len(state_parts) != 2:
+            raise HTTPException(status_code=400, detail="Invalid state parameter")
+        
+        user_id = state_parts[0]
+        
+        # Exchange code for credentials
+        creds_dict = calendar_service.exchange_code_for_credentials(
+            payload.code,
+            payload.state
+        )
+        
+        # Store credentials in database
+        try:
+            # Update user with Google Calendar credentials
+            supabase.table("users").update({
+                "google_calendar_credentials": creds_dict,
+                "google_calendar_connected": True,
+                "google_calendar_connected_at": datetime.now().isoformat()
+            }).eq("id", user_id).execute()
+            
+            logger.info(f"Stored Google Calendar credentials for user {user_id}")
+        except Exception as db_err:
+            logger.error(f"Failed to store credentials: {db_err}")
+            raise HTTPException(status_code=500, detail="Failed to save credentials")
+        
+        return {
+            "success": True,
+            "message": "Google Calendar connected successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to complete authorization")
+
+
+@app.get('/calendar/status', summary='Check Google Calendar connection status')
+async def check_calendar_status(current_user=Depends(get_current_user)):
+    """Check if user has connected their Google Calendar"""
+    is_connected = current_user.get('google_calendar_connected', False)
+    connected_at = current_user.get('google_calendar_connected_at')
+    
+    return {
+        "success": True,
+        "connected": is_connected,
+        "connected_at": connected_at
+    }
+
+
+@app.post('/calendar/events/day', summary='Get calendar events for a specific day')
+async def get_calendar_events_for_day(
+    payload: GoogleCalendarEventsRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Get all calendar events for a specific day
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # Parse date
+        try:
+            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get events
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"  # TODO: Get from user preferences
+        )
+        
+        return {
+            "success": True,
+            "date": payload.date,
+            "events": events,
+            "count": len(events)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get calendar events: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch calendar events")
+
+
+@app.post('/calendar/meal-slots/find', summary='Find optimal meal time slots')
+async def find_meal_time_slots(
+    payload: GoogleCalendarEventsRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Analyze user's schedule and find optimal meal time slots
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # Parse date
+        try:
+            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get events for the day
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Find meal slots
+        meal_slots = calendar_service.find_meal_time_slots(
+            events,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # TODO: MEM0 INTEGRATION - Save meal slots to memory
+        # ====================================================
+        # Uncomment and implement the following once mem0 integration is ready:
+        #
+        # from memory.mem0_client import get_mem0_client
+        # 
+        # try:
+        #     mem0 = get_mem0_client()
+        #     day_of_week = date_obj.strftime("%A")
+        #     
+        #     # Create context for the AI
+        #     context = f"On {day_of_week}, {date_obj.isoformat()}, "
+        #     context += f"user has {len(events)} scheduled events. "
+        #     
+        #     if events:
+        #         event_summaries = [e['summary'] for e in events[:5]]  # First 5 events
+        #         context += f"Events include: {', '.join(event_summaries)}. "
+        #     
+        #     context += f"Optimal meal times found: "
+        #     for meal_type, slot in meal_slots.items():
+        #         start_time = datetime.datetime.fromisoformat(slot['start']).strftime("%I:%M %p")
+        #         context += f"{meal_type.capitalize()} at {start_time}, "
+        #     
+        #     # Save to mem0
+        #     mem0.add(
+        #         messages=[{"role": "user", "content": context}],
+        #         user_id=current_user['id'],
+        #         metadata={
+        #             "type": "meal_schedule",
+        #             "date": str(date_obj),
+        #             "day_of_week": day_of_week
+        #         }
+        #     )
+        #     logger.info(f"Saved meal slots to mem0 for user {current_user['id']}")
+        # except Exception as mem_err:
+        #     logger.warning(f"Failed to save to mem0: {mem_err}")
+        #     # Don't fail the request if mem0 fails
+        # ====================================================
+        
+        return {
+            "success": True,
+            "date": payload.date,
+            "events_count": len(events),
+            "meal_slots": meal_slots,
+            "events": events  # Include events for context
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to find meal slots: {e}")
+        raise HTTPException(status_code=500, detail="Failed to find meal time slots")
+
+
+@app.post('/calendar/export-meal-plan', summary='Export meal plan to Google Calendar')
+async def export_meal_plan_to_calendar(
+    payload: ExportMealPlanRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Export a meal plan to Google Calendar
+    Creates calendar events for each meal at optimal times
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # Parse date
+        try:
+            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get the meal plan from database
+        try:
+            plan_result = supabase.table("saved_meal_plans")\
+                .select("*")\
+                .eq("id", payload.plan_id)\
+                .eq("user_id", current_user['id'])\
+                .execute()
+            
+            if not plan_result.data:
+                raise HTTPException(status_code=404, detail="Meal plan not found")
+            
+            saved_plan = plan_result.data[0]
+            meal_plan_data = saved_plan.get('meal_plan_data', {})
+            
+            # Extract meal plan (handle nested structure)
+            meal_plan = meal_plan_data.get('meal_plan', meal_plan_data)
+            dining_hall = saved_plan.get('dining_hall', 'Dining Hall')
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch meal plan: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch meal plan")
+        
+        # Get events for the day
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Find meal slots
+        meal_slots = calendar_service.find_meal_time_slots(
+            events,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Export to calendar
+        created_events = calendar_service.export_meal_plan_to_calendar(
+            creds_dict,
+            meal_plan,
+            meal_slots,
+            date_obj,
+            dining_hall
+        )
+        
+        return {
+            "success": True,
+            "message": "Meal plan exported to Google Calendar",
+            "events_created": created_events,
+            "meal_slots": meal_slots
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export meal plan: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export meal plan to calendar")
 
 if __name__ == '__main__':
     import uvicorn

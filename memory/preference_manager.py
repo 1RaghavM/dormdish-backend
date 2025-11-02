@@ -348,13 +348,12 @@ class PreferenceManager:
         print(f"[mem0] Searching preferences for user {user_id}")
         
         try:
-            # Mem0 Platform API v2: user_id must be in filters (required)
-            filters = {"user_id": user_id}
-            
+            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
             def _search():
                 return self.memory.search(
                     query=query,
-                    filters=filters,
+                    user_id=user_id,
+                    filters={},  # Additional metadata filters can go here
                     limit=100  # Get more results for general preferences
                 )
             
@@ -401,13 +400,12 @@ class PreferenceManager:
         print(f"[mem0] Searching favorites for user {user_id} with query '{query}'")
         
         try:
-            # Mem0 Platform API v2: user_id must be in filters (required)
-            filters = {"user_id": user_id}
-            
+            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
             def _search():
                 return self.memory.search(
                     query=query,
-                    filters=filters,
+                    user_id=user_id,
+                    filters={},  # Additional metadata filters can go here
                     limit=50  # Get more results for favorites
                 )
             
@@ -494,13 +492,12 @@ class PreferenceManager:
         print(f"[mem0] Searching dislikes for user {user_id} with query '{query}'")
         
         try:
-            # Mem0 Platform API v2: user_id must be in filters (required)
-            filters = {"user_id": user_id}
-            
+            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
             def _search():
                 return self.memory.search(
                     query=query,
-                    filters=filters,
+                    user_id=user_id,
+                    filters={},  # Additional metadata filters can go here
                     limit=50  # Get more results for dislikes
                 )
             
@@ -577,13 +574,12 @@ class PreferenceManager:
         print(f"[mem0] Searching user profile for user {user_id}")
         
         try:
-            # Mem0 Platform API v2: user_id must be in filters (required)
-            filters = {"user_id": user_id}
-            
+            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
             def _search():
                 return self.memory.search(
                     query=query,
-                    filters=filters,
+                    user_id=user_id,
+                    filters={},  # Additional metadata filters can go here
                     limit=10  # Get recent profile memories
                 )
             
@@ -663,14 +659,13 @@ class PreferenceManager:
         print(f"[mem0] Getting all memories for user {user_id}")
         
         try:
-            # Mem0 Platform API v2: user_id must be in filters (required)
-            filters = {"user_id": user_id}
-            
+            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
             # Broad query to get all memories for this user
             def _search():
                 return self.memory.search(
                     query="preferences favorites dislikes profile",  # Broad query
-                    filters=filters,
+                    user_id=user_id,
+                    filters={},  # Additional metadata filters can go here
                     limit=100  # Get many results for debugging
                 )
             
