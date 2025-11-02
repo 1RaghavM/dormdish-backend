@@ -3873,16 +3873,57 @@ async def google_calendar_callback_get(
         return RedirectResponse(url=redirect_url)
     
     try:
-        # Extract user_id from state
-        state_parts = state.split(':', 1)
-        if len(state_parts) != 2:
-            logger.error(f"Invalid state format: {state}")
+        # URL decode state in case Google encoded it
+        from urllib.parse import unquote
+        
+        # Log received state for debugging
+        logger.info(f"[OAuth] Received state: {state}")
+        logger.info(f"[OAuth] Received code: {code[:20] if code else None}...")
+        
+        # Try to decode if it looks URL-encoded
+        decoded_state = state
+        try:
+            decoded_state = unquote(state)
+            if decoded_state != state:
+                logger.info(f"[OAuth] State was URL-encoded, decoded: {decoded_state[:50]}...")
+                state = decoded_state
+        except Exception:
+            # If unquote fails, use original state
+            pass
+        
+        # State should be in format: "user_id:random_token"
+        # Check if it's valid before splitting
+        if not state or not isinstance(state, str):
+            logger.error(f"[OAuth] State is None or invalid type: {type(state)}")
             redirect_url = "dormdish://calendar-callback?error=invalid_state"
             return RedirectResponse(url=redirect_url)
         
-        user_id = state_parts[0]
+        # Extract user_id from state
+        if ':' not in state:
+            logger.error(f"[OAuth] Invalid state format - no colon separator: {state}")
+            logger.error(f"[OAuth] State length: {len(state)}, first 50 chars: {state[:50]}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
         
-        # Exchange code for credentials
+        state_parts = state.split(':', 1)
+        if len(state_parts) != 2:
+            logger.error(f"[OAuth] Invalid state format - wrong split result: {state_parts}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        user_id = state_parts[0].strip()
+        state_token = state_parts[1].strip()
+        
+        # Verify user_id is not empty
+        if not user_id:
+            logger.error(f"[OAuth] Empty user_id in state: {state}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        logger.info(f"[OAuth] Extracted user_id: {user_id}, token_length: {len(state_token)}")
+        
+        # Exchange code for credentials (pass the ORIGINAL state as received from Google)
+        # But use the decoded state for the exchange
         creds_dict = calendar_service.exchange_code_for_credentials(code, state)
         
         # Store credentials in database

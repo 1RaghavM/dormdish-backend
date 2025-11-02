@@ -52,7 +52,7 @@ class GoogleCalendarService:
         Create an authorization URL for OAuth flow
         
         Args:
-            state: A random state string for CSRF protection
+            state: State string for CSRF protection (format: "user_id:random_token")
             
         Returns:
             Authorization URL for user to visit
@@ -62,12 +62,48 @@ class GoogleCalendarService:
             scopes=SCOPES,
             redirect_uri=self.client_config["web"]["redirect_uris"][0]
         )
+        
+        # Set state on the flow object
         flow.state = state
+        
+        # Generate authorization URL
         authorization_url, _ = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
             prompt='consent'
         )
+        
+        # IMPORTANT: Ensure state is explicitly in the URL
+        # Google's Flow might not always include our custom state
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        
+        parsed = urlparse(authorization_url)
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        
+        # Force the state parameter to be our custom state
+        query_params['state'] = [state]
+        
+        # Rebuild URL with explicit state
+        new_query = urlencode(query_params, doseq=True)
+        authorization_url = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment
+        ))
+        
+        # Log for debugging
+        print(f"[OAuth] Created auth URL with state: {state[:50]}...")
+        if 'state=' in authorization_url:
+            # Verify state is correct in URL
+            url_state = parse_qs(urlparse(authorization_url).query).get('state', [None])[0]
+            if url_state == state:
+                print(f"[OAuth] ✅ State correctly set in authorization URL")
+            else:
+                print(f"[OAuth] ⚠️ State mismatch! Expected: {state[:30]}..., Got: {url_state[:30] if url_state else 'None'}...")
+        
         return authorization_url
     
     def exchange_code_for_credentials(self, code: str, state: str) -> Dict:
