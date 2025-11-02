@@ -34,7 +34,7 @@ class GoogleCalendarService:
         # For production, set GOOGLE_REDIRECT_URI to your deployed backend URL
         redirect_uri = os.getenv(
             "GOOGLE_REDIRECT_URI", 
-            "http://localhost:8000/calendar/auth/callback"
+            "https://dormdish-backend-86atpoyyh-raghav-mehtas-projects-9e41f86c.vercel.app/calendar/auth/callback"
         )
         
         self.client_config = {
