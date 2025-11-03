@@ -4028,7 +4028,7 @@ async def get_calendar_events_for_day(
         
         # Parse date
         try:
-            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+            date_obj = datetime.fromisoformat(payload.date).date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
@@ -4071,7 +4071,7 @@ async def find_meal_time_slots(
         
         # Parse date
         try:
-            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+            date_obj = datetime.fromisoformat(payload.date).date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
@@ -4109,7 +4109,7 @@ async def find_meal_time_slots(
         #     
         #     context += f"Optimal meal times found: "
         #     for meal_type, slot in meal_slots.items():
-        #         start_time = datetime.datetime.fromisoformat(slot['start']).strftime("%I:%M %p")
+        #         start_time = datetime.fromisoformat(slot['start']).strftime("%I:%M %p")
         #         context += f"{meal_type.capitalize()} at {start_time}, "
         #     
         #     # Save to mem0
@@ -4162,7 +4162,7 @@ async def export_meal_plan_to_calendar(
         
         # Parse date
         try:
-            date_obj = datetime.datetime.fromisoformat(payload.date).date()
+            date_obj = datetime.fromisoformat(payload.date).date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
