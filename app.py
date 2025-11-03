@@ -3996,6 +3996,107 @@ async def google_calendar_callback_post(payload: GoogleCalendarCallbackRequest):
         raise HTTPException(status_code=500, detail="Failed to complete authorization")
 
 
+@app.get('/auth/google/callback', summary='Handle Google OAuth callback for sign-in/sign-up')
+async def auth_google_callback(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
+    """
+    Handle OAuth callback from Google for user authentication.
+    Exchanges authorization code for ID token and redirects to mobile app.
+    """
+    if error:
+        # User denied access or error occurred
+        logger.warning(f"Google OAuth callback error: {error}")
+        redirect_url = f"dormdish://auth-callback?error={error}"
+        return RedirectResponse(url=redirect_url)
+    
+    if not code:
+        logger.error("OAuth callback missing authorization code")
+        redirect_url = "dormdish://auth-callback?error=missing_code"
+        return RedirectResponse(url=redirect_url)
+    
+    try:
+        # Exchange authorization code for ID token
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_AUTH_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not google_client_id or not google_client_secret:
+            logger.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET")
+            redirect_url = "dormdish://auth-callback?error=server_config_error"
+            return RedirectResponse(url=redirect_url)
+        
+        if not redirect_uri:
+            logger.error("Missing GOOGLE_AUTH_REDIRECT_URI or GOOGLE_REDIRECT_URI")
+            redirect_url = "dormdish://auth-callback?error=server_config_error"
+            return RedirectResponse(url=redirect_url)
+        
+        # Exchange code for tokens
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "code": code,
+            "client_id": google_client_id,
+            "client_secret": google_client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code"
+        }
+        
+        async def _exchange_token():
+            resp = httpx.post(token_url, data=token_data, timeout=10.0)
+            resp.raise_for_status()
+            return resp.json()
+        
+        token_response = await asyncio.to_thread(_exchange_token)
+        
+        # Extract ID token from response
+        id_token = token_response.get("id_token")
+        if not id_token:
+            logger.error("No ID token in token exchange response")
+            redirect_url = "dormdish://auth-callback?error=no_id_token"
+            return RedirectResponse(url=redirect_url)
+        
+        # Verify the ID token
+        try:
+            token_data = await _verify_google_id_token(id_token)
+            email = token_data.get('email', '').lower()
+            given_name = token_data.get('given_name') or ''
+            family_name = token_data.get('family_name') or ''
+            
+            if not email:
+                raise HTTPException(status_code=400, detail="Google token missing email")
+        except Exception as e:
+            logger.error(f"Failed to verify ID token: {e}")
+            redirect_url = f"dormdish://auth-callback?error=token_verification_failed"
+            return RedirectResponse(url=redirect_url)
+        
+        # Encode the ID token and user info for the app
+        from urllib.parse import urlencode
+        params = urlencode({
+            'id_token': id_token,
+            'email': email,
+            'given_name': given_name,
+            'family_name': family_name,
+        })
+        
+        # Redirect to app with ID token
+        redirect_url = f"dormdish://auth-callback?{params}"
+        logger.info(f"Redirecting to app with Google auth data for {email}")
+        return RedirectResponse(url=redirect_url)
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Token exchange failed: {e.response.text}")
+        redirect_url = "dormdish://auth-callback?error=token_exchange_failed"
+        return RedirectResponse(url=redirect_url)
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        import traceback
+        traceback.print_exc()
+        redirect_url = "dormdish://auth-callback?error=callback_failed"
+        return RedirectResponse(url=redirect_url)
+
+
 @app.get('/calendar/status', summary='Check Google Calendar connection status')
 async def check_calendar_status(current_user=Depends(get_current_user)):
     """Check if user has connected their Google Calendar"""
