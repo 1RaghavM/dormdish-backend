@@ -2263,16 +2263,28 @@ async def track_weight(weight_data: TrackWeightRequest, current_user=Depends(get
 async def get_weight_history(
     limit: int = 30,
     offset: int = 0,
+    days: Optional[int] = None,  # Optional: get entries from last N days
     current_user=Depends(get_current_user)
 ):
     """
     Get user's weight history, ordered by date (most recent first).
     Returns weight entries for tracking progress over time.
+    
+    If 'days' parameter is provided, returns entries from the last N days.
+    Otherwise, returns the last N entries (limited by 'limit').
     """
     try:
-        response = supabase.table("weight_history")\
+        query = supabase.table("weight_history")\
             .select("id, weight_lbs, date, created_at, updated_at")\
-            .eq("user_id", current_user["id"])\
+            .eq("user_id", current_user["id"])
+        
+        # If 'days' parameter is provided, filter by date range
+        if days is not None:
+            today = datetime.now(ZoneInfo("America/New_York")).date()
+            start_date = (today - timedelta(days=days - 1)).isoformat()  # days - 1 to include today
+            query = query.gte("date", start_date)
+        
+        response = query\
             .order("date", desc=True)\
             .range(offset, offset + limit - 1)\
             .execute()
