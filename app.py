@@ -1174,6 +1174,61 @@ async def auth_google_register(data: GoogleRegisterRequest):
         raise HTTPException(status_code=500, detail="Google registration failed")
 
 
+@app.post('/auth/google/initiate', summary='Initiate Google OAuth flow for sign-in/sign-up')
+async def initiate_google_auth():
+    """
+    Start Google OAuth flow for authentication.
+    Returns authorization URL for user to visit.
+    This is similar to the calendar OAuth flow but for user authentication.
+    """
+    try:
+        # Get Google OAuth client credentials
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_AUTH_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not google_client_id or not google_client_secret:
+            logger.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+        
+        if not redirect_uri:
+            # Default to deployed backend callback URL
+            redirect_uri = "https://dormdish-backend-git-test-raghav-mehtas-projects-9e41f86c.vercel.app/auth/google/callback"
+        
+        # Generate a random state for CSRF protection
+        import secrets as sec
+        state = sec.token_urlsafe(32)
+        
+        # Build authorization URL
+        from urllib.parse import urlencode
+        
+        auth_params = {
+            'client_id': google_client_id,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid profile email',
+            'access_type': 'offline',
+            'prompt': 'consent',
+            'state': state
+        }
+        
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(auth_params)}"
+        
+        logger.info(f"[auth.google.initiate] Created auth URL with state: {state[:20]}...")
+        
+        return {
+            "success": True,
+            "authorization_url": auth_url,
+            "state": state
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initiate Google auth: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to initiate authorization")
+
 
 hi = "hi"
 class UpdateProfileRequest(BaseModel):
@@ -4029,9 +4084,9 @@ async def auth_google_callback(
             return RedirectResponse(url=redirect_url)
         
         if not redirect_uri:
-            logger.error("Missing GOOGLE_AUTH_REDIRECT_URI or GOOGLE_REDIRECT_URI")
-            redirect_url = "dormdish://auth-callback?error=server_config_error"
-            return RedirectResponse(url=redirect_url)
+            # Default to deployed backend callback URL
+            redirect_uri = "https://dormdish-backend-git-test-raghav-mehtas-projects-9e41f86c.vercel.app/auth/google/callback"
+            logger.info(f"[auth.google.callback] Using default redirect URI: {redirect_uri}")
         
         # Exchange code for tokens
         token_url = "https://oauth2.googleapis.com/token"
