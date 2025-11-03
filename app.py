@@ -4087,6 +4087,10 @@ async def auth_google_callback(
             # Default to deployed backend callback URL
             redirect_uri = "https://dormdish-backend-git-test-raghav-mehtas-projects-9e41f86c.vercel.app/auth/google/callback"
             logger.info(f"[auth.google.callback] Using default redirect URI: {redirect_uri}")
+        else:
+            logger.info(f"[auth.google.callback] Using redirect URI from env: {redirect_uri}")
+        
+        logger.info(f"[auth.google.callback] Received code={code[:20] if code else None}..., state={state[:20] if state else None}...")
         
         # Exchange code for tokens
         token_url = "https://oauth2.googleapis.com/token"
@@ -4098,10 +4102,20 @@ async def auth_google_callback(
             "grant_type": "authorization_code"
         }
         
-        async def _exchange_token():
-            resp = httpx.post(token_url, data=token_data, timeout=10.0)
-            resp.raise_for_status()
-            return resp.json()
+        def _exchange_token():
+            """Synchronous function to exchange authorization code for tokens"""
+            try:
+                resp = httpx.post(token_url, data=token_data, timeout=10.0)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                error_detail = e.response.text if e.response else str(e)
+                logger.error(f"Token exchange HTTP error: {e.response.status_code} - {error_detail}")
+                logger.error(f"Token exchange request data: client_id={google_client_id[:20]}..., redirect_uri={redirect_uri}")
+                raise
+            except Exception as e:
+                logger.error(f"Token exchange exception: {type(e).__name__}: {e}")
+                raise
         
         token_response = await asyncio.to_thread(_exchange_token)
         
