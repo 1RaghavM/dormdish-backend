@@ -16,9 +16,15 @@ from googleapiclient.errors import HttpError
 
 
 # Google Calendar API scopes
-# Note: Google may also grant userinfo scopes (email, profile) automatically
-# We request calendar, but accept additional scopes if granted
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+# Request all scopes Google will grant to avoid scope mismatch errors
+# When include_granted_scopes is enabled, Google returns userinfo scopes automatically
+# By requesting them explicitly, we prevent oauthlib from raising validation errors
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'openid'
+]
 
 # Default meal time windows (can be customized per user)
 DEFAULT_MEAL_WINDOWS = {
@@ -119,12 +125,7 @@ class GoogleCalendarService:
         Returns:
             Dictionary with credential data
         """
-        # Fetch token - Google may return additional scopes (userinfo, openid, etc.)
-        # This happens when include_granted_scopes is enabled or Google adds default scopes
-        # We need to handle scope changes gracefully since oauthlib validates scopes strictly
-        import warnings
-        
-        # Create flow with our requested scopes first
+        # Create flow - we now request all scopes Google will grant to avoid mismatches
         flow = Flow.from_client_config(
             self.client_config,
             scopes=SCOPES,
@@ -132,50 +133,18 @@ class GoogleCalendarService:
             state=state
         )
         
+        # Exchange authorization code for credentials
+        # By requesting all scopes (calendar, userinfo, openid), there should be no mismatch
         try:
-            # Attempt token exchange - suppress scope validation warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message=".*Scope has changed.*")
-                warnings.filterwarnings("ignore", category=Warning)
-                
-                flow.fetch_token(code=code)
-                print(f"[OAuth] ✅ Token exchange successful")
-                
-        except (Warning, Exception) as e:
+            flow.fetch_token(code=code)
+            print(f"[OAuth] ✅ Token exchange successful")
+            print(f"[OAuth] Granted scopes: {flow.credentials.scopes if flow.credentials else 'unknown'}")
+            
+        except Exception as e:
             error_str = str(e)
             error_type = type(e).__name__
-            
-            # Check if it's a scope-related error/warning
-            is_scope_error = (
-                "Scope has changed" in error_str or 
-                ("scope" in error_str.lower() and "changed" in error_str.lower())
-            )
-            
-            if is_scope_error:
-                print(f"[OAuth] Scope mismatch detected: {error_type}")
-                print(f"[OAuth] Google granted additional scopes (userinfo, openid, etc.) - this is expected and safe")
-                print(f"[OAuth] Rebuilding flow to accept all granted scopes...")
-                
-                # Rebuild flow without scope restrictions to accept whatever Google granted
-                # This is safe - we only use calendar scope, but Google may grant more
-                flow_flexible = Flow.from_client_config(
-                    self.client_config,
-                    scopes=None,  # Don't restrict scopes - accept what Google grants
-                    redirect_uri=self.client_config["web"]["redirect_uris"][0],
-                    state=state
-                )
-                
-                # Fetch token with flexible scope handling
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore")
-                    flow_flexible.fetch_token(code=code)
-                
-                flow = flow_flexible
-                print(f"[OAuth] ✅ Token exchange successful after accepting all scopes")
-            else:
-                # Re-raise if it's a different error
-                print(f"[OAuth] ❌ Unexpected error during token exchange: {error_type} - {error_str}")
-                raise
+            print(f"[OAuth] ❌ Token exchange failed: {error_type} - {error_str}")
+            raise
         
         credentials = flow.credentials
         return {
