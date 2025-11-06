@@ -3260,33 +3260,56 @@ async def cleanup_old_meal_plans(current_user=Depends(get_current_user)):
         }
 
 
+@lru_cache(maxsize=1)
+def load_universities_config() -> List[dict]:
+    """Load universities and dining halls from config file"""
+    config_path = os.path.join(os.path.dirname(__file__), 'universities_config.json')
+    fallback_dining_halls = [
+        {
+            "id": "rutgers",
+            "university": "rutgers",
+            "name": "Rutgers University",
+            "dining_halls": [
+                {"id": "busch", "name": "Busch Dining Hall"},
+                {"id": "livingston", "name": "Livingston Dining Commons"},
+                {"id": "brower", "name": "Brower Commons"},
+                {"id": "neilson", "name": "Neilson Dining Hall"},
+                {"id": "the-atrium", "name": "The Atrium"},
+            ],
+        },
+        {
+            "id": "hopkins",
+            "university": "hopkins",
+            "name": "Johns Hopkins University",
+            "dining_halls": [
+                {"id": "hopkins-cafe", "name": "Hopkins Cafe"},
+                {"id": "nolans-on-33rd", "name": "Nolan's on 33rd"},
+                {"id": "peabody-institute", "name": "Peabody Institute"},
+            ],
+        },
+    ]
+    
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                universities = config.get('universities', [])
+                if universities:
+                    logger.info(f"✅ Loaded {len(universities)} universities from config file")
+                    return universities
+                else:
+                    logger.warning("⚠️ No universities found in config file, using fallback")
+        else:
+            logger.warning(f"⚠️ Universities config file not found at {config_path}, using fallback")
+    except Exception as e:
+        logger.error(f"⚠️ Failed to load universities config: {e}, using fallback")
+    
+    return fallback_dining_halls
+
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
 async def get_supported_dining_halls():
-    """Get list of supported dining halls"""
-    fallback_dining_halls = [
-            {
-                "university": "rutgers",
-                "name": "Rutgers University",
-                "dining_halls": [
-                    {"id": "busch", "name": "Busch Dining Hall"},
-                    {"id": "livingston", "name": "Livingston Dining Commons"},
-                    {"id": "brower", "name": "Brower Commons"},
-                    {"id": "neilson", "name": "Neilson Dining Hall"},
-                    {"id": "the-atrium", "name": "The Atrium"},
-                ],
-            },
-            {
-                "university": "hopkins",
-                "name": "Johns Hopkins University",
-                "dining_halls": [
-                    {"id": "hopkins-cafe", "name": "Hopkins Cafe"},
-                    {"id": "nolans-on-33rd", "name": "Nolan's on 33rd"},
-                    {"id": "peabody-institute", "name": "Peabody Institute"},
-                ],
-            },
-        ]
-        
-    return fallback_dining_halls
+    """Get list of supported dining halls from configuration"""
+    return load_universities_config()
 
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
