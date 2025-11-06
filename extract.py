@@ -23,6 +23,41 @@ def _clean(text: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def title_case_name(name: str | None) -> str:
+    """Convert menu item name to proper title case.
+    Handles common food name patterns and preserves special cases.
+    """
+    if not name:
+        return ""
+    name = _clean(name)
+    if not name:
+        return ""
+    
+    # If already mostly lowercase or mixed case, just capitalize first letter of each word
+    # If all caps, use title() but handle special cases
+    if name.isupper():
+        # Use title() but fix common issues
+        name = name.title()
+        # Fix common food name patterns
+        # Preserve "And" in "Mac And Cheese"
+        name = re.sub(r'\bAnd\b', 'and', name, flags=re.IGNORECASE)
+        # Preserve "Or" in "X Or Y"
+        name = re.sub(r'\bOr\b', 'or', name, flags=re.IGNORECASE)
+        # Common prefixes that should be lowercase
+        name = re.sub(r'\bOf\b', 'of', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bThe\b', 'the', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bA\b', 'a', name, flags=re.IGNORECASE)
+        # Capitalize first letter
+        if name:
+            name = name[0].upper() + name[1:]
+    else:
+        # Already mixed case, just ensure first letter is capitalized
+        if name:
+            name = name[0].upper() + name[1:]
+    
+    return name
+
+
 def build_menu_url(date_str: str, location_num: str = "03", location_name: str = "Livingston Dining Commons") -> str:
     # FoodPro expects M/D/YYYY
     try:
@@ -514,7 +549,7 @@ def to_meals_output(categorized: dict, meal_type: str, date: str) -> dict:
         block = {"category": cat, "foods": []}
         for f in foods:
             food_obj = {
-                "name": f.get("name"),
+                "name": title_case_name(f.get("name")),
                 "calories": f.get("calories"),
                 "g_protein": f.get("protein_g"),
                 "g_fat": f.get("g_fat"),
@@ -598,7 +633,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 cat_for_item = current_category or _nearest_prev_category(row) or "Uncategorized"
 
                 item = {
-                    "name": name,
+                    "name": title_case_name(name),
                     "category": cat_for_item,
                     "nutrition_url": full,
                 }
@@ -611,7 +646,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                     nut = {}
                 label_name = _clean(nut.get("item_name")) if nut.get("item_name") else None
                 if label_name:
-                    item["name"] = label_name
+                    item["name"] = title_case_name(label_name)
                 if nut.get("calories") is not None:
                     item["calories"] = nut.get("calories")
                 if nut.get("protein_g") is not None:
@@ -625,15 +660,15 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                         t = _clean(re.sub(r"\bNutrition(al)?\s+Information\s+for\s+", " ", title, flags=re.I))
                         m_title = re.search(r"[\"“](.+?)[\"”]", t)
                         if m_title:
-                            item["name"] = _clean(m_title.group(1))
+                            item["name"] = title_case_name(_clean(m_title.group(1)))
                     if not item.get("name"):
                         ar = a.get("aria-label")
                         if ar and "nutrit" not in ar.lower():
-                            item["name"] = _clean(ar)
+                            item["name"] = title_case_name(_clean(ar))
                     if not item.get("name"):
                         at = _clean(a.get_text(" "))
                         if at and "nutrit" not in at.lower():
-                            item["name"] = at
+                            item["name"] = title_case_name(at)
                     if not item.get("name"):
                         trow = _clean(row.get_text(" "))
                         trow = re.sub(r"\bNutritional\s+Information\b", " ", trow, flags=re.I)
@@ -641,7 +676,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                         trow = re.sub(r"\bNutrition\s+Facts\b", " ", trow, flags=re.I)
                         trow = _clean(re.split(r"\s{2,}|\s\|\s| - ", trow)[0]) if trow else None
                         if trow and "nutrit" not in trow.lower():
-                            item["name"] = trow
+                            item["name"] = title_case_name(trow)
 
                 if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
                     continue
@@ -649,7 +684,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 seen_urls.add(full)
                 items.append(item)
                 categorized.setdefault(cat_for_item, []).append({
-                    "name": item.get("name"),
+                    "name": title_case_name(item.get("name")),
                     "calories": item.get("calories"),
                     "protein_g": item.get("protein_g"),
                     "g_fat": item.get("g_fat"),
@@ -701,7 +736,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
             cat_for_item = _nearest_prev_category(container) or "Uncategorized"
 
             item = {
-                "name": name,
+                "name": title_case_name(name),
                 "category": cat_for_item,
                 "nutrition_url": full,
             }
@@ -713,7 +748,7 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 nut = {}
             label_name = _clean(nut.get("item_name")) if nut.get("item_name") else None
             if label_name:
-                item["name"] = label_name
+                item["name"] = title_case_name(label_name)
             if nut.get("calories") is not None:
                 item["calories"] = nut.get("calories")
             if nut.get("protein_g") is not None:
@@ -731,14 +766,14 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                     t = _clean(re.sub(r"\bNutrition(al)?\s+Information\s+for\s+", " ", title, flags=re.I))
                     m_title = re.search(r"[\"“](.+?)[\"”]", t)
                     if m_title:
-                        item["name"] = _clean(m_title.group(1))
+                        item["name"] = title_case_name(_clean(m_title.group(1)))
             if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
                 continue
 
             seen_urls.add(full)
             items.append(item)
             categorized.setdefault(cat_for_item, []).append({
-                "name": item.get("name"),
+                "name": title_case_name(item.get("name")),
                 "calories": item.get("calories"),
                 "protein_g": item.get("protein_g"),
                 "g_fat": item.get("g_fat"),
