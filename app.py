@@ -3633,6 +3633,34 @@ async def remove_favorite(
         raise HTTPException(status_code=500, detail=f"Failed to remove favorite: {str(e)}")
 
 
+@app.delete("/preferences/dislike/{item_name}", summary="Remove from dislikes")
+async def remove_dislike(
+    item_name: str,
+    current_user=Depends(get_current_user)
+):
+    """Remove an item from user's dislikes"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.remove_dislike(user_id, item_name)
+        
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail="Dislike not found")
+        
+        return {
+            "status": "success",
+            "message": f"Removed {item_name} from dislikes"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to remove dislike: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove dislike: {str(e)}")
+
+
 # ==================== BILLING ENDPOINTS ====================
 
 @app.get("/billing/debug")

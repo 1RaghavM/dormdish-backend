@@ -642,6 +642,39 @@ class PreferenceManager:
         print(f"[mem0] ⚠️ Favorite not found: {item_name}")
         return {"status": "not_found"}
     
+    async def remove_dislike(
+        self,
+        user_id: str,
+        item_name: str
+    ) -> Dict:
+        """
+        Remove a dislike item using entity-based memory deletion.
+        
+        Args:
+            user_id: Unique user identifier
+            item_name: Name of the item to remove from dislikes
+        
+        Returns:
+            Dict with deletion status
+        """
+        # Search for the dislike
+        dislikes = await self.get_dislikes(user_id)
+        
+        for dislike in dislikes:
+            metadata = dislike.get("metadata", {})
+            if metadata.get("item_name") == item_name:
+                memory_id = dislike.get("id")
+                if memory_id:
+                    def _delete():
+                        return self.memory.delete(memory_id)
+                    
+                    await asyncio.to_thread(_delete)
+                    print(f"[mem0] ✓ Deleted dislike: {item_name}")
+                    return {"status": "deleted", "memory_id": memory_id}
+        
+        print(f"[mem0] ⚠️ Dislike not found: {item_name}")
+        return {"status": "not_found"}
+    
     async def get_all_memories(
         self,
         user_id: str
