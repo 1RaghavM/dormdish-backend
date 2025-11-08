@@ -616,6 +616,7 @@ class PreferenceManager:
     ) -> Dict:
         """
         Remove a favorite item using entity-based memory deletion.
+        Uses case-insensitive matching to handle name variations.
         
         Args:
             user_id: Unique user identifier
@@ -627,19 +628,26 @@ class PreferenceManager:
         # Search for the favorite
         favorites = await self.get_favorites(user_id)
         
+        # Normalize the search term for case-insensitive comparison
+        item_name_lower = item_name.strip().lower()
+        
         for fav in favorites:
             metadata = fav.get("metadata", {})
-            if metadata.get("item_name") == item_name:
+            stored_name = metadata.get("item_name", "")
+            
+            # Case-insensitive comparison
+            if stored_name.strip().lower() == item_name_lower:
                 memory_id = fav.get("id")
                 if memory_id:
                     def _delete():
                         return self.memory.delete(memory_id)
                     
                     await asyncio.to_thread(_delete)
-                    print(f"[mem0] ✓ Deleted favorite: {item_name}")
+                    print(f"[mem0] ✓ Deleted favorite: {item_name} (matched: {stored_name})")
                     return {"status": "deleted", "memory_id": memory_id}
         
         print(f"[mem0] ⚠️ Favorite not found: {item_name}")
+        print(f"[mem0] Available favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
         return {"status": "not_found"}
     
     async def remove_dislike(
@@ -649,6 +657,7 @@ class PreferenceManager:
     ) -> Dict:
         """
         Remove a dislike item using entity-based memory deletion.
+        Uses case-insensitive matching to handle name variations.
         
         Args:
             user_id: Unique user identifier
@@ -660,19 +669,26 @@ class PreferenceManager:
         # Search for the dislike
         dislikes = await self.get_dislikes(user_id)
         
+        # Normalize the search term for case-insensitive comparison
+        item_name_lower = item_name.strip().lower()
+        
         for dislike in dislikes:
             metadata = dislike.get("metadata", {})
-            if metadata.get("item_name") == item_name:
+            stored_name = metadata.get("item_name", "")
+            
+            # Case-insensitive comparison
+            if stored_name.strip().lower() == item_name_lower:
                 memory_id = dislike.get("id")
                 if memory_id:
                     def _delete():
                         return self.memory.delete(memory_id)
                     
                     await asyncio.to_thread(_delete)
-                    print(f"[mem0] ✓ Deleted dislike: {item_name}")
+                    print(f"[mem0] ✓ Deleted dislike: {item_name} (matched: {stored_name})")
                     return {"status": "deleted", "memory_id": memory_id}
         
         print(f"[mem0] ⚠️ Dislike not found: {item_name}")
+        print(f"[mem0] Available dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
         return {"status": "not_found"}
     
     async def get_all_memories(

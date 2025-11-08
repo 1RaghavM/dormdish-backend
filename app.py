@@ -3619,15 +3619,20 @@ async def remove_favorite(
         
         result = await preference_manager.remove_favorite(user_id, item_name)
         
+        # Return success even if not found (idempotent operation)
+        # This handles cases where item was already removed or never existed
         if result.get("status") == "not_found":
-            raise HTTPException(status_code=404, detail="Favorite not found")
+            return {
+                "status": "success",
+                "message": f"{item_name} not found in favorites (may have been already removed)",
+                "was_found": False
+            }
         
         return {
             "status": "success",
-            "message": f"Removed {item_name} from favorites"
+            "message": f"Removed {item_name} from favorites",
+            "was_found": True
         }
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Failed to remove favorite: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove favorite: {str(e)}")
@@ -3647,15 +3652,20 @@ async def remove_dislike(
         
         result = await preference_manager.remove_dislike(user_id, item_name)
         
+        # Return success even if not found (idempotent operation)
+        # This handles cases where item was already removed or never existed
         if result.get("status") == "not_found":
-            raise HTTPException(status_code=404, detail="Dislike not found")
+            return {
+                "status": "success",
+                "message": f"{item_name} not found in dislikes (may have been already removed)",
+                "was_found": False
+            }
         
         return {
             "status": "success",
-            "message": f"Removed {item_name} from dislikes"
+            "message": f"Removed {item_name} from dislikes",
+            "was_found": True
         }
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Failed to remove dislike: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove dislike: {str(e)}")
