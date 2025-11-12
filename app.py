@@ -2541,11 +2541,18 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             profile = await preference_manager.get_user_profile(user_id)
             prefs = [profile] if profile else []
             
+            # DEBUG: Log what was retrieved
+            print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+            if favorites:
+                print(f"[mem0] Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+            if dislikes:
+                print(f"[mem0] Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+            
             # Build context string for LLM
             user_preferences_context = build_preference_context(prefs, favorites, dislikes)
             
             if user_preferences_context:
-                print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+                print(f"[mem0] Built preference context ({len(user_preferences_context)} chars)")
 
             preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as mem_error:
@@ -2919,11 +2926,18 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             profile = await preference_manager.get_user_profile(user_id)
             prefs = [profile] if profile else []
             
+            # DEBUG: Log what was retrieved
+            print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+            if favorites:
+                print(f"[mem0] Streaming Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+            if dislikes:
+                print(f"[mem0] Streaming Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+            
             # Build context string for LLM
             user_preferences_context = build_preference_context(prefs, favorites, dislikes)
             
             if user_preferences_context:
-                print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+                print(f"[mem0] Streaming: Built preference context ({len(user_preferences_context)} chars)")
 
             preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as mem_error:
@@ -3445,10 +3459,20 @@ async def add_favorite(
                 meal_type=favorite_data.meal_type
             )
         
+        # Log the result to debug what mem0 is returning
+        print(f"[API] mem0 add() returned: {result}")
+        print(f"[API] Result type: {type(result)}")
+        if isinstance(result, dict):
+            print(f"[API] Result keys: {result.keys()}")
+        
+        # Only return essential info, not all memories
+        # mem0.add() should return just the new memory ID
         return {
             "status": "success",
             "message": f"Added {favorite_data.item_name} to favorites",
-            "memory_result": result
+            "item_name": favorite_data.item_name,
+            "item_type": favorite_data.item_type,
+            "meal_type": favorite_data.meal_type
         }
     except Exception as e:
         logger.error(f"Failed to add favorite: {e}")
@@ -3475,10 +3499,16 @@ async def dislike_item(
             reason=dislike_data.reason
         )
         
+        # Log the result to debug what mem0 is returning
+        print(f"[API] mem0 add_dislike() returned: {result}")
+        
+        # Only return essential info, not all memories
         return {
             "status": "success",
             "message": f"Recorded dislike for {dislike_data.item_name}",
-            "memory_result": result
+            "item_name": dislike_data.item_name,
+            "item_type": dislike_data.item_type,
+            "meal_type": dislike_data.meal_type
         }
     except Exception as e:
         logger.error(f"Failed to record dislike: {e}")

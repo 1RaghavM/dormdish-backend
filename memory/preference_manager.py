@@ -417,28 +417,40 @@ class PreferenceManager:
             
             # DEBUG: Print what we actually got
             if results:
-                print(f"[mem0] DEBUG: First memory structure: {results[0]}")
-                print(f"[mem0] DEBUG: Memory text: {results[0].get('memory', 'N/A')}")
-                print(f"[mem0] DEBUG: Metadata: {results[0].get('metadata', {})}")
+                print(f"[mem0] DEBUG: Total memories returned from search: {len(results)}")
+                for i, r in enumerate(results[:5]):  # Show first 5
+                    print(f"[mem0] DEBUG Memory {i}: text='{r.get('memory', 'N/A')[:80]}...' category={r.get('metadata', {}).get('category')}")
             
             # Filter by checking if the memory text contains "favorite" or by metadata
             if results:
                 # Try multiple filtering strategies
                 filtered = []
+                rejected = []
                 for r in results:
                     if not isinstance(r, dict):
                         continue
                     
+                    category = r.get("metadata", {}).get("category")
+                    memory_text = r.get("memory", "").lower()
+                    item_name = r.get("metadata", {}).get("item_name", "unknown")
+                    
                     # Strategy 1: Check metadata category
-                    if r.get("metadata", {}).get("category") == "favorites":
+                    if category == "favorites":
                         filtered.append(r)
                         continue
                     
                     # Strategy 2: Check memory text for "favorite" keyword
-                    memory_text = r.get("memory", "").lower()
                     if "favorite" in memory_text or "favorited" in memory_text:
-                        filtered.append(r)
-                        continue
+                        # BUT EXCLUDE if it's actually a dislike that mentions favorites
+                        if "dislike" not in memory_text and "do not like" not in memory_text:
+                            filtered.append(r)
+                            continue
+                    
+                    # Track rejected memories for debugging
+                    rejected.append(f"{item_name} (category={category})")
+                
+                if rejected:
+                    print(f"[mem0] ⚠️ Rejected {len(rejected)} non-favorite memories: {rejected[:5]}")
                 
                 results = filtered
                 print(f"[mem0] ✓ Found {len(results)} favorites after filtering")
@@ -509,22 +521,38 @@ class PreferenceManager:
             
             # Filter by checking if the memory text contains "dislike" or by metadata
             if results:
+                print(f"[mem0] DEBUG: Total memories returned from dislike search: {len(results)}")
+                for i, r in enumerate(results[:5]):  # Show first 5
+                    print(f"[mem0] DEBUG Dislike {i}: text='{r.get('memory', 'N/A')[:80]}...' category={r.get('metadata', {}).get('category')}")
+                
                 # Try multiple filtering strategies
                 filtered = []
+                rejected = []
                 for r in results:
                     if not isinstance(r, dict):
                         continue
                     
+                    category = r.get("metadata", {}).get("category")
+                    memory_text = r.get("memory", "").lower()
+                    item_name = r.get("metadata", {}).get("item_name", "unknown")
+                    
                     # Strategy 1: Check metadata category
-                    if r.get("metadata", {}).get("category") == "dislikes":
+                    if category == "dislikes":
                         filtered.append(r)
                         continue
                     
                     # Strategy 2: Check memory text for "dislike" keyword
-                    memory_text = r.get("memory", "").lower()
                     if "dislike" in memory_text or "do not like" in memory_text:
-                        filtered.append(r)
-                        continue
+                        # BUT EXCLUDE if it's actually a favorite that mentions dislikes
+                        if "favorite" not in memory_text:
+                            filtered.append(r)
+                            continue
+                    
+                    # Track rejected memories for debugging
+                    rejected.append(f"{item_name} (category={category})")
+                
+                if rejected:
+                    print(f"[mem0] ⚠️ Rejected {len(rejected)} non-dislike memories: {rejected[:5]}")
                 
                 results = filtered
                 print(f"[mem0] ✓ Found {len(results)} dislikes after filtering")
