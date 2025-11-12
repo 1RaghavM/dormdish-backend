@@ -2746,18 +2746,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "updated_at": datetime.now().isoformat(),
             }
             
+            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
             save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
             
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
                 response_payload["auto_saved"] = True
-                print(f"✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+                logger.info(f"[MealPlan] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
             else:
-                print(f"⚠️ Failed to auto-save meal plan, but generation succeeded")
+                error_msg = getattr(save_response, 'error', 'Unknown error')
+                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}")
                 response_payload["auto_saved"] = False
         except Exception as save_error:
             # Don't fail the entire request if save fails
-            print(f"⚠️ Auto-save failed: {save_error}")
+            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
         
         return response_payload
@@ -3065,13 +3067,32 @@ async def get_meal_plan_history(
         
         plans = response.data if response.data else []
         
+        logger.info(f"[MealPlanHistory] Found {len(plans)} meal plans for user {current_user['id']}")
+        if plans:
+            # Log dates of all plans found
+            dates = [p.get('date') for p in plans]
+            logger.info(f"[MealPlanHistory] Plan dates: {dates}")
+            
+            # Log structure of first plan for debugging
+            first_plan = plans[0]
+            has_meal_plan_data = 'meal_plan_data' in first_plan
+            if has_meal_plan_data:
+                meal_plan_data_keys = list(first_plan['meal_plan_data'].keys()) if first_plan['meal_plan_data'] else []
+                has_nested_meal_plan = 'meal_plan' in (first_plan['meal_plan_data'] or {})
+                has_totals = 'totals' in (first_plan['meal_plan_data'].get('meal_plan', {}) if first_plan['meal_plan_data'] else {})
+                logger.info(f"[MealPlanHistory] First plan structure - has_meal_plan_data: {has_meal_plan_data}, keys: {meal_plan_data_keys}, has_nested_meal_plan: {has_nested_meal_plan}, has_totals: {has_totals}")
+            else:
+                logger.warning(f"[MealPlanHistory] First plan missing meal_plan_data field!")
+        else:
+            logger.warning(f"[MealPlanHistory] No meal plans found for user {current_user['id']}")
+        
         return {
             "success": True,
             "plans": plans,
             "count": len(plans),
         }
     except Exception as e:
-        print(f"Error fetching meal plan history: {e}")
+        logger.error(f"[MealPlanHistory] Error fetching meal plan history: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to fetch meal plans: {str(e)}")
 
 
@@ -4290,6 +4311,18 @@ async def get_calendar_events_for_day(
                 detail="Google Calendar not connected. Please connect your calendar first."
             )
         
+        # Refresh credentials if needed
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            try:
+                supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                creds_dict = refreshed_creds
+                logger.info(f"[Calendar] Credentials refreshed for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"[Calendar] Failed to save refreshed credentials: {e}")
+        
         # Parse date
         try:
             date_obj = datetime.fromisoformat(payload.date).date()
@@ -4332,6 +4365,18 @@ async def find_meal_time_slots(
                 status_code=400,
                 detail="Google Calendar not connected. Please connect your calendar first."
             )
+        
+        # Refresh credentials if needed
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            try:
+                supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                creds_dict = refreshed_creds
+                logger.info(f"[Calendar] Credentials refreshed for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"[Calendar] Failed to save refreshed credentials: {e}")
         
         # Parse date
         try:
@@ -4423,6 +4468,26 @@ async def export_meal_plan_to_calendar(
                 status_code=400,
                 detail="Google Calendar not connected. Please connect your calendar first."
             )
+        
+        # ✅ FIX: Refresh credentials if needed and save back to database
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            logger.info(f"[Calendar] Credentials were expired, refreshing for user {current_user['id']}")
+            try:
+                # Update the database with new credentials
+                update_result = supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                
+                if update_result.data:
+                    # Use the refreshed credentials for this request
+                    creds_dict = refreshed_creds
+                    logger.info(f"[Calendar] ✅ Credentials refreshed and saved to database")
+                else:
+                    logger.warning(f"[Calendar] Failed to save refreshed credentials to database")
+            except Exception as update_error:
+                logger.error(f"[Calendar] Error updating credentials in database: {update_error}")
+                # Continue with the request anyway using refreshed creds in memory
         
         # Parse date
         try:

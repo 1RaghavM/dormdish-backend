@@ -446,6 +446,8 @@ async def generate_meal_plan_with_streaming(
 
   try:
     # Create streaming response with thinking mode enabled
+    # Note: Cannot limit thinking steps via API - model decides based on complexity
+    # We'll show only headlines (truncated to 50 chars) to keep UI clean
     def call_gemini_stream():
       return client.models.generate_content_stream(
         model=chosen_model,
@@ -455,7 +457,7 @@ async def generate_meal_plan_with_streaming(
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=DormdishMealPlannerSchema,
-          # Enable Gemini's native thinking mode for transparent AI reasoning
+          # Enable thinking mode to show AI reasoning process
           thinking_config=types.ThinkingConfig(
             include_thoughts=True
           )
@@ -465,7 +467,8 @@ async def generate_meal_plan_with_streaming(
     stream = await asyncio.to_thread(call_gemini_stream)
 
     final_response = ""
-    thoughts_accumulated = ""
+    chunk_count = 0
+    thinking_count = 0
     
     for chunk in stream:
       # Check if chunk has candidates
@@ -481,17 +484,12 @@ async def generate_meal_plan_with_streaming(
         if not part.text:
           continue
         
-        # Debug: Log part attributes
-        has_thought_attr = hasattr(part, 'thought')
-        thought_value = getattr(part, 'thought', None) if has_thought_attr else None
-        print(f"[meal_plan_agent] Part: has_thought={has_thought_attr}, thought_value={thought_value}, text_preview={part.text[:50]}...")
-        
         # Check if this is a thought or the actual response
         if hasattr(part, 'thought') and part.thought:
           # This is a thought summary from the model's reasoning process
           thought_text = part.text.strip()
           if thought_text:
-            thoughts_accumulated += thought_text + " "
+            thinking_count += 1
             
             # Extract only the headline (first line/paragraph before \n\n)
             # Format is usually: "**Headline**\n\nDetailed thinking..."
@@ -504,22 +502,30 @@ async def generate_meal_plan_with_streaming(
             # Truncate to 50 characters for mobile display
             truncated_thought = headline[:50] + "..." if len(headline) > 50 else headline
             
-            print(f"[meal_plan_agent] ✅ YIELDING THINKING EVENT: {truncated_thought}")
+            print(f"[meal_plan_agent] 💭 THINKING (step {thinking_count}): {truncated_thought}")
             yield {
               "type": "thinking",
               "content": truncated_thought
             }
             await asyncio.sleep(0.05)  # Small delay for UI smoothness
         else:
-          # This is the actual response (JSON meal plan)
+          # This is the actual JSON response
           text_chunk = part.text
           final_response += text_chunk
-          print(f"[meal_plan_agent] ✅ YIELDING RESPONSE EVENT: {text_chunk[:50]}...")
+          chunk_count += 1
+          
+          # Optionally log progress for debugging
+          if chunk_count % 10 == 0:
+            print(f"[meal_plan_agent] 📝 Streamed {chunk_count} chunks, total: {len(final_response)} chars...")
+          
+          # Yield response chunks (frontend doesn't use these, but keep for compatibility)
           yield {
             "type": "response",
             "content": text_chunk,
             "full_response": final_response
           }
+    
+    print(f"[meal_plan_agent] ✅ Streaming complete: {thinking_count} thoughts, {chunk_count} response chunks")
 
     # Parse and validate the final response
     if not final_response or not final_response.strip():
@@ -582,9 +588,7 @@ async def generate_meal_plan_with_streaming(
     result.totals.calories = actual_calories
     result.totals.protein_g = actual_protein
 
-    # Log accumulated thoughts for debugging
-    if thoughts_accumulated:
-      print(f"[meal_plan_agent] 💭 Total thoughts received: {len(thoughts_accumulated.split())} words")
+    print(f"[meal_plan_agent] ✅ Meal plan validated and ready to send")
 
     # Yield final meal plan
     yield {
