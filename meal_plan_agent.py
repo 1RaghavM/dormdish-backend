@@ -1,13 +1,17 @@
 import asyncio
 import json
 import os
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, PydanticDeprecatedSince20
 from dotenv import load_dotenv
 
+# Suppress Pydantic V2 deprecation warnings from Google GenAI library
+# This is a known issue that Google will fix in a future SDK update
+warnings.filterwarnings("ignore", category=PydanticDeprecatedSince20)
 
 load_dotenv()
 
@@ -305,7 +309,7 @@ async def generate_meal_plan_with_agent(
   
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "16384"))  # Increased from 8192 to ensure complete responses
 
   
   def call_gemini():
@@ -385,19 +389,20 @@ async def generate_meal_plan_with_streaming(
   extra_system_messages: Optional[Sequence[str]] = None,
   user_preferences_context: Optional[str] = None,
 ):
-  """Generate a meal plan using Gemini 2.5 Flash with streaming.
+  """Generate a meal plan using Gemini 2.5 Flash with streaming thoughts.
   
-  This function streams the model's response in real-time,
-  providing updates on the meal plan generation progress.
+  This function streams the model's actual reasoning process in real-time,
+  providing transparent insights into the AI's decision-making.
   
   Args:
     user_payload: User profile and preferences
     menu_payload: Menu data including allowed items
     nutrition_targets: Calorie and protein goals
     extra_system_messages: Optional additional instructions (not used with Gemini)
+    user_preferences_context: User preferences from mem0
     
   Yields:
-    Dict containing response updates or final meal plan data
+    Dict containing thinking updates, response updates, or final meal plan data
   """
   import json
   import asyncio
@@ -414,7 +419,7 @@ async def generate_meal_plan_with_streaming(
   print(
     f"[meal_plan_agent] Gemini 2.5 Flash streaming prompt_size chars={prompt_chars} "
     f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
-    f"streaming=enabled"
+    f"streaming=enabled thinking_mode=enabled"
   )
 
   cal_target = nutrition_targets['calories']
@@ -435,10 +440,12 @@ async def generate_meal_plan_with_streaming(
 
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "8192"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "16384"))  # Increased from 8192 to ensure complete responses
+
+  print(f"[meal_plan_agent] Using model {chosen_model} with thinking mode enabled, max_tokens={max_tokens}")
 
   try:
-    # Create streaming response
+    # Create streaming response with thinking mode enabled
     def call_gemini_stream():
       return client.models.generate_content_stream(
         model=chosen_model,
@@ -448,24 +455,82 @@ async def generate_meal_plan_with_streaming(
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=DormdishMealPlannerSchema,
+          # Enable Gemini's native thinking mode for transparent AI reasoning
+          thinking_config=types.ThinkingConfig(
+            include_thoughts=True
+          )
         )
       )
     
     stream = await asyncio.to_thread(call_gemini_stream)
 
     final_response = ""
+    thoughts_accumulated = ""
     
     for chunk in stream:
-      text_chunk = chunk.text
-      final_response += text_chunk
-      # Stream the text as it comes
-      yield {
-        "type": "response",
-        "content": text_chunk,
-        "full_response": final_response
-      }
+      # Check if chunk has candidates
+      if not chunk.candidates:
+        continue
+        
+      candidate = chunk.candidates[0]
+      if not candidate.content or not candidate.content.parts:
+        continue
+      
+      # Process each part in the chunk
+      for part in candidate.content.parts:
+        if not part.text:
+          continue
+        
+        # Debug: Log part attributes
+        has_thought_attr = hasattr(part, 'thought')
+        thought_value = getattr(part, 'thought', None) if has_thought_attr else None
+        print(f"[meal_plan_agent] Part: has_thought={has_thought_attr}, thought_value={thought_value}, text_preview={part.text[:50]}...")
+        
+        # Check if this is a thought or the actual response
+        if hasattr(part, 'thought') and part.thought:
+          # This is a thought summary from the model's reasoning process
+          thought_text = part.text.strip()
+          if thought_text:
+            thoughts_accumulated += thought_text + " "
+            
+            # Extract only the headline (first line/paragraph before \n\n)
+            # Format is usually: "**Headline**\n\nDetailed thinking..."
+            headline = thought_text.split('\n\n')[0] if '\n\n' in thought_text else thought_text
+            headline = headline.split('\n')[0] if '\n' in headline else headline  # Take first line
+            
+            # Remove markdown formatting
+            headline = headline.replace('**', '').strip()
+            
+            # Truncate to 50 characters for mobile display
+            truncated_thought = headline[:50] + "..." if len(headline) > 50 else headline
+            
+            print(f"[meal_plan_agent] ✅ YIELDING THINKING EVENT: {truncated_thought}")
+            yield {
+              "type": "thinking",
+              "content": truncated_thought
+            }
+            await asyncio.sleep(0.05)  # Small delay for UI smoothness
+        else:
+          # This is the actual response (JSON meal plan)
+          text_chunk = part.text
+          final_response += text_chunk
+          print(f"[meal_plan_agent] ✅ YIELDING RESPONSE EVENT: {text_chunk[:50]}...")
+          yield {
+            "type": "response",
+            "content": text_chunk,
+            "full_response": final_response
+          }
 
     # Parse and validate the final response
+    if not final_response or not final_response.strip():
+      print(f"[meal_plan_agent] ERROR: Empty response from model. Tokens may have been exceeded.")
+      print(f"[meal_plan_agent] Prompt size: {prompt_chars} chars, Items: {allowed_items_count}")
+      yield {
+        "type": "error",
+        "error": "The AI response was incomplete. Please try again or contact support if this persists."
+      }
+      return
+    
     raw_json = final_response.strip()
     if raw_json.startswith("```"):
       lines = raw_json.split("\n")
@@ -479,10 +544,12 @@ async def generate_meal_plan_with_streaming(
       parsed = json.loads(raw_json)
     except json.JSONDecodeError as e:
       print(f"[meal_plan_agent] JSON parsing failed: {e}")
-      print(f"[meal_plan_agent] Raw response: {final_response[:500]}")
+      print(f"[meal_plan_agent] Raw response length: {len(final_response)} chars")
+      print(f"[meal_plan_agent] Raw response preview: {final_response[:500]}")
+      print(f"[meal_plan_agent] Prompt size: {prompt_chars} chars, Items: {allowed_items_count}")
       yield {
         "type": "error",
-        "error": "Please try again."
+        "error": "The AI response was malformed. Please try again or contact support if this persists."
       }
       return
 
@@ -500,7 +567,7 @@ async def generate_meal_plan_with_streaming(
       }
       return
 
-    # Recalculate totals from meals
+    # Recalculate totals from meals for accuracy
     recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
     gemini_calories = result.totals.calories
     gemini_protein = result.totals.protein_g
@@ -514,6 +581,10 @@ async def generate_meal_plan_with_streaming(
     
     result.totals.calories = actual_calories
     result.totals.protein_g = actual_protein
+
+    # Log accumulated thoughts for debugging
+    if thoughts_accumulated:
+      print(f"[meal_plan_agent] 💭 Total thoughts received: {len(thoughts_accumulated.split())} words")
 
     # Yield final meal plan
     yield {
