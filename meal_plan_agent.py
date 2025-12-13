@@ -342,7 +342,8 @@ async def generate_meal_plan_with_agent(
       lines = lines[:-1]
     raw_json = "\n".join(lines).strip()
 
-  
+
+
   try:
     parsed = json.loads(raw_json)
   except json.JSONDecodeError as e:

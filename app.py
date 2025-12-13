@@ -243,6 +243,158 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+# ===================================
+# Push Notification Functions
+# ===================================
+
+async def send_push_notification(
+    expo_push_token: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    priority: str = "high"
+) -> Dict[str, Any]:
+    """
+    Send a push notification via Expo's push notification service.
+    
+    Args:
+        expo_push_token: The Expo push token for the device
+        title: Notification title
+        body: Notification body text
+        data: Optional dictionary of data to include with the notification
+        priority: Priority level ('default', 'normal', 'high')
+    
+    Returns:
+        Dictionary with the response from Expo's API
+    """
+    if not expo_push_token or not expo_push_token.startswith('ExponentPushToken['):
+        logger.warning(f"Invalid Expo push token format: {expo_push_token}")
+        return {"success": False, "error": "Invalid token format"}
+    
+    message = {
+        'to': expo_push_token,
+        'sound': 'default',
+        'title': title,
+        'body': body,
+        'data': data or {},
+        'priority': priority,
+        'channelId': 'default',  # Android channel
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT) as client:
+            response = await client.post(
+                'https://exp.host/--/api/v2/push/send',
+                json=message,
+                headers={
+                    'Accept': 'application/json',
+                    'Accept-encoding': 'gzip, deflate',
+                    'Content-Type': 'application/json',
+                }
+            )
+            result = response.json()
+            logger.info(f"Push notification sent to {expo_push_token[:20]}...: {result}")
+            return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"Failed to send push notification: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def get_user_push_token(user_id: str) -> Optional[str]:
+    """Get the most recent active push token for a user."""
+    try:
+        response = supabase.table('push_tokens')\
+            .select('token')\
+            .eq('user_id', user_id)\
+            .eq('active', True)\
+            .order('updated_at', desc=True)\
+            .limit(1)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            return response.data[0]['token']
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching push token for user {user_id}: {e}")
+        return None
+
+
+async def check_user_has_meal_plan_today(user_id: str) -> bool:
+    """Check if user has created a meal plan for today."""
+    try:
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        response = supabase.table('saved_meal_plans')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .eq('date', today)\
+            .limit(1)\
+            .execute()
+        
+        return len(response.data) > 0
+    except Exception as e:
+        logger.error(f"Error checking meal plan for user {user_id}: {e}")
+        return False
+
+
+async def send_meal_plan_reminder_notification(user_id: str) -> bool:
+    """Send a reminder notification to create today's meal plan."""
+    try:
+        # Check if user already has a meal plan for today
+        has_plan = await check_user_has_meal_plan_today(user_id)
+        if has_plan:
+            logger.info(f"User {user_id} already has meal plan for today, skipping reminder")
+            return False
+        
+        # Get user's push token
+        push_token = await get_user_push_token(user_id)
+        if not push_token:
+            logger.info(f"No push token found for user {user_id}")
+            return False
+        
+        # Send reminder notification
+        result = await send_push_notification(
+            expo_push_token=push_token,
+            title="🍽️ Time to Plan Your Meals!",
+            body="Haven't created your meal plan for today yet. Tap here to get started!",
+            data={
+                "screen": "home",
+                "action": "create_meal_plan"
+            }
+        )
+        
+        return result.get('success', False)
+    except Exception as e:
+        logger.error(f"Error sending meal plan reminder to user {user_id}: {e}")
+        return False
+
+
+async def send_meal_plan_ready_notification(user_id: str, date: str) -> bool:
+    """Send a notification when meal plan is successfully generated."""
+    try:
+        # Get user's push token
+        push_token = await get_user_push_token(user_id)
+        if not push_token:
+            logger.info(f"No push token found for user {user_id}")
+            return False
+        
+        # Send ready notification
+        result = await send_push_notification(
+            expo_push_token=push_token,
+            title="✨ Your Meal Plan is Ready!",
+            body="Check out your personalized nutrition recommendations for today.",
+            data={
+                "screen": "meal-plan-detail",
+                "date": date
+            }
+        )
+        
+        return result.get('success', False)
+    except Exception as e:
+        logger.error(f"Error sending meal plan ready notification to user {user_id}: {e}")
+        return False
+
+
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
     salt = bcrypt.gensalt()
@@ -1317,8 +1469,12 @@ class MealPlanItemUpdate(BaseModel):
     protein_g: Optional[float] = None
     serving_size: Optional[str] = None
     servings: Optional[float] = 1.0
-class TokenData(BaseModel):
+
+class PushTokenRequest(BaseModel):
+    """Request model for registering push notification tokens"""
+    token: str
     user_id: str
+    platform: str  # 'mobile', 'ios', 'android'
 
 @app.get("/health", summary="Health Check")
 async def health_check():
@@ -1342,6 +1498,122 @@ async def health_check():
                 "timestamp": datetime.now().isoformat()
             }
         )
+
+
+@app.get("/loaderio-e4d6abce9b7ba70cd20b89ccdd7d82c4.txt", summary="Loader.io verification")
+async def loaderio_verification():
+    """Loader.io verification endpoint"""
+    return PlainTextResponse(content="loaderio-e4d6abce9b7ba70cd20b89ccdd7d82c4")
+
+
+@app.post('/api/register-push-token', summary='Register device push notification token')
+async def register_push_token(data: PushTokenRequest):
+    """
+    Register or update a user's push notification token.
+    This endpoint stores the Expo push token for sending notifications.
+    """
+    try:
+        # Validate token format
+        if not data.token or not data.token.startswith('ExponentPushToken['):
+            raise HTTPException(status_code=400, detail="Invalid Expo push token format")
+        
+        # Check if token already exists for this user
+        existing = supabase.table('push_tokens')\
+            .select('id')\
+            .eq('user_id', data.user_id)\
+            .eq('token', data.token)\
+            .execute()
+        
+        now = datetime.now().isoformat()
+        
+        if existing.data and len(existing.data) > 0:
+            # Update existing token
+            supabase.table('push_tokens')\
+                .update({
+                    'active': True,
+                    'updated_at': now,
+                    'platform': data.platform
+                })\
+                .eq('id', existing.data[0]['id'])\
+                .execute()
+            
+            logger.info(f"Updated push token for user {data.user_id}")
+        else:
+            # Deactivate old tokens for this user (keep only one active)
+            supabase.table('push_tokens')\
+                .update({'active': False})\
+                .eq('user_id', data.user_id)\
+                .execute()
+            
+            # Insert new token
+            supabase.table('push_tokens').insert({
+                'user_id': data.user_id,
+                'token': data.token,
+                'platform': data.platform,
+                'active': True,
+                'created_at': now,
+                'updated_at': now
+            }).execute()
+            
+            logger.info(f"Registered new push token for user {data.user_id}")
+        
+        return {"success": True, "message": "Push token registered successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to register push token: {e}")
+        raise HTTPException(status_code=500, detail="Failed to register push token")
+
+
+@app.api_route('/api/send-daily-reminders', methods=['GET', 'POST'], summary='Send daily meal plan reminders (admin/cron only)')
+async def send_daily_reminders():
+    """
+    Send reminder notifications to all users who haven't created their meal plan today.
+    This endpoint should be called by a cron job or scheduled task.
+    Accepts both GET and POST for Vercel Cron compatibility.
+    """
+    try:
+        # Get all users with active push tokens
+        response = supabase.table('push_tokens')\
+            .select('user_id')\
+            .eq('active', True)\
+            .execute()
+        
+        if not response.data:
+            return {"success": True, "message": "No active push tokens found", "sent": 0}
+        
+        # Get unique user IDs
+        user_ids = list(set(token['user_id'] for token in response.data))
+        
+        sent_count = 0
+        failed_count = 0
+        
+        # Send reminders to each user
+        for user_id in user_ids:
+            try:
+                success = await send_meal_plan_reminder_notification(user_id)
+                if success:
+                    sent_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send reminder to user {user_id}: {e}")
+                failed_count += 1
+        
+        logger.info(f"Daily reminders sent: {sent_count} successful, {failed_count} failed/skipped")
+        
+        return {
+            "success": True,
+            "message": "Daily reminders processed",
+            "sent": sent_count,
+            "failed": failed_count,
+            "total_users": len(user_ids)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to send daily reminders: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send daily reminders")
 
 
 def _rutgers_today_str():
@@ -3009,7 +3281,11 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
 
 
 @app.post("/meal-plan/save", summary="Save or update a meal plan")
-async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_current_user)):
+async def save_meal_plan(
+    payload: SaveMealPlanRequest, 
+    background_tasks: BackgroundTasks,
+    current_user=Depends(get_current_user)
+):
     """Save a new meal plan or update an existing one. Enforces one meal plan per day limit."""
     try:
         # Check if this is a new plan or an update
@@ -3050,6 +3326,15 @@ async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_
         
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to save meal plan")
+        
+        # Send push notification when meal plan is created (not on updates)
+        if not is_update:
+            background_tasks.add_task(
+                send_meal_plan_ready_notification,
+                user_id=str(current_user["id"]),
+                date=payload.date
+            )
+            logger.info(f"Scheduled push notification for user {current_user['id']} meal plan on {payload.date}")
         
         return {
             "success": True,
@@ -3362,71 +3647,6 @@ async def get_menu(dining_hall: str, date: str):
 
 
 
-import logging
-try:
-    import stripe  
-except Exception:
-    stripe = None  
-
-
-def _stripe_version():
-    if not stripe:
-        return None
-    for attr in ('__version__', 'VERSION'):
-        v = getattr(stripe, attr, None)
-        if isinstance(v, str):
-            return v
-    
-    try:
-        from stripe import _version  
-        v = getattr(_version, 'VERSION', None)
-        if isinstance(v, str):
-            return v
-    except Exception:
-        pass
-    return None
-
-
-DEBUG_BILLING = os.getenv("DEBUG_BILLING", "0") in ("1", "true", "True")
-
-def _get_stripe_api_key() -> Optional[str]:
-    """Return first present Stripe secret key from supported env var names."""
-    for k in [
-        "STRIPE_API_KEY",
-        "STRIPE_SECRET_KEY",
-        "STRIPE_SECRET",
-        "STRIPE_KEY",
-    ]:
-        val = os.getenv(k)
-        if val and val.strip():
-            return val.strip()
-    return None
-
-STRIPE_API_KEY = _get_stripe_api_key()
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")  
-if STRIPE_API_KEY and stripe:
-    stripe.api_key = STRIPE_API_KEY
-    try:
-        ver = _stripe_version() or 'unknown'
-        logging.info(
-            f"Stripe initialized version={ver} key_prefix={STRIPE_API_KEY[:7] if STRIPE_API_KEY else 'None'}"
-        )
-        
-        if ver and ver[0].isdigit():
-            try:
-                major = int(ver.split('.')[0])
-                if major < 10:
-                    logging.warning(
-                        "Stripe library major version <10 (" + ver + "). Please upgrade (pip install 'stripe>=10,<13')."
-                    )
-            except Exception:
-                pass
-        if not STRIPE_PRICE_ID:
-            logging.warning("STRIPE_PRICE_ID not configured; checkout will fail until set.")
-    except Exception:
-        pass
 
 # ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
 # These endpoints use mem0 to store and retrieve user preferences, favorites, likes, and dislikes
@@ -3722,217 +3942,6 @@ async def remove_dislike(
         raise HTTPException(status_code=500, detail=f"Failed to remove dislike: {str(e)}")
 
 
-# ==================== BILLING ENDPOINTS ====================
-
-@app.get("/billing/debug")
-async def billing_debug():
-    return {
-        "stripe_imported": stripe is not None,
-        "stripe_version": _stripe_version(),
-        "api_key_set": bool(STRIPE_API_KEY),
-        "api_key_prefix": STRIPE_API_KEY[:7] + '...' if STRIPE_API_KEY else None,
-        "api_key_valid_format": bool(STRIPE_API_KEY and STRIPE_API_KEY.startswith('sk_')),
-        "debug_flag": DEBUG_BILLING,
-        "price_id_set": bool(STRIPE_PRICE_ID),
-    }
-
-class CheckoutSessionRequest(BaseModel):
-    price_id: Optional[str] = None  
-    trial: Optional[bool] = None
-
-stripe_ready = bool(stripe and STRIPE_API_KEY)
-
-def _require_stripe():
-    if stripe is None:
-        raise HTTPException(status_code=503, detail="Stripe library not installed (pip install stripe)")
-    if not STRIPE_API_KEY:
-        raise HTTPException(status_code=503, detail="STRIPE_API_KEY missing in environment")
-    ver = _stripe_version()
-    
-    if ver and ver[0].isdigit():
-        try:
-            major = int(ver.split('.')[0])
-            if major < 10:
-                raise HTTPException(status_code=503, detail=f"Outdated stripe package ({ver}). Upgrade to >=10.15.0")
-        except Exception:
-            pass
-
-@app.get("/billing/health")
-async def billing_health():
-    return {
-        "stripe_imported": stripe is not None,
-        "api_key_configured": bool(STRIPE_API_KEY),
-        "price_id_configured": bool(STRIPE_PRICE_ID),
-        "webhook_secret_configured": bool(STRIPE_WEBHOOK_SECRET),
-        "ready": stripe_ready,
-    }
-
-@app.post("/billing/create-checkout-session")
-async def create_checkout_session(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
-    _require_stripe()
-    try:
-        user_id = current_user.get("id")
-        email = current_user.get("email")
-        
-        stripe_customer_id = current_user.get("stripe_customer_id")
-        if not stripe_customer_id:
-            customer = stripe.Customer.create(
-                email=email,
-                metadata={"user_id": user_id}
-            )
-            stripe_customer_id = customer.id
-            try:
-                supabase.table("users").update({"stripe_customer_id": stripe_customer_id}).eq("id", user_id).execute()
-            except Exception as e:
-                logging.warning(f"Could not persist stripe_customer_id: {e}")
-
-        price_id = payload.price_id or STRIPE_PRICE_ID
-        if not price_id:
-            raise HTTPException(status_code=400, detail="No price specified")
-
-        
-        try:
-            existing = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
-            if existing and existing.get('data'):
-                raise HTTPException(status_code=400, detail="Active subscription already exists")
-        except HTTPException:
-            raise
-        except Exception as sub_list_err:
-            logging.warning(f"Could not check existing subscriptions: {sub_list_err}")
-
-        mode = "subscription"
-        session_params = {
-            "mode": mode,
-            "customer": stripe_customer_id,
-            "line_items": [
-                {"price": price_id, "quantity": 1}
-            ],
-            "success_url": f"{FRONTEND_URL}/dashboard?upgrade=success",
-            "cancel_url": f"{FRONTEND_URL}/pricing?upgrade=cancel",
-            "metadata": {"user_id": user_id},
-            "subscription_data": {
-                "metadata": {"user_id": user_id}
-            }
-        }
-        if payload.trial:
-            
-            session_params["subscription_data"]["trial_period_days"] = 14
-
-        checkout_session = stripe.checkout.Session.create(**session_params)
-        return {"url": checkout_session.url, "id": checkout_session.id}
-    except Exception as e:  
-        err_type = type(e).__name__
-        logging.error(f"Create checkout session failed ({err_type}): {e}")
-        if DEBUG_BILLING:
-            return JSONResponse(status_code=500, content={
-                "error": "checkout_session_failed",
-                "error_type": err_type,
-                "message": str(e),
-                "stripe_version": _stripe_version(),
-            })
-        raise HTTPException(status_code=500, detail="Failed to create checkout session")
-
-
-@app.post("/create-checkout-session")
-async def legacy_create_checkout(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
-    return await create_checkout_session(payload, current_user)  
-
-@app.post("/billing/create-portal-session")
-async def create_billing_portal(current_user=Depends(get_current_user)):
-    _require_stripe()
-    try:
-        stripe_customer_id = current_user.get("stripe_customer_id")
-        if not stripe_customer_id:
-            raise HTTPException(status_code=400, detail="No Stripe customer for user")
-        portal = stripe.billing_portal.Session.create(
-            customer=stripe_customer_id,
-            return_url=f"{FRONTEND_URL}/dashboard"
-        )
-        return {"url": portal.url}
-    except Exception as e:
-        logging.error(f"Portal session error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create portal session")
-
-
-@app.post("/create-portal-session")
-async def legacy_portal(current_user=Depends(get_current_user)):
-    return await create_billing_portal(current_user)  
-
-@app.post("/webhooks/stripe", response_class=PlainTextResponse)
-async def stripe_webhook(request: Request):
-    if not (stripe and STRIPE_API_KEY):
-        return PlainTextResponse("stripe disabled", status_code=200)
-
-    payload = await request.body()
-    sig = request.headers.get("stripe-signature")
-    event = None
-    try:
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe.Webhook.construct_event(
-                payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
-            )
-        else:
-            event = stripe.Event.construct_from(json.loads(payload.decode("utf-8")), stripe.api_key)
-    except Exception as e:
-        logging.error(f"Webhook signature/parse error: {e}")
-        return PlainTextResponse("invalid payload", status_code=400)
-
-    etype = event.get("type")
-    data_object = event.get("data", {}).get("object", {})
-
-    try:
-        if etype == "checkout.session.completed":
-            
-            subscription_id = data_object.get("subscription")
-            customer_id = data_object.get("customer")
-            if subscription_id and customer_id:
-                try:
-                    sub = stripe.Subscription.retrieve(subscription_id)
-                    user_id = (sub.get("metadata", {}) or {}).get("user_id") or (data_object.get("metadata", {}) or {}).get("user_id")
-                    current_period_end = sub.get("current_period_end")
-                    update_payload = {
-                        "stripe_customer_id": customer_id,
-                        "stripe_subscription_id": subscription_id,
-                        "subscription_status": sub.get("status"),
-                        "subscription_current_period_end": datetime.utcfromtimestamp(current_period_end).isoformat() if current_period_end else None,
-                    }
-                    if user_id:
-                        try:
-                            supabase.table("users").update(update_payload).eq("id", user_id).execute()
-                        except Exception as db_err:
-                            logging.warning(f"Failed to update user subscription columns (create them if missing): {db_err}")
-                except Exception as sub_err:
-                    logging.error(f"Failed to process subscription: {sub_err}")
-        elif etype in ("customer.subscription.updated", "customer.subscription.deleted"):
-            subscription_id = data_object.get("id")
-            customer_id = data_object.get("customer")
-            status_val = data_object.get("status")
-            user_id = (data_object.get("metadata", {}) or {}).get("user_id")
-            current_period_end = data_object.get("current_period_end")
-            update_payload = {
-                "subscription_status": status_val,
-                "subscription_current_period_end": datetime.utcfromtimestamp(current_period_end).isoformat() if current_period_end else None,
-            }
-            if user_id:
-                try:
-                    supabase.table("users").update(update_payload).eq("id", user_id).execute()
-                except Exception as db_err:
-                    logging.warning(f"Failed to update user subscription on lifecycle event: {db_err}")
-            else:
-                
-                try:
-                    res = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
-                    if res.data:
-                        uid = res.data[0]["id"]
-                        supabase.table("users").update(update_payload).eq("id", uid).execute()
-                except Exception as db_err:
-                    logging.warning(f"Fallback update failed: {db_err}")
-    except Exception as e:
-        logging.error(f"Webhook handling error: {e}")
-
-    return PlainTextResponse("ok", status_code=200)
-
-BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()
 
 
 async def _send_meal_plan_generation_email_async(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str) -> None:
