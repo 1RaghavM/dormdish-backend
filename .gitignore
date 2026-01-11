@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+.src/mealplanner
+
+
+
 # Distribution / packaging
 .Python
 build/
@@ -103,6 +107,12 @@ target/
 # IPython
 profile_default/
 ipython_config.py
+
+LOADERIO_TEST_CONFIG.md
+loaderio_test_endpoints.json
+
+upload_universities.py
+
 
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is

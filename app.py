@@ -19,9 +19,9 @@ import httpx
 import traceback
 from difflib import get_close_matches
 from dotenv import load_dotenv
-from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, EmailStr
 from supabase import Client, create_client
@@ -29,13 +29,34 @@ from supabase import Client, create_client
 import secrets as _secrets_for_google
 
 try:
-    from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
+    from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu, title_case_name
 except Exception as exc:
     print(f"⚠️ Failed to import FoodPro scraper helpers: {exc}")
     traceback.print_exc()
     fp_build_menu_url = None  
     fp_fetch = None  
-    fp_parse_menu = None  
+    fp_parse_menu = None
+    # Fallback title_case_name function if extract import fails
+    def title_case_name(name: str | None) -> str:
+        """Convert menu item name to proper title case."""
+        if not name:
+            return ""
+        name = re.sub(r"\s+", " ", name).strip()
+        if not name:
+            return ""
+        if name.isupper():
+            name = name.title()
+            name = re.sub(r'\bAnd\b', 'and', name, flags=re.IGNORECASE)
+            name = re.sub(r'\bOr\b', 'or', name, flags=re.IGNORECASE)
+            name = re.sub(r'\bOf\b', 'of', name, flags=re.IGNORECASE)
+            name = re.sub(r'\bThe\b', 'the', name, flags=re.IGNORECASE)
+            name = re.sub(r'\bA\b', 'a', name, flags=re.IGNORECASE)
+            if name:
+                name = name[0].upper() + name[1:]
+        else:
+            if name:
+                name = name[0].upper() + name[1:]
+        return name  
 
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -43,9 +64,36 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 load_dotenv()
 
+
 logger = logging.getLogger("dormdish.api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
+# ---------------------------
+# School Request endpoint
+# ---------------------------
+class SchoolRequest(BaseModel):
+    name: str
+    email: EmailStr
+    university: str
+
+@app.post('/request-school', summary='Request a new school/university to be added')
+def request_school(data: SchoolRequest):
+    try:
+        # Store the request in Supabase (table: school_requests)
+        payload = {
+            "name": data.name.strip(),
+            "email": data.email.strip().lower(),
+            "university": data.university.strip(),
+            "created_at": datetime.now().isoformat()
+        }
+        supabase.table('school_requests').insert(payload).execute()
+        return {"success": True, "message": "School request submitted successfully."}
+    except Exception as e:
+        print(f"⚠️ School request failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit school request")
+
 
 HTTP_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 HTTP_CLIENT_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=20)
@@ -193,6 +241,158 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "your_supabase_url_here")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+# ===================================
+# Push Notification Functions
+# ===================================
+
+async def send_push_notification(
+    expo_push_token: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    priority: str = "high"
+) -> Dict[str, Any]:
+    """
+    Send a push notification via Expo's push notification service.
+    
+    Args:
+        expo_push_token: The Expo push token for the device
+        title: Notification title
+        body: Notification body text
+        data: Optional dictionary of data to include with the notification
+        priority: Priority level ('default', 'normal', 'high')
+    
+    Returns:
+        Dictionary with the response from Expo's API
+    """
+    if not expo_push_token or not expo_push_token.startswith('ExponentPushToken['):
+        logger.warning(f"Invalid Expo push token format: {expo_push_token}")
+        return {"success": False, "error": "Invalid token format"}
+    
+    message = {
+        'to': expo_push_token,
+        'sound': 'default',
+        'title': title,
+        'body': body,
+        'data': data or {},
+        'priority': priority,
+        'channelId': 'default',  # Android channel
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT) as client:
+            response = await client.post(
+                'https://exp.host/--/api/v2/push/send',
+                json=message,
+                headers={
+                    'Accept': 'application/json',
+                    'Accept-encoding': 'gzip, deflate',
+                    'Content-Type': 'application/json',
+                }
+            )
+            result = response.json()
+            logger.info(f"Push notification sent to {expo_push_token[:20]}...: {result}")
+            return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"Failed to send push notification: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def get_user_push_token(user_id: str) -> Optional[str]:
+    """Get the most recent active push token for a user."""
+    try:
+        response = supabase.table('push_tokens')\
+            .select('token')\
+            .eq('user_id', user_id)\
+            .eq('active', True)\
+            .order('updated_at', desc=True)\
+            .limit(1)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            return response.data[0]['token']
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching push token for user {user_id}: {e}")
+        return None
+
+
+async def check_user_has_meal_plan_today(user_id: str) -> bool:
+    """Check if user has created a meal plan for today."""
+    try:
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        response = supabase.table('saved_meal_plans')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .eq('date', today)\
+            .limit(1)\
+            .execute()
+        
+        return len(response.data) > 0
+    except Exception as e:
+        logger.error(f"Error checking meal plan for user {user_id}: {e}")
+        return False
+
+
+async def send_meal_plan_reminder_notification(user_id: str) -> bool:
+    """Send a reminder notification to create today's meal plan."""
+    try:
+        # Check if user already has a meal plan for today
+        has_plan = await check_user_has_meal_plan_today(user_id)
+        if has_plan:
+            logger.info(f"User {user_id} already has meal plan for today, skipping reminder")
+            return False
+        
+        # Get user's push token
+        push_token = await get_user_push_token(user_id)
+        if not push_token:
+            logger.info(f"No push token found for user {user_id}")
+            return False
+        
+        # Send reminder notification
+        result = await send_push_notification(
+            expo_push_token=push_token,
+            title="🍽️ Time to Plan Your Meals!",
+            body="Haven't created your meal plan for today yet. Tap here to get started!",
+            data={
+                "screen": "home",
+                "action": "create_meal_plan"
+            }
+        )
+        
+        return result.get('success', False)
+    except Exception as e:
+        logger.error(f"Error sending meal plan reminder to user {user_id}: {e}")
+        return False
+
+
+async def send_meal_plan_ready_notification(user_id: str, date: str) -> bool:
+    """Send a notification when meal plan is successfully generated."""
+    try:
+        # Get user's push token
+        push_token = await get_user_push_token(user_id)
+        if not push_token:
+            logger.info(f"No push token found for user {user_id}")
+            return False
+        
+        # Send ready notification
+        result = await send_push_notification(
+            expo_push_token=push_token,
+            title="✨ Your Meal Plan is Ready!",
+            body="Check out your personalized nutrition recommendations for today.",
+            data={
+                "screen": "meal-plan-detail",
+                "date": date
+            }
+        )
+        
+        return result.get('success', False)
+    except Exception as e:
+        logger.error(f"Error sending meal plan ready notification to user {user_id}: {e}")
+        return False
 
 
 def hash_password(password: str) -> str:
@@ -559,69 +759,78 @@ async def email_test(email: EmailStr):
 
 
 
-UNIVERSITIES_CSV_PATH = os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv') if os.path.exists(os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv')) else os.path.join(os.getcwd(), 'us-colleges-and-universities.csv')
+# Cache for universities loaded from Supabase
+_universities_cache: Optional[List[str]] = None
+_universities_cache_time: Optional[float] = None
+UNIVERSITIES_CACHE_TTL = 3600  # 1 hour cache
 
-@lru_cache(maxsize=1)
-def load_universities_list() -> List[str]:
+def load_universities_from_supabase() -> List[str]:
+    """Load universities from Supabase database."""
+    global _universities_cache, _universities_cache_time
+    
+    # Check cache
+    current_time = time.time()
+    if _universities_cache is not None and _universities_cache_time is not None:
+        if current_time - _universities_cache_time < UNIVERSITIES_CACHE_TTL:
+            return _universities_cache
+    
     universities: List[str] = []
     try:
-        path = UNIVERSITIES_CSV_PATH
-        if not os.path.isfile(path):
-            print(f"⚠️ Universities CSV not found at {path}")
-            return universities
-        with open(path, 'r', encoding='utf-8') as f:
+        # Fetch all universities from Supabase, paginate if needed
+        offset = 0
+        batch_size = 1000
+        
+        while True:
+            result = supabase.table('universities').select('name').order('name').range(offset, offset + batch_size - 1).execute()
             
-            sample = f.read(2048)
-            f.seek(0)
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=',;|\t')
-                delim = dialect.delimiter
-            except Exception:
+            if result.data:
+                for row in result.data:
+                    name = (row.get('name') or '').strip()
+                    if name:
+                        universities.append(name)
                 
-                first_line = sample.splitlines()[0] if sample else ''
-                delim = ';' if ';' in first_line else ("\t" if '\t' in first_line else ',')
-
-            reader = csv.DictReader(f, delimiter=delim)
-            header_lower = [h.lower() for h in (reader.fieldnames or [])]
-            name_key = None
-            for key in ['name', 'university', 'school', 'institution']:
-                if key in header_lower:
-                    name_key = reader.fieldnames[header_lower.index(key)]
-                    break
-            if name_key:
-                for row in reader:
-                    val = (row.get(name_key) or '').strip()
-                    if val:
-                        universities.append(val)
+                if len(result.data) < batch_size:
+                    break  # No more data
+                offset += batch_size
             else:
-                
-                f.seek(0)
-                reader2 = csv.reader(f, delimiter=delim)
-                first_row = True
-                for row in reader2:
-                    if first_row:
-                        first_row = False
-                        
-                        if any((col or '').strip().lower() == 'name' for col in row):
-                            continue
-                    if row:
-                        name = (row[0] or '').strip()
-                        if name:
-                            universities.append(name)
+                break
+        
+        # Update cache
+        _universities_cache = universities
+        _universities_cache_time = current_time
+        logger.info(f"✅ Loaded {len(universities)} universities from Supabase")
+        
     except Exception as e:
-        print(f"⚠️ Failed to load universities CSV: {e}")
+        logger.error(f"⚠️ Failed to load universities from Supabase: {e}")
+        # Return cached data if available, even if expired
+        if _universities_cache is not None:
+            return _universities_cache
     
-    seen = set()
-    deduped: List[str] = []
-    for u in universities:
-        if u not in seen:
-            seen.add(u)
-            deduped.append(u)
-    return deduped
+    return universities
 
 @app.get('/universities')
 def get_universities():
-    return {"universities": load_universities_list()}
+    return {"universities": load_universities_from_supabase()}
+
+
+# Ensure `/request-school` is registered on the currently active `app` instance.
+# (There is an older definition earlier in the file that was attached to a prior
+# FastAPI instance; adding this ensures the route exists for the running app.)
+@app.post('/request-school', summary='Request a new school/university to be added')
+async def request_school_endpoint(data: SchoolRequest):
+    try:
+        payload = {
+            "name": (data.name or "").strip(),
+            "email": (data.email or "").strip().lower(),
+            "university": (data.university or "").strip(),
+            "created_at": datetime.now().isoformat(),
+        }
+        # Insert into Supabase (non-blocking wrapper handled elsewhere)
+        supabase.table('school_requests').insert(payload).execute()
+        return {"success": True, "message": "School request submitted successfully."}
+    except Exception as e:
+        logger.exception("/request-school failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to submit school request")
 
 
 
@@ -1127,8 +1336,63 @@ async def auth_google_register(data: GoogleRegisterRequest):
         raise HTTPException(status_code=500, detail="Google registration failed")
 
 
+@app.post('/auth/google/initiate', summary='Initiate Google OAuth flow for sign-in/sign-up')
+async def initiate_google_auth():
+    """
+    Start Google OAuth flow for authentication.
+    Returns authorization URL for user to visit.
+    This is similar to the calendar OAuth flow but for user authentication.
+    """
+    try:
+        # Get Google OAuth client credentials
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_AUTH_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not google_client_id or not google_client_secret:
+            logger.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+        
+        if not redirect_uri:
+            # Default to deployed backend callback URL
+            redirect_uri = "https://dormdish-backend-git-test-raghav-mehtas-projects-9e41f86c.vercel.app/auth/google/callback"
+        
+        # Generate a random state for CSRF protection
+        import secrets as sec
+        state = sec.token_urlsafe(32)
+        
+        # Build authorization URL
+        from urllib.parse import urlencode
+        
+        auth_params = {
+            'client_id': google_client_id,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid profile email',
+            'access_type': 'offline',
+            'prompt': 'consent',
+            'state': state
+        }
+        
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(auth_params)}"
+        
+        logger.info(f"[auth.google.initiate] Created auth URL with state: {state[:20]}...")
+        
+        return {
+            "success": True,
+            "authorization_url": auth_url,
+            "state": state
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initiate Google auth: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to initiate authorization")
 
 
+hi = "hi"
 class UpdateProfileRequest(BaseModel):
     age: Optional[int] = None
     height_feet: Optional[int] = None
@@ -1140,6 +1404,10 @@ class UpdateProfileRequest(BaseModel):
     university: Optional[str] = None
     
     dietary_preference: Optional[str] = None
+
+class TrackWeightRequest(BaseModel):
+    weight_lbs: float
+    date: Optional[str] = None  # ISO format date, defaults to today if not provided
 
 class MealPlanRequest(BaseModel):
     dining_hall: str
@@ -1156,6 +1424,33 @@ class SaveMealPlanRequest(BaseModel):
     meal_plan_data: dict  # Contains meals, totals, goals, etc.
     plan_id: Optional[str] = None  # If provided, updates existing plan
 
+# ==================== PREFERENCE MANAGEMENT MODELS ====================
+
+class FavoriteRequest(BaseModel):
+    item_name: str
+    item_type: str  # "meal_plan" or "food_item"
+    meal_type: str  # "breakfast", "lunch", "dinner"
+    meal_plan_id: Optional[str] = None
+
+class DislikeRequest(BaseModel):
+    item_name: str
+    item_type: str  # "meal_plan" or "food_item"
+    meal_type: str
+    reason: Optional[str] = None
+
+class StoreBMRRequest(BaseModel):
+    bmr: float
+    dietary_restrictions: List[str]
+    goals: str
+
+class UpdateBMRRequest(BaseModel):
+    bmr: Optional[float] = None
+    dietary_restrictions: Optional[List[str]] = None
+    goals: Optional[str] = None
+
+class TokenData(BaseModel):
+    user_id: str
+
 class MealPlanItemUpdate(BaseModel):
     """Individual meal item for editing"""
     name: str
@@ -1163,8 +1458,12 @@ class MealPlanItemUpdate(BaseModel):
     protein_g: Optional[float] = None
     serving_size: Optional[str] = None
     servings: Optional[float] = 1.0
-class TokenData(BaseModel):
+
+class PushTokenRequest(BaseModel):
+    """Request model for registering push notification tokens"""
+    token: str
     user_id: str
+    platform: str  # 'mobile', 'ios', 'android'
 
 @app.get("/health", summary="Health Check")
 async def health_check():
@@ -1188,6 +1487,122 @@ async def health_check():
                 "timestamp": datetime.now().isoformat()
             }
         )
+
+
+@app.get("/loaderio-e4d6abce9b7ba70cd20b89ccdd7d82c4.txt", summary="Loader.io verification")
+async def loaderio_verification():
+    """Loader.io verification endpoint"""
+    return PlainTextResponse(content="loaderio-e4d6abce9b7ba70cd20b89ccdd7d82c4")
+
+
+@app.post('/api/register-push-token', summary='Register device push notification token')
+async def register_push_token(data: PushTokenRequest):
+    """
+    Register or update a user's push notification token.
+    This endpoint stores the Expo push token for sending notifications.
+    """
+    try:
+        # Validate token format
+        if not data.token or not data.token.startswith('ExponentPushToken['):
+            raise HTTPException(status_code=400, detail="Invalid Expo push token format")
+        
+        # Check if token already exists for this user
+        existing = supabase.table('push_tokens')\
+            .select('id')\
+            .eq('user_id', data.user_id)\
+            .eq('token', data.token)\
+            .execute()
+        
+        now = datetime.now().isoformat()
+        
+        if existing.data and len(existing.data) > 0:
+            # Update existing token
+            supabase.table('push_tokens')\
+                .update({
+                    'active': True,
+                    'updated_at': now,
+                    'platform': data.platform
+                })\
+                .eq('id', existing.data[0]['id'])\
+                .execute()
+            
+            logger.info(f"Updated push token for user {data.user_id}")
+        else:
+            # Deactivate old tokens for this user (keep only one active)
+            supabase.table('push_tokens')\
+                .update({'active': False})\
+                .eq('user_id', data.user_id)\
+                .execute()
+            
+            # Insert new token
+            supabase.table('push_tokens').insert({
+                'user_id': data.user_id,
+                'token': data.token,
+                'platform': data.platform,
+                'active': True,
+                'created_at': now,
+                'updated_at': now
+            }).execute()
+            
+            logger.info(f"Registered new push token for user {data.user_id}")
+        
+        return {"success": True, "message": "Push token registered successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to register push token: {e}")
+        raise HTTPException(status_code=500, detail="Failed to register push token")
+
+
+@app.api_route('/api/send-daily-reminders', methods=['GET', 'POST'], summary='Send daily meal plan reminders (admin/cron only)')
+async def send_daily_reminders():
+    """
+    Send reminder notifications to all users who haven't created their meal plan today.
+    This endpoint should be called by a cron job or scheduled task.
+    Accepts both GET and POST for Vercel Cron compatibility.
+    """
+    try:
+        # Get all users with active push tokens
+        response = supabase.table('push_tokens')\
+            .select('user_id')\
+            .eq('active', True)\
+            .execute()
+        
+        if not response.data:
+            return {"success": True, "message": "No active push tokens found", "sent": 0}
+        
+        # Get unique user IDs
+        user_ids = list(set(token['user_id'] for token in response.data))
+        
+        sent_count = 0
+        failed_count = 0
+        
+        # Send reminders to each user
+        for user_id in user_ids:
+            try:
+                success = await send_meal_plan_reminder_notification(user_id)
+                if success:
+                    sent_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send reminder to user {user_id}: {e}")
+                failed_count += 1
+        
+        logger.info(f"Daily reminders sent: {sent_count} successful, {failed_count} failed/skipped")
+        
+        return {
+            "success": True,
+            "message": "Daily reminders processed",
+            "sent": sent_count,
+            "failed": failed_count,
+            "total_users": len(user_ids)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to send daily reminders: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send daily reminders")
 
 
 def _rutgers_today_str():
@@ -1232,9 +1647,23 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
             if items_count == 0:
                 print(f"⚠️ Skipping Supabase save for empty menu {menu_id}")
                 return False
-            print(f"🔍 Saving menu with {items_count} items to Supabase")
-            print(f"🔍 Menu data keys: {list(menu_data.keys())}")
+            print(f"� Saving menu with {items_count} items to Supabase")
+            print(f"� Menu data keys: {list(menu_data.keys())}")
             stored_menu_data = menu_data.get("menu", menu_data)
+            
+            # DEBUG: Check if fat_g and carbs_g are in the items being saved
+            if "items" in stored_menu_data and len(stored_menu_data["items"]) > 0:
+                sample_item = stored_menu_data["items"][0]
+                print(f"� SAMPLE ITEM BEFORE SAVE: {sample_item.get('name')}")
+                print(f"� SAMPLE MACROS: protein={sample_item.get('protein_g')}, fat={sample_item.get('fat_g')}, carbs={sample_item.get('carbs_g')}, cal={sample_item.get('calories')}")
+                
+                # Count items with complete macros
+                complete_count = sum(1 for item in stored_menu_data["items"] 
+                                   if item.get('fat_g') is not None and item.get('carbs_g') is not None)
+                print(f"💾 Items with fat_g and carbs_g: {complete_count}/{len(stored_menu_data['items'])}")
+            else:
+                print(f"⚠️ No items found in stored_menu_data")
+                
             data_to_insert = {
                 "id": menu_id,
                 "university": university,
@@ -1246,12 +1675,14 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
                 "created_at": datetime.now().isoformat(),
             }
             response = supabase.table("menus").upsert(data_to_insert).execute()
-            print(f"💾 Saved menu to Supabase: {menu_id}")
-            print(f"💾 Supabase response data length: {len(response.data) if response.data else 0}")
+            print(f"✅ Saved menu to Supabase: {menu_id}")
+            print(f"✅ Supabase response data length: {len(response.data) if response.data else 0}")
             return True
         except Exception as exc:
             print(f"⚠️ Error saving to Supabase: {exc}")
             print(f"⚠️ Error type: {type(exc)}")
+            import traceback
+            traceback.print_exc()
             return False
 
     return await asyncio.to_thread(_save)
@@ -1267,8 +1698,9 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         dh_norm = "neilson"
     dining_hall = dh_norm
 
+    # University and dining hall mapping - extensible for multiple universities
     dining_hall_mapping = {
-        
+        # Hopkins University
         "hopkins-cafe": ("hopkins", "hopkins-cafe"),
         "hopkins cafe": ("hopkins", "hopkins-cafe"),
         "hopkins": ("hopkins", "hopkins-cafe"),
@@ -1278,13 +1710,10 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
         
+        # Rutgers University - Nutrislice halls
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
-        "livingston": ("rutgers", "livingston-dining-commons"),
-        "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining commons": ("rutgers", "livingston-dining-commons"),
         "brower": ("rutgers", "brower-commons"),
         "brower-commons": ("rutgers", "brower-commons"),
         "brower commons": ("rutgers", "brower-commons"),
@@ -1292,6 +1721,7 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "college ave": ("rutgers", "brower-commons"),
         "college avenue": ("rutgers", "brower-commons"),
         
+        # Rutgers University - Now using Nutrislice instead of FoodPro for Neilson
         "neilson": ("rutgers", "neilson-dining-hall"),
         "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
         "neilson dining hall": ("rutgers", "neilson-dining-hall"),
@@ -1302,6 +1732,11 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
         
+        # Rutgers University - FoodPro halls (legacy)
+        "livingston": ("rutgers", "livingston-dining-commons"),
+        "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
+        "livingston dining hall": ("rutgers", "livingston-dining-commons"),
+        "livingston dining commons": ("rutgers", "livingston-dining-commons"),
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
@@ -1320,7 +1755,10 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
 
-    if university == "rutgers" and hall_slug in {"livingston-dining-commons", "neilson-dining-hall", "the-atrium"}:
+    # FoodPro halls (legacy Rutgers halls that still use FoodPro scraper)
+    foodpro_halls = {"livingston-dining-commons", "the-atrium"}
+    
+    if university == "rutgers" and hall_slug in foodpro_halls:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
             menu_data = await fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
@@ -1334,6 +1772,7 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
             print(f"❌ FoodPro fetch failed: {e}")
             return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
 
+    # All other halls use Nutrislice API (including Neilson)
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
         menu_data = await fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
@@ -1383,12 +1822,19 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         name = food.get("name")
         if not name:
             return
-        out_item: Dict[str, object] = {"name": name}
+        out_item: Dict[str, object] = {"name": title_case_name(name)}
         prot = food.get("g_protein")
         if prot is None:
             prot = food.get("protein_g")
         if prot is not None:
             out_item["protein_g"] = prot
+        # include fat and carbs if present in new FoodPro schema
+        fat = food.get("g_fat") or food.get("fat_g")
+        if fat is not None:
+            out_item["fat_g"] = fat
+        carbs = food.get("g_carbs") or food.get("carbs_g") or food.get("carbohydrates")
+        if carbs is not None:
+            out_item["carbs_g"] = carbs
         cals = food.get("calories")
         if cals is not None:
             out_item["calories"] = cals
@@ -1449,14 +1895,23 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                     if not name:
                         continue
                     
-                    out_item: Dict[str, object] = {"name": name}
+                    out_item: Dict[str, object] = {"name": title_case_name(name)}
                     if it.get("protein_g") is not None:
                         out_item["protein_g"] = it.get("protein_g")
                     if it.get("calories") is not None:
                         out_item["calories"] = it.get("calories")
+                    if it.get("fat_g") is not None:
+                        out_item["fat_g"] = it.get("fat_g")
+                    if it.get("carbs_g") is not None:
+                        out_item["carbs_g"] = it.get("carbs_g")
                     if it.get("serving_size"):
                         out_item["serving_size"] = it.get("serving_size")
                     items.append(out_item)
+                    
+                    # DEBUG: Log first item with macros
+                    if len(items) == 1:
+                        print(f"🔍 FIRST ITEM PROCESSED: {out_item.get('name')}")
+                        print(f"🔍 FIRST ITEM MACROS: protein={out_item.get('protein_g')}, fat={out_item.get('fat_g')}, carbs={out_item.get('carbs_g')}, cal={out_item.get('calories')}")
             else:
                 
                 if isinstance(parsed, dict):
@@ -1511,6 +1966,12 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         warnings.append("No items parsed from FoodPro")
         raise RuntimeError("FoodPro returned zero items")
 
+    # DEBUG: Check unique_items has fat_g and carbs_g
+    print(f"🔍 UNIQUE_ITEMS COUNT: {len(unique_items)}")
+    if unique_items:
+        sample = unique_items[0]
+        print(f"🔍 UNIQUE_ITEMS SAMPLE: name={sample.get('name')}, fat_g={sample.get('fat_g', 'MISSING')}, carbs_g={sample.get('carbs_g', 'MISSING')}")
+
     meal_sources = attempt.get("meal_sources", [])
 
     return {
@@ -1532,24 +1993,42 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         "rutgers": "https://rutgers.api.nutrislice.com/menu/api/weeks/school",
         "hopkins": "https://hopkinsdining.api.nutrislice.com/menu/api/weeks/school",
     }
+    
+    # Configure meal slugs per university and hall
     meal_configs = {
-        "rutgers": ["breakfast", "lunch-test", "dinner"],
+        "rutgers": {
+            # Default meals for most Rutgers halls
+            "default": ["breakfast", "lunch-test", "dinner"],
+            # Neilson/Cook-Douglass specific meals
+            "neilson-dining-hall": ["breakfast", "lunch-test", "dinner"],
+            # Busch specific meals  
+            "busch-dining-hall": ["breakfast", "lunch-test", "dinner"],
+            # Brower specific meals
+            "brower-commons": ["breakfast", "lunch-test", "dinner"],
+        },
         "hopkins": {
             "nolans-on-33rd": ["nolans-breakfast", "nolans-dinner-2", "nolans-dinner"],
             "peabody-institute": ["peabody-breakfast", "peabody-lunch", "peabody-dinner"],
             "hopkins-cafe": ["hopkins-cafe-breakfast", "hopkins-cafe-lunch", "hopkins-cafe-dinner"],
         },
     }
+    
     api_base = api_bases.get(university)
     if not api_base:
         raise ValueError(f"Unsupported university: {university}")
+    
     if university == "hopkins":
         meal_slugs = meal_configs["hopkins"].get(hall_slug, [])
         if not meal_slugs:
             prefix = hall_slug.split("-")[0]
             meal_slugs = [f"{prefix}-breakfast", f"{prefix}-lunch", f"{prefix}-dinner"]
+    elif university == "rutgers":
+        # Use hall-specific config if available, otherwise use default
+        meal_slugs = meal_configs["rutgers"].get(hall_slug, meal_configs["rutgers"]["default"])
     else:
-        meal_slugs = meal_configs[university]
+        # Fallback for any other university
+        meal_slugs = ["breakfast", "lunch", "dinner"]
+    
     all_items: List[dict] = []
     meal_sources: List[str] = []
     warnings: List[str] = []
@@ -1649,7 +2128,7 @@ async def fetch_meal_items(api_base: str, hall_slug: str, meal_slug: str, date: 
 
 
 def process_menu_item(item: dict) -> Optional[dict]:
-    """Process a menu item and extract nutritional information"""
+    """Process a menu item and extract nutritional information including fats and carbs"""
     name = None
     if isinstance(item.get("food"), dict):
         name = item["food"].get("name")
@@ -1657,7 +2136,10 @@ def process_menu_item(item: dict) -> Optional[dict]:
         name = item.get("name") or item.get("item_name")
     if not name:
         return None
+    
     nutrition: Dict[str, Optional[float]] = {}
+    
+    # Extract nutrition from nested 'food' object (Nutrislice format)
     if isinstance(item.get("food"), dict):
         food = item["food"]
         rni = food.get("rounded_nutrition_info") or {}
@@ -1665,27 +2147,49 @@ def process_menu_item(item: dict) -> Optional[dict]:
         nutrition = {
             "protein_g": rni.get("g_protein"),
             "calories": rni.get("calories"),
+            "fat_g": rni.get("g_fat"),  # Extract fat
+            "carbs_g": rni.get("g_carbs"),  # Extract carbs
             "serving_size": f"{serving_info.get('serving_size_amount', '')} {serving_info.get('serving_size_unit', '')}".strip(),
         }
     else:
+        # Extract from flat structure (alternative format)
         nutrition = {
             "protein_g": item.get("g_protein") or item.get("protein"),
             "calories": item.get("calories") or item.get("kcal"),
+            "fat_g": item.get("g_fat") or item.get("fat"),  # Extract fat
+            "carbs_g": item.get("g_carbs") or item.get("carbs") or item.get("carbohydrates"),  # Extract carbs
             "serving_size": item.get("serving_size") or item.get("portion_size"),
         }
-    result: Dict[str, object] = {"name": name}
+    
+    result: Dict[str, object] = {"name": title_case_name(name)}
+    
+    # Add required macros (protein and calories)
     if nutrition.get("protein_g") is not None:
         try:
-            result["protein_g"] = float(nutrition["protein_g"])  
+            result["protein_g"] = float(nutrition["protein_g"])
         except (ValueError, TypeError):
             pass
     if nutrition.get("calories") is not None:
         try:
-            result["calories"] = float(nutrition["calories"])  
+            result["calories"] = float(nutrition["calories"])
         except (ValueError, TypeError):
             pass
     if nutrition.get("serving_size"):
-        result["serving_size"] = str(nutrition["serving_size"])  
+        result["serving_size"] = str(nutrition["serving_size"])
+    
+    # Add optional macros (fats and carbs) - IMPORTANT for complete nutrition tracking
+    if nutrition.get("fat_g") is not None:
+        try:
+            result["fat_g"] = float(nutrition.get("fat_g"))
+        except (ValueError, TypeError):
+            pass
+
+    if nutrition.get("carbs_g") is not None:
+        try:
+            result["carbs_g"] = float(nutrition.get("carbs_g"))
+        except (ValueError, TypeError):
+            pass
+    
     return result
 
 
@@ -1705,10 +2209,18 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
             continue
         cal = it.get("calories")
         prot = it.get("protein_g")
+        fat = it.get("fat_g")
+        carbs = it.get("carbs_g")
         if cal is None or prot is None:
             continue
         try:
-            lines.append(f"{nm} | {int(round(cal))} cal | {int(round(prot))} g protein")
+            # Include fats and carbs if available
+            parts = [f"{nm}", f"{int(round(cal))} cal", f"{int(round(prot))}g protein"]
+            if fat is not None:
+                parts.append(f"{int(round(fat))}g fat")
+            if carbs is not None:
+                parts.append(f"{int(round(carbs))}g carbs")
+            lines.append(" | ".join(parts))
         except Exception:
             continue
     allowed_block = "\n".join(lines) if lines else "(none)"
@@ -1720,7 +2232,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "STRICT OUTPUT: Return a single JSON object with these exact top-level keys (no extras, no markdown):",
         "",
         "{",
-        ' "totals": { "calories": "<int>", "protein_g": "<int>" },',
+        ' "totals": { "calories": "<int>", "protein_g": "<int>", "fat_g": "<int>", "carbs_g": "<int>" },',
         ' "meals": {',
         '   "breakfast": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
         '   "lunch": { "description": "<string>", "items": [ "<meal_item>", ... ] },',
@@ -1731,7 +2243,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "",
         "Meal item schema:",
         "",
-        '{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "serving_size": "<string|null>" }',
+        '{ "name": "<exact item>", "servings": "<number>", "calories": "<number>", "protein_g": "<number>", "fat_g": "<number>", "carbs_g": "<number>", "serving_size": "<string|null>" }',
         "",
         "Rules",
         "",
@@ -1749,7 +2261,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "",
         "Nutrition Targets",
         "",
-        "Calories & protein must be within ±5% of goals.",
+        "Calories & protein must be within ±5% of goals. Track fats and carbs when available.",
         "",
         "Prioritize protein target first, then adjust calories.",
         "",
@@ -1780,6 +2292,60 @@ def _estimate_missing_macros(calories: Optional[float], protein: Optional[float]
     return float(calories), float(protein)
 
 
+def calculate_macro_targets(weight_lbs: float, total_calories: int, protein_g: int, goal: str) -> dict:
+    """
+    Calculate fat and carbs targets based on calories, protein, weight, and fitness goal.
+    
+    Standard approach:
+    - Fat: 0.4-0.5g per lb bodyweight (varies by goal)
+    - Carbs: Remaining calories after protein and fat are allocated
+    
+    Calorie conversion:
+    - Protein: 4 cal/g
+    - Fat: 9 cal/g
+    - Carbs: 4 cal/g
+    
+    Args:
+        weight_lbs: User's body weight in pounds
+        total_calories: Daily calorie target
+        protein_g: Daily protein target in grams
+        goal: 'cut', 'maintain', or 'bulk'
+    
+    Returns:
+        dict with 'fat_g' and 'carbs_g' targets
+    """
+    goal_lower = goal.lower()
+    
+    # Calculate fat target based on goal
+    # Cut: 0.4g/lb (lower fat to maximize deficit)
+    # Maintain: 0.45g/lb (moderate fat)
+    # Bulk: 0.5g/lb (higher fat for surplus)
+    if goal_lower == 'cut':
+        fat_per_lb = 0.4
+    elif goal_lower == 'bulk':
+        fat_per_lb = 0.5
+    else:  # maintain
+        fat_per_lb = 0.45
+    
+    fat_target = weight_lbs * fat_per_lb
+    
+    # Calculate calories from protein and fat
+    protein_calories = protein_g * 4  # 4 cal per gram of protein
+    fat_calories = fat_target * 9  # 9 cal per gram of fat
+    
+    # Remaining calories go to carbs
+    carbs_calories = total_calories - protein_calories - fat_calories
+    
+    # Ensure carbs don't go negative (minimum 50g for brain function)
+    carbs_calories = max(carbs_calories, 200)  # 50g * 4 cal/g = 200 cal minimum
+    carbs_target = carbs_calories / 4  # 4 cal per gram of carbs
+    
+    return {
+        'fat_g': int(round(fat_target)),
+        'carbs_g': int(round(carbs_target))
+    }
+
+
 def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
     """Fuzzy lookup for item names in nutrition database."""
     if name.upper() in lookup:
@@ -1791,6 +2357,43 @@ def _fuzzy_lookup(name: str, lookup: Dict[str, dict]) -> Optional[str]:
     if candidates:
         return lower_map[candidates[0]]
     return None
+
+
+def _normalize_preference_key(metadata: Dict[str, Any]) -> Optional[str]:
+    """Normalize metadata into a front-end friendly favorite/dislike key."""
+    item_name = (metadata.get("item_name") or metadata.get("food_item") or "").strip().lower()
+    if not item_name:
+        return None
+    item_type = metadata.get("preference_type") or metadata.get("item_type") or "food_item"
+    if item_type not in ("meal_plan", "food_item"):
+        item_type = "food_item"
+    return f"{item_type}:{item_name}"
+
+
+def _build_preferences_snapshot(
+    favorites: List[Dict[str, Any]],
+    dislikes: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    favorite_keys: List[str] = []
+    for fav in favorites or []:
+        metadata = fav.get("metadata") or {}
+        key = _normalize_preference_key(metadata)
+        if key and key not in favorite_keys:
+            favorite_keys.append(key)
+
+    dislike_keys: List[str] = []
+    for dislike in dislikes or []:
+        metadata = dislike.get("metadata") or {}
+        key = _normalize_preference_key(metadata)
+        if key and key not in dislike_keys:
+            dislike_keys.append(key)
+
+    return {
+        "favorites": favorites or [],
+        "dislikes": dislikes or [],
+        "favorite_keys": favorite_keys,
+        "dislike_keys": dislike_keys,
+    }
 
 @app.put("/auth/profile", summary="Update User Profile")
 async def update_profile(profile_data: UpdateProfileRequest, current_user=Depends(get_current_user)):
@@ -1858,7 +2461,132 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
         raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
 
 
+<<<<<<< HEAD
 hi="hi"
+=======
+@app.post("/auth/weight", summary="Track user weight")
+async def track_weight(weight_data: TrackWeightRequest, current_user=Depends(get_current_user)):
+    """
+    Track user weight for a specific date.
+    Creates or updates weight entry for the given date.
+    Also updates the user's profile weight_lbs field.
+    """
+    try:
+        # Use provided date or default to today
+        weight_date = weight_data.date or datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        
+        # Validate weight value
+        if weight_data.weight_lbs <= 0 or weight_data.weight_lbs > 1000:
+            raise HTTPException(status_code=400, detail="Weight must be between 0 and 1000 lbs")
+        
+        # Check if weight entry already exists for this date
+        existing = supabase.table("weight_history")\
+            .select("id")\
+            .eq("user_id", current_user["id"])\
+            .eq("date", weight_date)\
+            .execute()
+        
+        if existing.data and len(existing.data) > 0:
+            # Update existing entry
+            response = supabase.table("weight_history")\
+                .update({
+                    "weight_lbs": weight_data.weight_lbs,
+                    "updated_at": datetime.now(ZoneInfo("America/New_York")).isoformat()
+                })\
+                .eq("user_id", current_user["id"])\
+                .eq("date", weight_date)\
+                .execute()
+        else:
+            # Create new entry
+            response = supabase.table("weight_history")\
+                .insert({
+                    "user_id": current_user["id"],
+                    "weight_lbs": weight_data.weight_lbs,
+                    "date": weight_date,
+                    "created_at": datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                    "updated_at": datetime.now(ZoneInfo("America/New_York")).isoformat()
+                })\
+                .execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to save weight data")
+        
+        # Also update the user's current weight in profile
+        profile_update = supabase.table("users")\
+            .update({"weight_lbs": weight_data.weight_lbs})\
+            .eq("id", current_user["id"])\
+            .execute()
+        
+        # Recalculate BMR and TDEE with new weight
+        if all(key in current_user for key in ['age', 'height_feet', 'height_inches', 'gender', 'activity_level']):
+            bmr_data = calculate_bmr_tdee(
+                current_user['age'],
+                current_user['height_feet'],
+                current_user['height_inches'],
+                weight_data.weight_lbs,
+                current_user['gender'],
+                current_user['activity_level']
+            )
+            supabase.table("users")\
+                .update({"bmr": bmr_data['bmr'], "tdee": bmr_data['tdee']})\
+                .eq("id", current_user["id"])\
+                .execute()
+        
+        return {
+            "success": True,
+            "message": "Weight tracked successfully",
+            "weight": response.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error tracking weight: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to track weight: {str(e)}")
+
+
+@app.get("/auth/weight/history", summary="Get user weight history")
+async def get_weight_history(
+    limit: int = 30,
+    offset: int = 0,
+    days: Optional[int] = None,  # Optional: get entries from last N days
+    current_user=Depends(get_current_user)
+):
+    """
+    Get user's weight history, ordered by date (most recent first).
+    Returns weight entries for tracking progress over time.
+    
+    If 'days' parameter is provided, returns entries from the last N days.
+    Otherwise, returns the last N entries (limited by 'limit').
+    """
+    try:
+        query = supabase.table("weight_history")\
+            .select("id, weight_lbs, date, created_at, updated_at")\
+            .eq("user_id", current_user["id"])
+        
+        # If 'days' parameter is provided, filter by date range
+        if days is not None:
+            today = datetime.now(ZoneInfo("America/New_York")).date()
+            start_date = (today - timedelta(days=days - 1)).isoformat()  # days - 1 to include today
+            query = query.gte("date", start_date)
+        
+        response = query\
+            .order("date", desc=True)\
+            .range(offset, offset + limit - 1)\
+            .execute()
+        
+        weights = response.data if response.data else []
+        
+        return {
+            "success": True,
+            "weights": weights,
+            "count": len(weights)
+        }
+    except Exception as e:
+        print(f"Error fetching weight history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch weight history: {str(e)}")
+
+
+>>>>>>> test
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
@@ -1886,7 +2614,11 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         #     .eq("user_id", authenticated_user["id"])\
         #     .eq("date", today)\
         #     .execute()
+<<<<<<< HEAD
         # 
+=======
+        
+>>>>>>> test
         # if existing_plan_check.data and len(existing_plan_check.data) > 0:
         #     existing = existing_plan_check.data[0]
         #     raise HTTPException(
@@ -1974,6 +2706,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             calories = raw.get("calories")
             protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
             calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
             serving_size = raw.get("serving_size") or None
             entry = {
                 "name": name,
@@ -1982,6 +2716,17 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "serving_size": serving_size,
                 "density": (protein / calories) if calories else 0.0,
             }
+            # Add optional macros if available
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
             key = name.upper()
             if key not in nutrition_lookup:  
                 nutrition_lookup[key] = entry
@@ -1999,6 +2744,16 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         else:
             calorie_target = int(round(user_tdee))
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+        
+        # Calculate fat and carbs targets
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
 
         # Check subscription status
         subscription_status = authenticated_user.get("subscription_status")
@@ -2039,6 +2794,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "source_menu": menu_data,
             "allowed_items": allowed_for_prompt,
         }
+<<<<<<< HEAD
         
         # Only include nutrition targets for subscribed users
         agent_nutrition_targets = None
@@ -2051,6 +2807,65 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "goal": goal_mode,
                 "activity_breakdown": selected_activity_metrics or None,
             }
+=======
+        agent_nutrition_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
+            "bmr": user_bmr,
+            "tdee": user_tdee,
+            "goal": goal_mode,
+            "activity_breakdown": selected_activity_metrics or None,
+        }
+>>>>>>> test
+
+        # Retrieve user preferences from mem0 (if available)
+        user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
+        try:
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager()
+            user_id = str(authenticated_user["id"])
+            
+            print(f"[mem0] Meal Plan Generation - User ID from auth: {user_id}")
+            print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+            
+            # Retrieve all preference types (only favorites and dislikes)
+            favorites = await preference_manager.get_favorites(user_id)
+            dislikes = await preference_manager.get_dislikes(user_id)
+            profile = await preference_manager.get_user_profile(user_id)
+            prefs = [profile] if profile else []
+            
+            # DEBUG: Log what was retrieved
+            print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+            if favorites:
+                print(f"[mem0] Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+            if dislikes:
+                print(f"[mem0] Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+            
+            # Build context string for LLM
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
+            
+            if user_preferences_context:
+                print(f"[mem0] Built preference context ({len(user_preferences_context)} chars)")
+
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
+        except Exception as mem_error:
+            # Don't fail meal plan generation if mem0 is unavailable
+            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+            user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
 
         ai_start = time.time()
         try:
@@ -2058,10 +2873,14 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 user_payload=agent_user_payload,
                 menu_payload=agent_menu_payload,
                 nutrition_targets=agent_nutrition_targets,
+<<<<<<< HEAD
                 is_subscribed=is_subscribed,
+=======
+                user_preferences_context=user_preferences_context,
+>>>>>>> test
             )
         except ValueError as e:
-            raise HTTPException(status_code=500, detail=f"Agent execution failed: {e}")
+            raise HTTPException(status_code=500, detail="Please try again.")
         ai_end = time.time()
 
         plan_json = agent_result.model_dump()
@@ -2101,7 +2920,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 if not sanitized_item.get("serving_size"):
                     sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
 
-                for macro_key in ("calories", "protein_g"):
+                for macro_key in ("calories", "protein_g", "fat_g", "carbs_g"):
                     value = sanitized_item.get(macro_key)
                     if value is None:
                         continue
@@ -2118,6 +2937,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         if unknown_items:
             dropped_items_meta['dropped_unknown'] = unknown_items
 
+<<<<<<< HEAD
         # Only include nutrition goals and detailed stats for subscribed users
         if is_subscribed:
             plan_json.setdefault('goals', {})['calories'] = calorie_target
@@ -2129,18 +2949,32 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         
         # Always include dietary preference
         plan_json.setdefault('user_stats', {})['dietary_preference'] = user.dietary_preference or None
+=======
+        plan_json["preferences_snapshot"] = preferences_snapshot
+
+        plan_json.setdefault('goals', {})['calories'] = calorie_target
+        plan_json['goals']['protein_g'] = protein_target
+        plan_json['goals']['fat_g'] = fat_target
+        plan_json['goals']['carbs_g'] = carbs_target
+        plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
+        plan_json['user_stats']['tdee'] = user_tdee
+        plan_json['user_stats']['goal'] = goal_mode
+        plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
+        plan_json['user_stats']['activity_breakdown'] = selected_activity_metrics or None
+>>>>>>> test
 
         
         totals = plan_json.get('totals')
         if not isinstance(totals, dict):
-            raise HTTPException(status_code=500, detail="Model response missing totals block")
+            raise HTTPException(status_code=500, detail="Please try again.")
         try:
             final_cal = float(totals['calories'])
             final_prot = float(totals['protein_g'])
         except (KeyError, TypeError, ValueError):
-            raise HTTPException(status_code=500, detail="Model response missing valid totals")
+            raise HTTPException(status_code=500, detail="Please try again.")
         totals['calories'] = final_cal
         totals['protein_g'] = final_prot
+<<<<<<< HEAD
         
         if is_subscribed:
             cal_diff = final_cal - calorie_target
@@ -2155,6 +2989,34 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             print(f"📊 Final Plan Metrics (Non-Subscribed User):")
             print(f"   Calories: {final_cal:.0f}")
             print(f"   Protein:  {final_prot:.0f}g")
+=======
+        
+        # Handle optional fat_g and carbs_g in totals
+        if 'fat_g' in totals and totals['fat_g'] is not None:
+            try:
+                totals['fat_g'] = float(totals['fat_g'])
+            except (TypeError, ValueError):
+                totals['fat_g'] = 0
+        
+        if 'carbs_g' in totals and totals['carbs_g'] is not None:
+            try:
+                totals['carbs_g'] = float(totals['carbs_g'])
+            except (TypeError, ValueError):
+                totals['carbs_g'] = 0
+        
+        cal_diff = final_cal - calorie_target
+        prot_diff = final_prot - protein_target
+        cal_pct = (cal_diff / calorie_target * 100) if calorie_target else 0
+        prot_pct = (prot_diff / protein_target * 100) if protein_target else 0
+        
+        print(f"📊 Final Plan Metrics:")
+        print(f"   Calories: {final_cal:.0f} / {calorie_target} ({cal_pct:+.1f}%)")
+        print(f"   Protein:  {final_prot:.0f}g / {protein_target}g ({prot_pct:+.1f}%)")
+        if totals.get('fat_g'):
+            print(f"   Fat:      {totals['fat_g']:.0f}g")
+        if totals.get('carbs_g'):
+            print(f"   Carbs:    {totals['carbs_g']:.0f}g")
+>>>>>>> test
 
         if not plan_json.get('explanation'):
             plan_json['explanation'] = "Balanced plan targeting protein and calories with available items."
@@ -2190,8 +3052,25 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         response_payload = {
             "success": True,
             "user_profile": safe_user,
+<<<<<<< HEAD
+=======
+            "nutrition_targets": {
+                "calories": calorie_target,
+                "protein_g": protein_target,
+                "fat_g": fat_target,
+                "carbs_g": carbs_target,
+            },
+            "bmr_tdee": {
+                "bmr": user_bmr,
+                "tdee": user_tdee,
+                "activity_breakdown": selected_activity_metrics or None,
+                "bmr_precise": metrics.get("bmr_precise"),
+                "tdee_precise": metrics.get("tdee_precise"),
+            },
+>>>>>>> test
             "available_items": allowed_for_prompt,
             "meal_plan": plan_json,
+            "preferences_snapshot": preferences_snapshot,
             "generation_id": generation_id,
             "ask_feedback": "Please rate this meal plan",  
             "processing_info": {
@@ -2234,18 +3113,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "updated_at": datetime.now().isoformat(),
             }
             
+            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
             save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
             
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
                 response_payload["auto_saved"] = True
-                print(f"✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+                logger.info(f"[MealPlan] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
             else:
-                print(f"⚠️ Failed to auto-save meal plan, but generation succeeded")
+                error_msg = getattr(save_response, 'error', 'Unknown error')
+                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}")
                 response_payload["auto_saved"] = False
         except Exception as save_error:
             # Don't fail the entire request if save fails
-            print(f"⚠️ Auto-save failed: {save_error}")
+            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
         
         return response_payload
@@ -2253,8 +3134,217 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Meal plan generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Meal plan generation failed: {e}")
+        err_msg = str(e)
+        print(f"❌ Meal plan generation error: {err_msg}")
+        # Don't expose error details to users
+        raise HTTPException(status_code=500, detail="Please try again.")
+
+
+@app.post("/generate-meal-plan-stream", summary="Generate Meal Plan with Streaming")
+async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None)):
+    """Generate a meal plan with streaming updates. Streams thinking and response generation in real-time."""
+    try:
+        from meal_plan_agent import generate_meal_plan_with_streaming
+        
+        authenticated_user = None
+        if authorization and authorization.startswith('Bearer '):
+            token = authorization.replace('Bearer ', '')
+            authenticated_user = await asyncio.to_thread(verify_session_token, token)
+        if not authenticated_user:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+
+        # Get user data
+        user = User(
+            age=authenticated_user['age'],
+            height_feet=authenticated_user['height_feet'],
+            height_inches=authenticated_user['height_inches'],
+            weight_lbs=float(authenticated_user['weight_lbs']),
+            activity_level=authenticated_user['activity_level'],
+            goal=authenticated_user['goal'],
+            preferred_dining_hall=meal_plan_request.dining_hall,
+            dietary_preference=authenticated_user.get('dietary_preference'),
+        )
+        
+        metrics = calculate_bmr_tdee(
+            age=user.age,
+            height_feet=user.height_feet,
+            height_inches=user.height_inches,
+            weight_lbs=user.weight_lbs,
+            gender=authenticated_user.get('gender'),
+            activity_level=user.activity_level,
+        )
+        user_bmr = float(metrics["bmr"])
+        user_tdee = float(metrics["tdee"])
+
+        # Get menu data
+        menu_data = await get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
+        if menu_data.get("error"):
+            raise HTTPException(status_code=400, detail=menu_data.get("error"))
+        
+        items_list = menu_data.get("items", []) or []
+        if not items_list:
+            raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
+
+        # Process nutrition data
+        nutrition_lookup: Dict[str, dict] = {}
+        allowed_for_prompt: List[dict] = []
+        for raw in items_list:
+            name = (raw.get("name") or "").strip()
+            if not name:
+                continue
+            calories = raw.get("calories")
+            protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
+            calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
+            serving_size = raw.get("serving_size") or None
+            entry = {
+                "name": name,
+                "calories": float(calories),
+                "protein_g": float(protein),
+                "serving_size": serving_size,
+                "density": (protein / calories) if calories else 0.0,
+            }
+            # Add optional macros if available
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
+            key = name.upper()
+            if key not in nutrition_lookup:
+                nutrition_lookup[key] = entry
+                allowed_for_prompt.append(entry)
+
+        # Calculate targets
+        goal_mode = user.goal.lower()
+        if goal_mode == 'cut':
+            calorie_target = int(round(user_tdee * 0.85))
+        elif goal_mode == 'bulk':
+            calorie_target = int(round(user_tdee * 1.10))
+        else:
+            calorie_target = int(round(user_tdee))
+        protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+        
+        # Calculate fat and carbs targets
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
+
+        # Prepare payloads for streaming agent
+        user_payload = {
+            "age": user.age,
+            "weight_lbs": user.weight_lbs,
+            "activity_level": user.activity_level,
+            "goal": user.goal,
+            "dietary_preference": user.dietary_preference,
+        }
+        
+        menu_payload = {
+            "requested_dining_hall": meal_plan_request.dining_hall,
+            "requested_date": meal_plan_request.date,
+            "allowed_items": allowed_for_prompt,
+            "source_menu": menu_data,
+        }
+        
+        nutrition_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
+        }
+
+        # Retrieve user preferences from mem0 (if available)
+        user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
+        try:
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager()
+            user_id = str(authenticated_user["id"])
+            
+            print(f"[mem0] Streaming Generation - User ID from auth: {user_id}")
+            print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+            
+            # Retrieve all preference types (only favorites and dislikes)
+            favorites = await preference_manager.get_favorites(user_id)
+            dislikes = await preference_manager.get_dislikes(user_id)
+            profile = await preference_manager.get_user_profile(user_id)
+            prefs = [profile] if profile else []
+            
+            # DEBUG: Log what was retrieved
+            print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+            if favorites:
+                print(f"[mem0] Streaming Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+            if dislikes:
+                print(f"[mem0] Streaming Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+            
+            # Build context string for LLM
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
+            
+            if user_preferences_context:
+                print(f"[mem0] Streaming: Built preference context ({len(user_preferences_context)} chars)")
+
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
+        except Exception as mem_error:
+            # Don't fail meal plan generation if mem0 is unavailable
+            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+            user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
+
+        async def event_generator():
+            """Generator function for Server-Sent Events"""
+            try:
+                async for chunk in generate_meal_plan_with_streaming(
+                    user_payload=user_payload,
+                    menu_payload=menu_payload,
+                    nutrition_targets=nutrition_targets,
+                    user_preferences_context=user_preferences_context,
+                ):
+                    if isinstance(chunk, dict) and chunk.get("type") == "complete":
+                        chunk["preferences_snapshot"] = preferences_snapshot
+                    # Format as SSE
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except Exception as e:
+                print(f"❌ Streaming meal plan generation error: {e}")
+                error_chunk = {"type": "error", "error": "Please try again."}
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable buffering for nginx
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Streaming meal plan generation error: {e}")
+        raise HTTPException(status_code=500, detail="Please try again.")
+
 
 @app.post("/meal-plan/feedback", summary="Record user feedback (like/dislike) for a meal plan generation")
 async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depends(get_current_user)):
@@ -2279,7 +3369,11 @@ async def meal_plan_feedback(payload: MealPlanFeedbackRequest, current_user=Depe
 
 
 @app.post("/meal-plan/save", summary="Save or update a meal plan")
-async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_current_user)):
+async def save_meal_plan(
+    payload: SaveMealPlanRequest, 
+    background_tasks: BackgroundTasks,
+    current_user=Depends(get_current_user)
+):
     """Save a new meal plan or update an existing one. Enforces one meal plan per day limit."""
     try:
         # Check if this is a new plan or an update
@@ -2321,6 +3415,15 @@ async def save_meal_plan(payload: SaveMealPlanRequest, current_user=Depends(get_
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to save meal plan")
         
+        # Send push notification when meal plan is created (not on updates)
+        if not is_update:
+            background_tasks.add_task(
+                send_meal_plan_ready_notification,
+                user_id=str(current_user["id"]),
+                date=payload.date
+            )
+            logger.info(f"Scheduled push notification for user {current_user['id']} meal plan on {payload.date}")
+        
         return {
             "success": True,
             "plan_id": plan_id,
@@ -2351,13 +3454,32 @@ async def get_meal_plan_history(
         
         plans = response.data if response.data else []
         
+        logger.info(f"[MealPlanHistory] Found {len(plans)} meal plans for user {current_user['id']}")
+        if plans:
+            # Log dates of all plans found
+            dates = [p.get('date') for p in plans]
+            logger.info(f"[MealPlanHistory] Plan dates: {dates}")
+            
+            # Log structure of first plan for debugging
+            first_plan = plans[0]
+            has_meal_plan_data = 'meal_plan_data' in first_plan
+            if has_meal_plan_data:
+                meal_plan_data_keys = list(first_plan['meal_plan_data'].keys()) if first_plan['meal_plan_data'] else []
+                has_nested_meal_plan = 'meal_plan' in (first_plan['meal_plan_data'] or {})
+                has_totals = 'totals' in (first_plan['meal_plan_data'].get('meal_plan', {}) if first_plan['meal_plan_data'] else {})
+                logger.info(f"[MealPlanHistory] First plan structure - has_meal_plan_data: {has_meal_plan_data}, keys: {meal_plan_data_keys}, has_nested_meal_plan: {has_nested_meal_plan}, has_totals: {has_totals}")
+            else:
+                logger.warning(f"[MealPlanHistory] First plan missing meal_plan_data field!")
+        else:
+            logger.warning(f"[MealPlanHistory] No meal plans found for user {current_user['id']}")
+        
         return {
             "success": True,
             "plans": plans,
             "count": len(plans),
         }
     except Exception as e:
-        print(f"Error fetching meal plan history: {e}")
+        logger.error(f"[MealPlanHistory] Error fetching meal plan history: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to fetch meal plans: {str(e)}")
 
 
@@ -2374,9 +3496,9 @@ async def get_todays_meal_plan(current_user=Depends(get_current_user)):
         # In production, you might want to store user timezone preference
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         
-        # Auto-cleanup: Delete meal plans from previous days (background operation)
+        # Auto-cleanup: Delete meal plans older than 7 days (background operation)
         try:
-            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat()
+            cutoff_date = (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=7)).isoformat()
             cleanup_response = supabase.table("saved_meal_plans")\
                 .delete()\
                 .eq("user_id", current_user["id"])\
@@ -2384,7 +3506,7 @@ async def get_todays_meal_plan(current_user=Depends(get_current_user)):
                 .execute()
             deleted_count = len(cleanup_response.data) if cleanup_response.data else 0
             if deleted_count > 0:
-                print(f"🧹 Auto-cleaned {deleted_count} old meal plan(s) for user {current_user['id']}")
+                print(f"🧹 Auto-cleaned {deleted_count} meal plan(s) older than 7 days for user {current_user['id']}")
         except Exception as cleanup_error:
             # Don't fail the request if cleanup fails
             print(f"⚠️ Auto-cleanup failed: {cleanup_error}")
@@ -2546,33 +3668,56 @@ async def cleanup_old_meal_plans(current_user=Depends(get_current_user)):
         }
 
 
+@lru_cache(maxsize=1)
+def load_universities_config() -> List[dict]:
+    """Load universities and dining halls from config file"""
+    config_path = os.path.join(os.path.dirname(__file__), 'universities_config.json')
+    fallback_dining_halls = [
+        {
+            "id": "rutgers",
+            "university": "rutgers",
+            "name": "Rutgers University",
+            "dining_halls": [
+                {"id": "busch", "name": "Busch Dining Hall"},
+                {"id": "livingston", "name": "Livingston Dining Commons"},
+                {"id": "brower", "name": "Brower Commons"},
+                {"id": "neilson", "name": "Neilson Dining Hall"},
+                {"id": "the-atrium", "name": "The Atrium"},
+            ],
+        },
+        {
+            "id": "hopkins",
+            "university": "hopkins",
+            "name": "Johns Hopkins University",
+            "dining_halls": [
+                {"id": "hopkins-cafe", "name": "Hopkins Cafe"},
+                {"id": "nolans-on-33rd", "name": "Nolan's on 33rd"},
+                {"id": "peabody-institute", "name": "Peabody Institute"},
+            ],
+        },
+    ]
+    
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                universities = config.get('universities', [])
+                if universities:
+                    logger.info(f"✅ Loaded {len(universities)} universities from config file")
+                    return universities
+                else:
+                    logger.warning("⚠️ No universities found in config file, using fallback")
+        else:
+            logger.warning(f"⚠️ Universities config file not found at {config_path}, using fallback")
+    except Exception as e:
+        logger.error(f"⚠️ Failed to load universities config: {e}, using fallback")
+    
+    return fallback_dining_halls
+
 @app.get("/dining-halls", summary="Get Supported Dining Halls")
 async def get_supported_dining_halls():
-    """Get list of supported dining halls"""
-    fallback_dining_halls = [
-            {
-                "university": "rutgers",
-                "name": "Rutgers University",
-                "dining_halls": [
-                    {"id": "busch", "name": "Busch Dining Hall"},
-                    {"id": "livingston", "name": "Livingston Dining Commons"},
-                    {"id": "brower", "name": "Brower Commons"},
-                    {"id": "neilson", "name": "Neilson Dining Hall"},
-                    {"id": "the-atrium", "name": "The Atrium"},
-                ],
-            },
-            {
-                "university": "hopkins",
-                "name": "Johns Hopkins University",
-                "dining_halls": [
-                    {"id": "hopkins-cafe", "name": "Hopkins Cafe"},
-                    {"id": "nolans-on-33rd", "name": "Nolan's on 33rd"},
-                    {"id": "peabody-institute", "name": "Peabody Institute"},
-                ],
-            },
-        ]
-        
-    return fallback_dining_halls
+    """Get list of supported dining halls from configuration"""
+    return load_universities_config()
 
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
@@ -2590,122 +3735,25 @@ async def get_menu(dining_hall: str, date: str):
 
 
 
-import logging
-try:
-    import stripe  
-except Exception:
-    stripe = None  
 
+# ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
+# These endpoints use mem0 to store and retrieve user preferences, favorites, likes, and dislikes
 
-def _stripe_version():
-    if not stripe:
-        return None
-    for attr in ('__version__', 'VERSION'):
-        v = getattr(stripe, attr, None)
-        if isinstance(v, str):
-            return v
-    
+@app.post("/preferences/favorite", summary="Add item to favorites")
+async def add_favorite(
+    favorite_data: FavoriteRequest,
+    current_user=Depends(get_current_user)
+):
+    """Add a meal plan or food item to user's favorites"""
     try:
-        from stripe import _version  
-        v = getattr(_version, 'VERSION', None)
-        if isinstance(v, str):
-            return v
-    except Exception:
-        pass
-    return None
-
-
-DEBUG_BILLING = os.getenv("DEBUG_BILLING", "0") in ("1", "true", "True")
-
-def _get_stripe_api_key() -> Optional[str]:
-    """Return first present Stripe secret key from supported env var names."""
-    for k in [
-        "STRIPE_API_KEY",
-        "STRIPE_SECRET_KEY",
-        "STRIPE_SECRET",
-        "STRIPE_KEY",
-    ]:
-        val = os.getenv(k)
-        if val and val.strip():
-            return val.strip()
-    return None
-
-STRIPE_API_KEY = _get_stripe_api_key()
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")  
-if STRIPE_API_KEY and stripe:
-    stripe.api_key = STRIPE_API_KEY
-    try:
-        ver = _stripe_version() or 'unknown'
-        logging.info(
-            f"Stripe initialized version={ver} key_prefix={STRIPE_API_KEY[:7] if STRIPE_API_KEY else 'None'}"
-        )
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
         
-        if ver and ver[0].isdigit():
-            try:
-                major = int(ver.split('.')[0])
-                if major < 10:
-                    logging.warning(
-                        "Stripe library major version <10 (" + ver + "). Please upgrade (pip install 'stripe>=10,<13')."
-                    )
-            except Exception:
-                pass
-        if not STRIPE_PRICE_ID:
-            logging.warning("STRIPE_PRICE_ID not configured; checkout will fail until set.")
-    except Exception:
-        pass
-
-@app.get("/billing/debug")
-async def billing_debug():
-    return {
-        "stripe_imported": stripe is not None,
-        "stripe_version": _stripe_version(),
-        "api_key_set": bool(STRIPE_API_KEY),
-        "api_key_prefix": STRIPE_API_KEY[:7] + '...' if STRIPE_API_KEY else None,
-        "api_key_valid_format": bool(STRIPE_API_KEY and STRIPE_API_KEY.startswith('sk_')),
-        "debug_flag": DEBUG_BILLING,
-        "price_id_set": bool(STRIPE_PRICE_ID),
-    }
-
-class CheckoutSessionRequest(BaseModel):
-    price_id: Optional[str] = None  
-    trial: Optional[bool] = None
-
-stripe_ready = bool(stripe and STRIPE_API_KEY)
-
-def _require_stripe():
-    if stripe is None:
-        raise HTTPException(status_code=503, detail="Stripe library not installed (pip install stripe)")
-    if not STRIPE_API_KEY:
-        raise HTTPException(status_code=503, detail="STRIPE_API_KEY missing in environment")
-    ver = _stripe_version()
-    
-    if ver and ver[0].isdigit():
-        try:
-            major = int(ver.split('.')[0])
-            if major < 10:
-                raise HTTPException(status_code=503, detail=f"Outdated stripe package ({ver}). Upgrade to >=10.15.0")
-        except Exception:
-            pass
-
-@app.get("/billing/health")
-async def billing_health():
-    return {
-        "stripe_imported": stripe is not None,
-        "api_key_configured": bool(STRIPE_API_KEY),
-        "price_id_configured": bool(STRIPE_PRICE_ID),
-        "webhook_secret_configured": bool(STRIPE_WEBHOOK_SECRET),
-        "ready": stripe_ready,
-    }
-
-@app.post("/billing/create-checkout-session")
-async def create_checkout_session(payload: CheckoutSessionRequest = Body(default={}), current_user=Depends(get_current_user)):
-    _require_stripe()
-    try:
-        user_id = current_user.get("id")
-        email = current_user.get("email")
+        user_id = str(current_user["id"])
+        print(f"[API] /preferences/favorite - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
+        print(f"[API] Item: {favorite_data.item_name}, Type: {favorite_data.item_type}")
         
+<<<<<<< HEAD
         logging.info(f"Creating checkout session for user: {user_id}, email: {email}")
         
         stripe_customer_id = current_user.get("stripe_customer_id")
@@ -2813,22 +3861,64 @@ async def stripe_webhook(request: Request):
         if STRIPE_WEBHOOK_SECRET:
             event = stripe.Webhook.construct_event(
                 payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
+=======
+        if favorite_data.item_type == "meal_plan":
+            result = await preference_manager.add_favorite_meal_plan(
+                user_id=user_id,
+                meal_plan_id=favorite_data.meal_plan_id or "",
+                meal_plan_name=favorite_data.item_name,
+                meal_type=favorite_data.meal_type
+>>>>>>> test
             )
             logging.info("Webhook event constructed with signature verification")
         else:
+<<<<<<< HEAD
             event = stripe.Event.construct_from(json.loads(payload.decode("utf-8")), stripe.api_key)
             logging.info("Webhook event constructed without signature verification")
+=======
+            result = await preference_manager.add_favorite_food_item(
+                user_id=user_id,
+                food_item_name=favorite_data.item_name,
+                meal_type=favorite_data.meal_type
+            )
+        
+        # Log the result to debug what mem0 is returning
+        print(f"[API] mem0 add() returned: {result}")
+        print(f"[API] Result type: {type(result)}")
+        if isinstance(result, dict):
+            print(f"[API] Result keys: {result.keys()}")
+        
+        # Only return essential info, not all memories
+        # mem0.add() should return just the new memory ID
+        return {
+            "status": "success",
+            "message": f"Added {favorite_data.item_name} to favorites",
+            "item_name": favorite_data.item_name,
+            "item_type": favorite_data.item_type,
+            "meal_type": favorite_data.meal_type
+        }
+>>>>>>> test
     except Exception as e:
-        logging.error(f"Webhook signature/parse error: {e}")
-        return PlainTextResponse("invalid payload", status_code=400)
+        logger.error(f"Failed to add favorite: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add favorite: {str(e)}")
 
+<<<<<<< HEAD
     etype = event.get("type")
     data_object = event.get("data", {}).get("object", {})
     
     logging.info(f"Processing Stripe event: {etype}")
     logging.info(f"Event data object keys: {list(data_object.keys())}")
+=======
+>>>>>>> test
 
+@app.post("/preferences/dislike", summary="Dislike a meal plan or food item")
+async def dislike_item(
+    dislike_data: DislikeRequest,
+    current_user=Depends(get_current_user)
+):
+    """Record that user dislikes a meal plan or food item"""
     try:
+<<<<<<< HEAD
         if etype == "checkout.session.completed":
             logging.info("Processing checkout.session.completed event")
             
@@ -2919,12 +4009,244 @@ async def stripe_webhook(request: Request):
                         supabase.table("users").update(update_payload).eq("id", uid).execute()
                 except Exception as db_err:
                     logging.warning(f"Fallback update failed: {db_err}")
+=======
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.add_dislike(
+            user_id=user_id,
+            item_name=dislike_data.item_name,
+            item_type=dislike_data.item_type,
+            meal_type=dislike_data.meal_type,
+            reason=dislike_data.reason
+        )
+        
+        # Log the result to debug what mem0 is returning
+        print(f"[API] mem0 add_dislike() returned: {result}")
+        
+        # Only return essential info, not all memories
+        return {
+            "status": "success",
+            "message": f"Recorded dislike for {dislike_data.item_name}",
+            "item_name": dislike_data.item_name,
+            "item_type": dislike_data.item_type,
+            "meal_type": dislike_data.meal_type
+        }
+>>>>>>> test
     except Exception as e:
-        logging.error(f"Webhook handling error: {e}")
+        logger.error(f"Failed to record dislike: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to record dislike: {str(e)}")
 
-    return PlainTextResponse("ok", status_code=200)
 
-BREVO_MEAL_PLAN_TEMPLATE_ID = os.getenv("BREVO_MEAL_PLAN_TEMPLATE_ID", "").strip()
+@app.get("/preferences/favorites", summary="Get user's favorites")
+async def get_favorites(
+    meal_type: Optional[str] = None,
+    current_user=Depends(get_current_user)
+):
+    """Get all favorited items for a user"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        print(f"[API] /preferences/favorites - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
+        print(f"[API] Meal type filter: {meal_type}")
+        
+        favorites = await preference_manager.get_favorites(user_id, meal_type)
+        
+        return {
+            "status": "success",
+            "count": len(favorites),
+            "favorites": favorites
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve favorites: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve favorites: {str(e)}")
+
+
+@app.get("/preferences/all", summary="Get all user preferences")
+async def get_all_preferences(
+    current_user=Depends(get_current_user)
+):
+    """Get all preferences (favorites, likes, dislikes, profile) for a user"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        # Retrieve all preference categories (only favorites and dislikes)
+        favorites = await preference_manager.get_favorites(user_id)
+        dislikes = await preference_manager.get_dislikes(user_id)
+        profile = await preference_manager.get_user_profile(user_id)
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "favorites": favorites,
+            "dislikes": dislikes,
+            "profile": profile,
+            "counts": {
+                "favorites": len(favorites),
+                "dislikes": len(dislikes)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve preferences: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve preferences: {str(e)}")
+
+
+@app.get("/preferences/debug", summary="Debug: Get ALL raw memories from mem0")
+async def debug_all_memories(
+    current_user=Depends(get_current_user)
+):
+    """Get ALL raw memories for debugging (shows everything stored in mem0)"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        # Get all memories without filtering
+        all_memories = await preference_manager.get_all_memories(user_id)
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "total_memories": len(all_memories),
+            "memories": all_memories
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve debug memories: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve debug memories: {str(e)}")
+
+
+@app.post("/preferences/bmr", summary="Store user BMR and dietary info")
+async def store_user_bmr(
+    bmr_data: StoreBMRRequest,
+    current_user=Depends(get_current_user)
+):
+    """Store or update user's BMR, dietary restrictions, and goals"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.store_user_bmr(
+            user_id=user_id,
+            bmr=bmr_data.bmr,
+            dietary_restrictions=bmr_data.dietary_restrictions,
+            goals=bmr_data.goals
+        )
+        
+        return {
+            "status": "success",
+            "message": "Stored BMR and dietary information",
+            "memory_result": result
+        }
+    except Exception as e:
+        logger.error(f"Failed to store BMR: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store BMR: {str(e)}")
+
+
+@app.put("/preferences/bmr", summary="Update user BMR and dietary info")
+async def update_user_bmr_endpoint(
+    bmr_data: UpdateBMRRequest,
+    current_user=Depends(get_current_user)
+):
+    """Update user's BMR, dietary restrictions, and/or goals"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.update_user_bmr(
+            user_id=user_id,
+            bmr=bmr_data.bmr,
+            dietary_restrictions=bmr_data.dietary_restrictions,
+            goals=bmr_data.goals
+        )
+        
+        return {
+            "status": "success",
+            "message": "Updated BMR and dietary information",
+            "memory_result": result
+        }
+    except Exception as e:
+        logger.error(f"Failed to update BMR: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update BMR: {str(e)}")
+
+
+@app.delete("/preferences/favorite/{item_name}", summary="Remove from favorites")
+async def remove_favorite(
+    item_name: str,
+    current_user=Depends(get_current_user)
+):
+    """Remove an item from user's favorites"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.remove_favorite(user_id, item_name)
+        
+        # Return success even if not found (idempotent operation)
+        # This handles cases where item was already removed or never existed
+        if result.get("status") == "not_found":
+            return {
+                "status": "success",
+                "message": f"{item_name} not found in favorites (may have been already removed)",
+                "was_found": False
+            }
+        
+        return {
+            "status": "success",
+            "message": f"Removed {item_name} from favorites",
+            "was_found": True
+        }
+    except Exception as e:
+        logger.error(f"Failed to remove favorite: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove favorite: {str(e)}")
+
+
+@app.delete("/preferences/dislike/{item_name}", summary="Remove from dislikes")
+async def remove_dislike(
+    item_name: str,
+    current_user=Depends(get_current_user)
+):
+    """Remove an item from user's dislikes"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager()
+        
+        user_id = str(current_user["id"])
+        
+        result = await preference_manager.remove_dislike(user_id, item_name)
+        
+        # Return success even if not found (idempotent operation)
+        # This handles cases where item was already removed or never existed
+        if result.get("status") == "not_found":
+            return {
+                "status": "success",
+                "message": f"{item_name} not found in dislikes (may have been already removed)",
+                "was_found": False
+            }
+        
+        return {
+            "status": "success",
+            "message": f"Removed {item_name} from dislikes",
+            "was_found": True
+        }
+    except Exception as e:
+        logger.error(f"Failed to remove dislike: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove dislike: {str(e)}")
+
+
 
 
 async def _send_meal_plan_generation_email_async(user_row: dict, generation_id: Optional[str], dining_hall: str, date: str) -> None:
@@ -2988,6 +4310,595 @@ def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str]
         asyncio.run(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
     else:
         loop.create_task(_send_meal_plan_generation_email_async(user_row, generation_id, dining_hall, date))
+
+
+# ============================================================================
+# Google Calendar Integration Endpoints
+# ============================================================================
+
+from google_calendar_service import calendar_service
+
+class GoogleCalendarAuthRequest(BaseModel):
+    """Request to initiate Google Calendar OAuth"""
+    pass
+
+class GoogleCalendarCallbackRequest(BaseModel):
+    """OAuth callback data"""
+    code: str
+    state: str
+
+class GoogleCalendarEventsRequest(BaseModel):
+    """Request to get calendar events for a specific date"""
+    date: str  # ISO format YYYY-MM-DD
+
+class ExportMealPlanRequest(BaseModel):
+    """Request to export meal plan to Google Calendar"""
+    plan_id: str
+    date: str  # ISO format YYYY-MM-DD
+
+
+@app.post('/calendar/auth/initiate', summary='Initiate Google Calendar OAuth flow')
+async def initiate_google_calendar_auth(current_user=Depends(get_current_user)):
+    """
+    Start Google Calendar OAuth flow
+    Returns authorization URL for user to visit
+    """
+    try:
+        # Generate a random state for CSRF protection
+        import secrets as sec
+        state = sec.token_urlsafe(32)
+        
+        # Store state in session (you may want to use Redis or similar)
+        # For now, we'll include user_id in the state
+        state_with_user = f"{current_user['id']}:{state}"
+        
+        # Create authorization URL
+        auth_url = calendar_service.create_authorization_url(state_with_user)
+        
+        return {
+            "success": True,
+            "authorization_url": auth_url,
+            "state": state_with_user
+        }
+    except Exception as e:
+        logger.error(f"Failed to initiate Google Calendar auth: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate authorization")
+
+
+@app.get('/calendar/auth/callback', summary='Handle Google Calendar OAuth callback (GET redirect)')
+async def google_calendar_callback_get(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
+    """
+    Handle OAuth callback from Google (GET request with query params).
+    Google redirects here after user authorization. Processes callback and redirects to app.
+    """
+    if error:
+        # User denied access or error occurred
+        logger.warning(f"OAuth callback error: {error}")
+        redirect_url = f"dormdish://calendar-callback?error={error}"
+        return RedirectResponse(url=redirect_url)
+    
+    if not code or not state:
+        logger.error("OAuth callback missing code or state")
+        redirect_url = "dormdish://calendar-callback?error=missing_params"
+        return RedirectResponse(url=redirect_url)
+    
+    try:
+        # URL decode state in case Google encoded it
+        from urllib.parse import unquote
+        
+        # Log received state for debugging
+        logger.info(f"[OAuth] Received state: {state}")
+        logger.info(f"[OAuth] Received code: {code[:20] if code else None}...")
+        
+        # Try to decode if it looks URL-encoded
+        decoded_state = state
+        try:
+            decoded_state = unquote(state)
+            if decoded_state != state:
+                logger.info(f"[OAuth] State was URL-encoded, decoded: {decoded_state[:50]}...")
+                state = decoded_state
+        except Exception:
+            # If unquote fails, use original state
+            pass
+        
+        # State should be in format: "user_id:random_token"
+        # Check if it's valid before splitting
+        if not state or not isinstance(state, str):
+            logger.error(f"[OAuth] State is None or invalid type: {type(state)}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        # Extract user_id from state
+        if ':' not in state:
+            logger.error(f"[OAuth] Invalid state format - no colon separator: {state}")
+            logger.error(f"[OAuth] State length: {len(state)}, first 50 chars: {state[:50]}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        state_parts = state.split(':', 1)
+        if len(state_parts) != 2:
+            logger.error(f"[OAuth] Invalid state format - wrong split result: {state_parts}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        user_id = state_parts[0].strip()
+        state_token = state_parts[1].strip()
+        
+        # Verify user_id is not empty
+        if not user_id:
+            logger.error(f"[OAuth] Empty user_id in state: {state}")
+            redirect_url = "dormdish://calendar-callback?error=invalid_state"
+            return RedirectResponse(url=redirect_url)
+        
+        logger.info(f"[OAuth] Extracted user_id: {user_id}, token_length: {len(state_token)}")
+        
+        # Exchange code for credentials (pass the ORIGINAL state as received from Google)
+        # But use the decoded state for the exchange
+        creds_dict = calendar_service.exchange_code_for_credentials(code, state)
+        
+        # Store credentials in database
+        try:
+            supabase.table("users").update({
+                "google_calendar_credentials": creds_dict,
+                "google_calendar_connected": True,
+                "google_calendar_connected_at": datetime.now().isoformat()
+            }).eq("id", user_id).execute()
+            
+            logger.info(f"Stored Google Calendar credentials for user {user_id}")
+        except Exception as db_err:
+            logger.error(f"Failed to store credentials: {db_err}")
+            redirect_url = "dormdish://calendar-callback?error=save_failed"
+            return RedirectResponse(url=redirect_url)
+        
+        # Redirect to app with success
+        redirect_url = "dormdish://calendar-callback?success=true"
+        return RedirectResponse(url=redirect_url)
+        
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        import traceback
+        traceback.print_exc()
+        redirect_url = "dormdish://calendar-callback?error=callback_failed"
+        return RedirectResponse(url=redirect_url)
+
+
+@app.post('/calendar/auth/callback', summary='Handle Google Calendar OAuth callback (POST)')
+async def google_calendar_callback_post(payload: GoogleCalendarCallbackRequest):
+    """
+    Handle OAuth callback via POST (for manual API calls if needed)
+    """
+    try:
+        # Extract user_id from state
+        state_parts = payload.state.split(':', 1)
+        if len(state_parts) != 2:
+            raise HTTPException(status_code=400, detail="Invalid state parameter")
+        
+        user_id = state_parts[0]
+        
+        # Exchange code for credentials
+        creds_dict = calendar_service.exchange_code_for_credentials(
+            payload.code,
+            payload.state
+        )
+        
+        # Store credentials in database
+        try:
+            # Update user with Google Calendar credentials
+            supabase.table("users").update({
+                "google_calendar_credentials": creds_dict,
+                "google_calendar_connected": True,
+                "google_calendar_connected_at": datetime.now().isoformat()
+            }).eq("id", user_id).execute()
+            
+            logger.info(f"Stored Google Calendar credentials for user {user_id}")
+        except Exception as db_err:
+            logger.error(f"Failed to store credentials: {db_err}")
+            raise HTTPException(status_code=500, detail="Failed to save credentials")
+        
+        return {
+            "success": True,
+            "message": "Google Calendar connected successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to complete authorization")
+
+
+@app.get('/auth/google/callback', summary='Handle Google OAuth callback for sign-in/sign-up')
+async def auth_google_callback(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
+    """
+    Handle OAuth callback from Google for user authentication.
+    Exchanges authorization code for ID token and redirects to mobile app.
+    """
+    if error:
+        # User denied access or error occurred
+        logger.warning(f"Google OAuth callback error: {error}")
+        redirect_url = f"dormdish://auth-callback?error={error}"
+        return RedirectResponse(url=redirect_url)
+    
+    if not code:
+        logger.error("OAuth callback missing authorization code")
+        redirect_url = "dormdish://auth-callback?error=missing_code"
+        return RedirectResponse(url=redirect_url)
+    
+    try:
+        # Exchange authorization code for ID token
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv("GOOGLE_AUTH_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI")
+        
+        if not google_client_id or not google_client_secret:
+            logger.error("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET")
+            redirect_url = "dormdish://auth-callback?error=server_config_error"
+            return RedirectResponse(url=redirect_url)
+        
+        if not redirect_uri:
+            # Default to deployed backend callback URL
+            redirect_uri = "https://dormdish-backend-git-test-raghav-mehtas-projects-9e41f86c.vercel.app/auth/google/callback"
+            logger.info(f"[auth.google.callback] Using default redirect URI: {redirect_uri}")
+        else:
+            logger.info(f"[auth.google.callback] Using redirect URI from env: {redirect_uri}")
+        
+        logger.info(f"[auth.google.callback] Received code={code[:20] if code else None}..., state={state[:20] if state else None}...")
+        
+        # Exchange code for tokens
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "code": code,
+            "client_id": google_client_id,
+            "client_secret": google_client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code"
+        }
+        
+        def _exchange_token():
+            """Synchronous function to exchange authorization code for tokens"""
+            try:
+                resp = httpx.post(token_url, data=token_data, timeout=10.0)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                error_detail = e.response.text if e.response else str(e)
+                logger.error(f"Token exchange HTTP error: {e.response.status_code} - {error_detail}")
+                logger.error(f"Token exchange request data: client_id={google_client_id[:20]}..., redirect_uri={redirect_uri}")
+                raise
+            except Exception as e:
+                logger.error(f"Token exchange exception: {type(e).__name__}: {e}")
+                raise
+        
+        token_response = await asyncio.to_thread(_exchange_token)
+        
+        # Extract ID token from response
+        id_token = token_response.get("id_token")
+        if not id_token:
+            logger.error("No ID token in token exchange response")
+            redirect_url = "dormdish://auth-callback?error=no_id_token"
+            return RedirectResponse(url=redirect_url)
+        
+        # Verify the ID token
+        try:
+            token_data = await _verify_google_id_token(id_token)
+            email = token_data.get('email', '').lower()
+            given_name = token_data.get('given_name') or ''
+            family_name = token_data.get('family_name') or ''
+            
+            if not email:
+                raise HTTPException(status_code=400, detail="Google token missing email")
+        except Exception as e:
+            logger.error(f"Failed to verify ID token: {e}")
+            redirect_url = f"dormdish://auth-callback?error=token_verification_failed"
+            return RedirectResponse(url=redirect_url)
+        
+        # Encode the ID token and user info for the app
+        from urllib.parse import urlencode
+        params = urlencode({
+            'id_token': id_token,
+            'email': email,
+            'given_name': given_name,
+            'family_name': family_name,
+        })
+        
+        # Redirect to app with ID token
+        redirect_url = f"dormdish://auth-callback?{params}"
+        logger.info(f"Redirecting to app with Google auth data for {email}")
+        return RedirectResponse(url=redirect_url)
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Token exchange failed: {e.response.text}")
+        redirect_url = "dormdish://auth-callback?error=token_exchange_failed"
+        return RedirectResponse(url=redirect_url)
+    except Exception as e:
+        logger.error(f"OAuth callback failed: {e}")
+        import traceback
+        traceback.print_exc()
+        redirect_url = "dormdish://auth-callback?error=callback_failed"
+        return RedirectResponse(url=redirect_url)
+
+
+@app.get('/calendar/status', summary='Check Google Calendar connection status')
+async def check_calendar_status(current_user=Depends(get_current_user)):
+    """Check if user has connected their Google Calendar"""
+    is_connected = current_user.get('google_calendar_connected', False)
+    connected_at = current_user.get('google_calendar_connected_at')
+    
+    return {
+        "success": True,
+        "connected": is_connected,
+        "connected_at": connected_at
+    }
+
+
+@app.post('/calendar/events/day', summary='Get calendar events for a specific day')
+async def get_calendar_events_for_day(
+    payload: GoogleCalendarEventsRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Get all calendar events for a specific day
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # Refresh credentials if needed
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            try:
+                supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                creds_dict = refreshed_creds
+                logger.info(f"[Calendar] Credentials refreshed for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"[Calendar] Failed to save refreshed credentials: {e}")
+        
+        # Parse date
+        try:
+            date_obj = datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get events
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"  # TODO: Get from user preferences
+        )
+        
+        return {
+            "success": True,
+            "date": payload.date,
+            "events": events,
+            "count": len(events)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get calendar events: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch calendar events")
+
+
+@app.post('/calendar/meal-slots/find', summary='Find optimal meal time slots')
+async def find_meal_time_slots(
+    payload: GoogleCalendarEventsRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Analyze user's schedule and find optimal meal time slots
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # Refresh credentials if needed
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            try:
+                supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                creds_dict = refreshed_creds
+                logger.info(f"[Calendar] Credentials refreshed for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"[Calendar] Failed to save refreshed credentials: {e}")
+        
+        # Parse date
+        try:
+            date_obj = datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get events for the day
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Find meal slots
+        meal_slots = calendar_service.find_meal_time_slots(
+            events,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # TODO: MEM0 INTEGRATION - Save meal slots to memory
+        # ====================================================
+        # Uncomment and implement the following once mem0 integration is ready:
+        #
+        # from memory.mem0_client import get_mem0_client
+        # 
+        # try:
+        #     mem0 = get_mem0_client()
+        #     day_of_week = date_obj.strftime("%A")
+        #     
+        #     # Create context for the AI
+        #     context = f"On {day_of_week}, {date_obj.isoformat()}, "
+        #     context += f"user has {len(events)} scheduled events. "
+        #     
+        #     if events:
+        #         event_summaries = [e['summary'] for e in events[:5]]  # First 5 events
+        #         context += f"Events include: {', '.join(event_summaries)}. "
+        #     
+        #     context += f"Optimal meal times found: "
+        #     for meal_type, slot in meal_slots.items():
+        #         start_time = datetime.fromisoformat(slot['start']).strftime("%I:%M %p")
+        #         context += f"{meal_type.capitalize()} at {start_time}, "
+        #     
+        #     # Save to mem0
+        #     mem0.add(
+        #         messages=[{"role": "user", "content": context}],
+        #         user_id=current_user['id'],
+        #         metadata={
+        #             "type": "meal_schedule",
+        #             "date": str(date_obj),
+        #             "day_of_week": day_of_week
+        #         }
+        #     )
+        #     logger.info(f"Saved meal slots to mem0 for user {current_user['id']}")
+        # except Exception as mem_err:
+        #     logger.warning(f"Failed to save to mem0: {mem_err}")
+        #     # Don't fail the request if mem0 fails
+        # ====================================================
+        
+        return {
+            "success": True,
+            "date": payload.date,
+            "events_count": len(events),
+            "meal_slots": meal_slots,
+            "events": events  # Include events for context
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to find meal slots: {e}")
+        raise HTTPException(status_code=500, detail="Failed to find meal time slots")
+
+
+@app.post('/calendar/export-meal-plan', summary='Export meal plan to Google Calendar')
+async def export_meal_plan_to_calendar(
+    payload: ExportMealPlanRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Export a meal plan to Google Calendar
+    Creates calendar events for each meal at optimal times
+    """
+    try:
+        # Check if user has connected calendar
+        creds_dict = current_user.get('google_calendar_credentials')
+        if not creds_dict:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Calendar not connected. Please connect your calendar first."
+            )
+        
+        # ✅ FIX: Refresh credentials if needed and save back to database
+        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        if refreshed_creds:
+            logger.info(f"[Calendar] Credentials were expired, refreshing for user {current_user['id']}")
+            # Always use refreshed credentials for this request (even if DB save fails)
+            creds_dict = refreshed_creds
+            try:
+                # Update the database with new credentials
+                update_result = supabase.table("users").update({
+                    "google_calendar_credentials": refreshed_creds
+                }).eq("id", current_user['id']).execute()
+                
+                if update_result.data:
+                    logger.info(f"[Calendar] ✅ Credentials refreshed and saved to database")
+                else:
+                    logger.warning(f"[Calendar] Failed to save refreshed credentials to database (will use in-memory)")
+            except Exception as update_error:
+                logger.error(f"[Calendar] Error updating credentials in database: {update_error}")
+                # Continue with the request using refreshed creds in memory
+        
+        # Parse date
+        try:
+            date_obj = datetime.fromisoformat(payload.date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get the meal plan from database
+        try:
+            plan_result = supabase.table("saved_meal_plans")\
+                .select("*")\
+                .eq("id", payload.plan_id)\
+                .eq("user_id", current_user['id'])\
+                .execute()
+            
+            if not plan_result.data:
+                raise HTTPException(status_code=404, detail="Meal plan not found")
+            
+            saved_plan = plan_result.data[0]
+            meal_plan_data = saved_plan.get('meal_plan_data', {})
+            
+            # Extract meal plan (handle nested structure)
+            meal_plan = meal_plan_data.get('meal_plan', meal_plan_data)
+            dining_hall = saved_plan.get('dining_hall', 'Dining Hall')
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch meal plan: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch meal plan")
+        
+        # Get events for the day
+        events = calendar_service.get_events_for_day(
+            creds_dict,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Find meal slots
+        meal_slots = calendar_service.find_meal_time_slots(
+            events,
+            date_obj,
+            timezone="America/New_York"
+        )
+        
+        # Export to calendar
+        created_events = calendar_service.export_meal_plan_to_calendar(
+            creds_dict,
+            meal_plan,
+            meal_slots,
+            date_obj,
+            dining_hall
+        )
+        
+        return {
+            "success": True,
+            "message": "Meal plan exported to Google Calendar",
+            "events_created": created_events,
+            "meal_slots": meal_slots
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export meal plan: {e}", exc_info=True)
+        # Return actual error message to help debugging
+        error_detail = str(e) if str(e) else "Failed to export meal plan to calendar"
+        raise HTTPException(status_code=500, detail=f"Calendar export error: {error_detail}")
 
 if __name__ == '__main__':
     import uvicorn

@@ -1,0 +1,44 @@
+#!/bin/bash
+# Vercel build script for Python project
+# This runs after dependencies are installed to optimize the deployment size
+
+set -e
+
+echo "🔧 Running post-install optimization..."
+echo "📊 Current directory size before cleanup:"
+du -sh . 2>/dev/null || true
+
+# CRITICAL: Remove .git directory if it exists (Vercel might include it despite .vercelignore)
+if [ -d ".git" ]; then
+    echo "⚠️  CRITICAL: Removing .git directory (5.1MB) - should be excluded by .vercelignore"
+    GIT_SIZE=$(du -sh .git 2>/dev/null | cut -f1)
+    echo "   .git directory size: $GIT_SIZE"
+    rm -rf .git
+    echo "   ✅ .git directory removed"
+fi
+
+# Remove .venv if it exists (should be excluded but just in case)
+if [ -d ".venv" ]; then
+    echo "⚠️  Removing .venv directory (should be excluded by .vercelignore)"
+    VENV_SIZE=$(du -sh .venv 2>/dev/null | cut -f1)
+    echo "   .venv directory size: $VENV_SIZE"
+    rm -rf .venv
+    echo "   ✅ .venv directory removed"
+fi
+
+# Remove __pycache__ directories
+echo "🧹 Removing __pycache__ directories..."
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
+find . -type f -name "*.pyo" -delete 2>/dev/null || true
+
+echo "📊 Directory size after cleanup:"
+du -sh . 2>/dev/null || true
+
+# Run the optimization script
+python optimize_dependencies.py
+
+echo "📊 Final directory size:"
+du -sh . 2>/dev/null || true
+
+echo "✅ Build optimization complete!"

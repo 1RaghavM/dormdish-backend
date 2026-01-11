@@ -1,0 +1,172 @@
+# Virtual environment - Vercel installs dependencies from requirements.txt
+# THIS IS THE MAIN CULPRIT - 416MB!
+.venv
+.venv/
+venv
+venv/
+env
+env/
+ENV
+ENV/
+**/.venv
+**/venv
+**/env
+
+# Git repository - not needed in deployment (5.1MB)
+# CRITICAL: Must be at the top and use multiple patterns
+.git
+.git/
+.git/**
+.git/*
+**/.git
+**/.git/**
+**/.git/*
+.gitignore
+.gitattributes
+.gitmodules
+.gitkeep
+.git/config
+.git/objects
+.git/refs
+.git/HEAD
+.git/index
+.git/logs
+
+# Python cache - regenerated on deployment (340KB+)
+**/__pycache__
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.py[cod]
+**/*$py.class
+.Python
+
+# Test files - not needed in production
+**/test_*.py
+**/*_test.py
+**/tests
+tests/
+**/.pytest_cache
+.pytest_cache
+**/.pytest_cache/
+
+# Development and documentation files
+*.md
+!README.md
+**/*.md
+!**/README.md
+.DS_Store
+**/.DS_Store
+*.log
+**/*.log
+LOADERIO_TEST_CONFIG.md
+loaderio_test_endpoints.json
+
+# Build artifacts
+build
+build/
+dist
+dist/
+**/build
+**/dist
+**/*.egg-info
+**/*.egg-info/
+
+# IDE files
+.vscode
+.vscode/
+.idea
+.idea/
+**/.vscode
+**/.idea
+*.swp
+*.swo
+**/*.swp
+**/*.swo
+
+# Environment files (use Vercel environment variables instead)
+.env
+.env.*
+**/.env
+**/.env.*
+.env.local
+.env.*.local
+
+# Other cache directories
+.cache
+.cache/
+cache
+cache/
+.parcel-cache
+.parcel-cache/
+**/.cache
+**/cache
+
+# Node modules (if any)
+node_modules
+node_modules/
+**/node_modules
+
+# SQL directory (if not needed in deployment)
+sql
+sql/
+**/sql
+
+# Large CSV file - data is now in Supabase
+us-colleges-and-universities.csv
+**/*.csv
+
+# One-time upload script (run locally)
+upload_universities.py
+
+# Google API discovery cache (if generated locally)
+**/googleapiclient/discovery_cache
+**/googleapiclient/discovery_cache/
+googleapiclient/discovery_cache
+googleapiclient/discovery_cache/
+
+# Any generated or cached files
+*.cache
+*.tmp
+*.temp
+**/*.cache
+**/*.tmp
+**/*.temp
+
+# Credentials and sensitive files
+credentials.json
+**/credentials.json
+*.pem
+*.key
+*.p12
+
+# GitHub directory
+.github
+.github/
+**/.github
+.git/
+
+# Large data files
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+*.model
+*.h5
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.pkl
+**/*.model
+**/*.h5
+
+# Backup files
+*.bak
+*.backup
+**/*.bak
+**/*.backup
+
+# Diagnostic scripts (not needed in production)
+check_deployment_size.py
+VERCEL_SIZE_FIX.md

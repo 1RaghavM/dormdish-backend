@@ -1,22 +1,38 @@
 import asyncio
 import json
 import os
+import random
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+<<<<<<< HEAD
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+=======
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, ValidationError, PydanticDeprecatedSince20
+>>>>>>> test
 from dotenv import load_dotenv
 
-# Load environment variables
+# Suppress Pydantic V2 deprecation warnings from Google GenAI library
+# This is a known issue that Google will fix in a future SDK update
+warnings.filterwarnings("ignore", category=PydanticDeprecatedSince20)
+
 load_dotenv()
 
+<<<<<<< HEAD
 # Initialize AI clients
 anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 openai_client = AsyncOpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 )
+=======
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+>>>>>>> test
 
 
 BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
@@ -66,7 +82,59 @@ If target is 2000 cal / 150g protein:
 - Brown Rice (200 cal, 4g protein) × 1.5 servings = 300 cal, 6g protein
 Continue until totals reach 1900-2100 cal and 143-158g protein.
 
-Remember: This is a mathematical optimization task. Precision is mandatory. Think step by step."""
+Remember: This is a mathematical optimization task. Precision is mandatory.
+
+DO NOT output your reasoning or "thoughts". Output ONLY the final JSON object exactly matching the schema."""
+
+
+_REPAIR_INSTRUCTIONS = """Your previous response could not be parsed/validated.
+Return ONLY a single valid JSON object (no markdown, no comments, no extra text).
+Use double quotes for all keys and string values."""
+
+
+def _strip_code_fences(text: str) -> str:
+  raw = (text or "").strip()
+  if not raw.startswith("```"):
+    return raw
+  lines = raw.split("\n")
+  if lines and lines[0].startswith("```"):
+    lines = lines[1:]
+  if lines and lines[-1].strip() == "```":
+    lines = lines[:-1]
+  return "\n".join(lines).strip()
+
+
+def _extract_first_json_object(text: str) -> str:
+  """Extract the first {...} JSON object from a model response.
+
+  Gemini (or intermediaries) can sometimes prepend/append non-JSON text even when
+  response_mime_type/schema are set. This makes parsing robust.
+  """
+  raw = _strip_code_fences(text)
+  first = raw.find("{")
+  last = raw.rfind("}")
+  if first == -1 or last == -1 or last <= first:
+    raise ValueError("No JSON object detected in model response")
+  return raw[first:last + 1]
+
+
+def _is_overloaded_error(exc: Exception) -> bool:
+  msg = str(exc).lower()
+  return (
+    ("503" in msg and "unavailable" in msg)
+    or "model is overloaded" in msg
+    or "resource exhausted" in msg
+    or "temporarily unavailable" in msg
+    or "unavailable" in msg
+  )
+
+
+async def _sleep_backoff(attempt: int) -> None:
+  # Exponential backoff with jitter, capped.
+  base = float(os.getenv("MEALPLAN_OVERLOAD_BACKOFF_BASE_S", "1.0"))
+  cap = float(os.getenv("MEALPLAN_OVERLOAD_BACKOFF_MAX_S", "30"))
+  exp = min(cap, base * (2 ** max(0, attempt - 1)))
+  await asyncio.sleep(random.uniform(0.0, exp))
 
 
 # Simplified system instructions for non-subscribed users (no calorie/protein targets)
@@ -104,7 +172,7 @@ class DormdishMealPlannerSchema__MealItem(BaseModel):
     servings: float
     calories: float
     protein_g: float
-    serving_size: str  # Changed from Optional - strict mode requires all fields
+    serving_size: str  
 
 
 class DormdishMealPlannerSchema__Meal(BaseModel):
@@ -122,7 +190,7 @@ class DormdishMealPlannerSchema(BaseModel):
     totals: DormdishMealPlannerSchema__Totals
     meals: DormdishMealPlannerSchema__Meals
     explanation: str
-    # Note: meta field removed for strict mode compliance (all fields must be required)
+    
 
 
 def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] = None) -> str:
@@ -133,8 +201,8 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
   limit = limit or len(items)
   lines: List[str] = []
   
-  # OPTIMIZATION: Compact format reduces tokens by ~30-40% without losing information
-  # Format: name|cal|prot|serving (removed verbose labels)
+  
+  
   for idx, item in enumerate(items):
     if idx >= limit:
       break
@@ -143,15 +211,15 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
     prot = item.get("protein_g")
     serving = item.get("serving_size")
     
-    # Compact format: just the values separated by pipes
+    
     parts: List[str] = [name or "(unnamed)"]
     if cal is not None:
-      parts.append(f"{float(cal):.0f}cal")  # Removed space before "cal"
+      parts.append(f"{float(cal):.0f}cal")  
     if prot is not None:
-      parts.append(f"{float(prot):.1f}g")  # Changed from "g protein" to just "g"
+      parts.append(f"{float(prot):.1f}g")  
     if serving:
-      parts.append(f"{serving}")  # Removed "serving: " prefix
-    lines.append("|".join(parts))  # Removed " - " prefix and spaces around separator
+      parts.append(f"{serving}")  
+    lines.append("|".join(parts))  
 
   remaining = max(0, len(items) - limit)
   if remaining:
@@ -169,7 +237,7 @@ def _recalculate_totals_from_meals(
   """
   allowed_items = menu_payload.get("allowed_items") or []
   
-  # Build a lookup map: item name -> nutrition info
+  
   item_lookup: Dict[str, Dict[str, Any]] = {}
   for item in allowed_items:
     name = str(item.get("name", "")).strip().lower()
@@ -181,20 +249,20 @@ def _recalculate_totals_from_meals(
   total_calories = 0.0
   total_protein = 0.0
   
-  # Sum up all meals
+  
   for meal_name in ["breakfast", "lunch", "dinner"]:
     meal = getattr(result.meals, meal_name)
     for meal_item in meal.items:
       item_name = meal_item.name.strip().lower()
       servings = float(meal_item.servings)
       
-      # Look up the item in the menu
+      
       if item_name in item_lookup:
         item_data = item_lookup[item_name]
         total_calories += item_data["calories"] * servings
         total_protein += item_data["protein_g"] * servings
       else:
-        # Item not found - use LLM's values as fallback
+        
         print(f"[meal_plan_agent] WARNING: Item '{meal_item.name}' not found in menu, using LLM values")
         total_calories += float(meal_item.calories)
         total_protein += float(meal_item.protein_g)
@@ -211,8 +279,9 @@ def _build_agent_prompt(
   nutrition_targets: Dict[str, Any],
   *,
   max_items: Optional[int] = None,
+  user_preferences_context: Optional[str] = None,
 ) -> str:
-  """Build prompt for LLM."""
+  """Build prompt for LLM with optional user preferences from mem0."""
   hall = menu_payload.get("requested_dining_hall") or menu_payload.get("hall")
   date = menu_payload.get("requested_date")
   allowed_items = menu_payload.get("allowed_items") or []
@@ -237,27 +306,38 @@ def _build_agent_prompt(
   if menu_meta:
     dining_context["meta"] = menu_meta
 
-  # OPTIMIZATION: Compact header format (name|cal|prot|serving)
-  menu_header = "# MENU (name|cal|prot|serving)"
+  
+  menu_header = "MENU (name|cal|prot|serving)"
 
-  # OPTIMIZATION: Use compact JSON (no indent) to reduce tokens
+  
   prompt_sections = [
-    "# PROFILE",
+    "PROFILE",
     json.dumps({
       "diet": user_payload.get("dietary_preference") if user_payload is not None else None
     }, ensure_ascii=False),
     "",
-    "# TARGETS",
+    "TARGETS",
     json.dumps(nutrition_targets, ensure_ascii=False),
     "",
-    "# CONTEXT",
+    "CONTEXT",
     json.dumps(dining_context, ensure_ascii=False),
     "",
+  ]
+  
+  # Add user preferences from mem0 if available
+  if user_preferences_context:
+    prompt_sections.extend([
+      "USER PREFERENCES (Learned from Past Interactions)",
+      user_preferences_context,
+      "",
+    ])
+  
+  prompt_sections.extend([
     menu_header,
     _render_allowed_items(allowed_items, limit=max_items),
     "",
     "Generate meal plan per schema above. Pure JSON, no markdown.",
-  ]
+  ])
 
   return "\n".join(section for section in prompt_sections if section is not None)
 
@@ -423,17 +503,17 @@ async def generate_meal_plan_with_agent(
   menu_payload: Dict[str, Any],
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
+  user_preferences_context: Optional[str] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
-  """Generate a meal plan using Claude Haiku 4.5 with extended thinking for precision.
+  """Generate a meal plan using Gemini 2.5 Flash with optional user preferences from mem0.
   
-  Uses Claude's extended thinking feature to perform more accurate calculations
-  and hit nutritional targets with high precision.
+  Uses Gemini's structured output for precision and accuracy.
   
   Args:
     user_payload: User profile and preferences
     menu_payload: Menu data including allowed items
     nutrition_targets: Calorie and protein goals
-    extra_system_messages: Optional additional instructions (not used with Claude)
+    extra_system_messages: Optional additional instructions (not used with Gemini)
     
   Returns:
     Tuple of (validated meal plan schema, raw JSON string)
@@ -446,18 +526,18 @@ async def generate_meal_plan_with_agent(
     user_payload,
     menu_payload,
     nutrition_targets,
+    user_preferences_context=user_preferences_context,
   )
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
 
-  # Lightweight telemetry
+  
   print(
-    f"[meal_plan_agent] Claude Haiku 4.5 prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
-    f"extended_thinking=enabled"
+    f"[meal_plan_agent] Gemini 2.5 Flash prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
   )
 
-  # Build enhanced system instructions with target ranges
+  
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
   cal_min = int(cal_target * 0.95)
@@ -474,11 +554,14 @@ async def generate_meal_plan_with_agent(
     prot_target=prot_target
   )
 
-  # Model configuration from environment or defaults
-  chosen_model = os.getenv("MEALPLAN_MODEL", "claude-haiku-4-5")
-  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "1.0"))
+  
+  chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
+  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
+  # Keep outputs bounded. Larger values encourage verbose/non-essential output and
+  # can increase failure rates. Override via env if needed.
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
 
+<<<<<<< HEAD
   # Call Claude with extended thinking for better calculation accuracy
   response = await anthropic_client.messages.create(
     model=chosen_model,
@@ -498,62 +581,93 @@ async def generate_meal_plan_with_agent(
   # Extract response from content blocks (handle ThinkingBlock + TextBlock)
   raw_response = None
   thinking_content = None
+=======
+>>>>>>> test
   
-  for block in response.content:
-    if hasattr(block, 'text') and block.type == 'text':
-      raw_response = block.text
-    elif hasattr(block, 'thinking') and block.type == 'thinking':
-      thinking_content = block.thinking
-  
-  if thinking_content:
-    print(f"[meal_plan_agent] Claude thinking process: {len(thinking_content)} chars")
-  
-  if not raw_response:
-    raise ValueError("Claude returned no text response")
+  last_error: Optional[Exception] = None
+  for attempt in (1, 2):
+    attempt_temperature = temperature if attempt == 1 else 0.1
+    attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
 
-  # Remove markdown code blocks if present
-  raw_json = raw_response.strip()
-  if raw_json.startswith("```"):
-    lines = raw_json.split("\n")
-    if lines[0].startswith("```"):
-      lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-      lines = lines[:-1]
-    raw_json = "\n".join(lines).strip()
+    def call_gemini():
+      return client.models.generate_content(
+        model=chosen_model,
+        contents=f"{attempt_instructions}\n\n{prompt}",
+        config=types.GenerateContentConfig(
+          temperature=attempt_temperature,
+          max_output_tokens=max_tokens,
+          response_mime_type="application/json",
+          response_schema=DormdishMealPlannerSchema,
+        )
+      )
 
-  # Parse JSON
-  try:
-    parsed = json.loads(raw_json)
-  except json.JSONDecodeError as e:
-    print(f"[meal_plan_agent] JSON parsing failed: {e}")
-    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
-    raise ValueError(f"Claude output was not valid JSON: {e}")
+    # Retry overloaded/503 responses a couple times with backoff.
+    overloaded_error: Optional[Exception] = None
+    response = None
+    overload_retries = int(os.getenv("MEALPLAN_OVERLOAD_RETRIES", "6"))
+    for overload_attempt in range(1, overload_retries + 1):
+      try:
+        response = await asyncio.to_thread(call_gemini)
+        overloaded_error = None
+        break
+      except Exception as e:
+        if _is_overloaded_error(e):
+          overloaded_error = e
+          if overload_attempt < overload_retries:
+            print(f"[meal_plan_agent] WARNING: Model overloaded (attempt={attempt} overload_try={overload_attempt})")
+            await _sleep_backoff(overload_attempt)
+            continue
+          break
+        raise
 
-  # Add default explanation if missing
-  if "explanation" not in parsed:
-    print("[meal_plan_agent] Adding default explanation")
-    parsed["explanation"] = "Meal plan generated to meet nutritional targets."
+    if response is None:
+      last_error = overloaded_error or ValueError("Model did not return a response")
+      continue
+    raw_response = response.text or ""
+    if not raw_response.strip():
+      last_error = ValueError("Model returned empty response")
+      print(f"[meal_plan_agent] WARNING: Empty response (attempt={attempt})")
+      continue
 
-  # Validate against Pydantic schema
-  result = DormdishMealPlannerSchema.model_validate(parsed)
+    try:
+      raw_json = _extract_first_json_object(raw_response)
+      parsed = json.loads(raw_json)
+    except Exception as e:
+      last_error = e
+      print(f"[meal_plan_agent] JSON parsing failed (attempt={attempt}): {e}")
+      print(f"[meal_plan_agent] Raw response preview: {raw_response[:500]}")
+      continue
 
-  # RECALCULATE TOTALS: Don't trust LLM math - compute deterministically
-  recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
-  claude_calories = result.totals.calories
-  claude_protein = result.totals.protein_g
-  actual_calories = recalculated_totals["calories"]
-  actual_protein = recalculated_totals["protein_g"]
-  
-  # Log accuracy
-  cal_diff = abs(actual_calories - claude_calories)
-  prot_diff = abs(actual_protein - claude_protein)
-  if cal_diff > 0 or prot_diff > 0:
-    print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
-  
-  result.totals.calories = actual_calories
-  result.totals.protein_g = actual_protein
+    if "explanation" not in parsed:
+      print("[meal_plan_agent] Adding default explanation")
+      parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
-  return result, raw_response
+    try:
+      result = DormdishMealPlannerSchema.model_validate(parsed)
+    except ValidationError as e:
+      last_error = e
+      print(f"[meal_plan_agent] Model validation failed (attempt={attempt}): {e}")
+      continue
+
+    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+    gemini_calories = result.totals.calories
+    gemini_protein = result.totals.protein_g
+    actual_calories = recalculated_totals["calories"]
+    actual_protein = recalculated_totals["protein_g"]
+
+    cal_diff = abs(actual_calories - gemini_calories)
+    prot_diff = abs(actual_protein - gemini_protein)
+    if cal_diff > 0 or prot_diff > 0:
+      print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
+
+    result.totals.calories = actual_calories
+    result.totals.protein_g = actual_protein
+
+    return result, raw_response
+
+  if last_error:
+    raise ValueError(f"Model returned invalid response: {last_error}")
+  raise ValueError("Model returned invalid response")
 
 
 class WorkflowInput(BaseModel):
@@ -562,7 +676,7 @@ class WorkflowInput(BaseModel):
 
 
 async def run_workflow(workflow_input: WorkflowInput):
-  # Minimal placeholder workflow using the Responses API structure for future expansion
+  
   workflow = workflow_input.model_dump()
   conversation_history: List[Dict[str, Any]] = [
     {

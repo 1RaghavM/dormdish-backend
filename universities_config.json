@@ -1,0 +1,49 @@
+{
+  "universities": [
+    {
+      "id": "rutgers",
+      "university": "rutgers",
+      "name": "Rutgers University",
+      "dining_halls": [
+        {
+          "id": "busch",
+          "name": "Busch Dining Hall",
+          "slug": "busch-dining-hall"
+        },
+        {
+          "id": "livingston",
+          "name": "Livingston Dining Commons",
+          "slug": "livingston-dining-commons"
+        },
+        {
+          "id": "neilson",
+          "name": "Neilson Dining Hall",
+          "slug": "neilson-dining-hall"
+        }
+      ]
+    },
+    {
+      "id": "hopkins",
+      "university": "hopkins",
+      "name": "Johns Hopkins University",
+      "dining_halls": [
+        {
+          "id": "hopkins-cafe",
+          "name": "Hopkins Cafe",
+          "slug": "hopkins-cafe"
+        },
+        {
+          "id": "nolans-on-33rd",
+          "name": "Nolan's on 33rd",
+          "slug": "nolans-on-33rd"
+        },
+        {
+          "id": "peabody-institute",
+          "name": "Peabody Institute",
+          "slug": "peabody-institute"
+        }
+      ]
+    }
+  ]
+}
+
