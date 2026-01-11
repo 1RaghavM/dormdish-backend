@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -66,7 +67,59 @@ If target is 2000 cal / 150g protein:
 - Brown Rice (200 cal, 4g protein) × 1.5 servings = 300 cal, 6g protein
 Continue until totals reach 1900-2100 cal and 143-158g protein.
 
-Remember: This is a mathematical optimization task. Precision is mandatory. Think step by step."""
+Remember: This is a mathematical optimization task. Precision is mandatory.
+
+DO NOT output your reasoning or "thoughts". Output ONLY the final JSON object exactly matching the schema."""
+
+
+_REPAIR_INSTRUCTIONS = """Your previous response could not be parsed/validated.
+Return ONLY a single valid JSON object (no markdown, no comments, no extra text).
+Use double quotes for all keys and string values."""
+
+
+def _strip_code_fences(text: str) -> str:
+  raw = (text or "").strip()
+  if not raw.startswith("```"):
+    return raw
+  lines = raw.split("\n")
+  if lines and lines[0].startswith("```"):
+    lines = lines[1:]
+  if lines and lines[-1].strip() == "```":
+    lines = lines[:-1]
+  return "\n".join(lines).strip()
+
+
+def _extract_first_json_object(text: str) -> str:
+  """Extract the first {...} JSON object from a model response.
+
+  Gemini (or intermediaries) can sometimes prepend/append non-JSON text even when
+  response_mime_type/schema are set. This makes parsing robust.
+  """
+  raw = _strip_code_fences(text)
+  first = raw.find("{")
+  last = raw.rfind("}")
+  if first == -1 or last == -1 or last <= first:
+    raise ValueError("No JSON object detected in model response")
+  return raw[first:last + 1]
+
+
+def _is_overloaded_error(exc: Exception) -> bool:
+  msg = str(exc).lower()
+  return (
+    ("503" in msg and "unavailable" in msg)
+    or "model is overloaded" in msg
+    or "resource exhausted" in msg
+    or "temporarily unavailable" in msg
+    or "unavailable" in msg
+  )
+
+
+async def _sleep_backoff(attempt: int) -> None:
+  # Exponential backoff with jitter, capped.
+  base = float(os.getenv("MEALPLAN_OVERLOAD_BACKOFF_BASE_S", "1.0"))
+  cap = float(os.getenv("MEALPLAN_OVERLOAD_BACKOFF_MAX_S", "30"))
+  exp = min(cap, base * (2 ** max(0, attempt - 1)))
+  await asyncio.sleep(random.uniform(0.0, exp))
 
 
 class DormdishMealPlannerSchema__Totals(BaseModel):
@@ -309,256 +362,64 @@ async def generate_meal_plan_with_agent(
   
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "16384"))  # Increased from 8192 to ensure complete responses
+  # Keep outputs bounded. Larger values encourage verbose/non-essential output and
+  # can increase failure rates. Override via env if needed.
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
 
   
-  def call_gemini():
-    return client.models.generate_content(
-      model=chosen_model,
-      contents=f"{instructions}\n\n{prompt}",
-      config=types.GenerateContentConfig(
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-        response_mime_type="application/json",
-        response_schema=DormdishMealPlannerSchema,
-      )
-    )
-  
-  response = await asyncio.to_thread(call_gemini)
+  last_error: Optional[Exception] = None
+  for attempt in (1, 2):
+    attempt_temperature = temperature if attempt == 1 else 0.1
+    attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
 
-  
-  raw_response = response.text
-  
-  if not raw_response:
-    raise ValueError("Model returned invalid response")
-
-  
-  raw_json = raw_response.strip()
-  if raw_json.startswith("```"):
-    lines = raw_json.split("\n")
-    if lines[0].startswith("```"):
-      lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-      lines = lines[:-1]
-    raw_json = "\n".join(lines).strip()
-
-
-
-  try:
-    parsed = json.loads(raw_json)
-  except json.JSONDecodeError as e:
-    print(f"[meal_plan_agent] JSON parsing failed: {e}")
-    print(f"[meal_plan_agent] Raw response: {raw_response[:500]}")
-    raise ValueError("Model returned invalid response")
-
-  
-  if "explanation" not in parsed:
-    print("[meal_plan_agent] Adding default explanation")
-    parsed["explanation"] = "Meal plan generated to meet nutritional targets."
-
-  
-  try:
-    result = DormdishMealPlannerSchema.model_validate(parsed)
-  except ValidationError as e:
-    print(f"[meal_plan_agent] Model validation failed: {e}")
-    raise ValueError("Model returned invalid response")
-
-  
-  recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
-  gemini_calories = result.totals.calories
-  gemini_protein = result.totals.protein_g
-  actual_calories = recalculated_totals["calories"]
-  actual_protein = recalculated_totals["protein_g"]
-  
-  
-  cal_diff = abs(actual_calories - gemini_calories)
-  prot_diff = abs(actual_protein - gemini_protein)
-  if cal_diff > 0 or prot_diff > 0:
-    print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
-  
-  result.totals.calories = actual_calories
-  result.totals.protein_g = actual_protein
-
-  return result, raw_response
-
-
-async def generate_meal_plan_with_streaming(
-  *,
-  user_payload: Dict[str, Any],
-  menu_payload: Dict[str, Any],
-  nutrition_targets: Dict[str, Any],
-  extra_system_messages: Optional[Sequence[str]] = None,
-  user_preferences_context: Optional[str] = None,
-):
-  """Generate a meal plan using Gemini 2.5 Flash with streaming thoughts.
-  
-  This function streams the model's actual reasoning process in real-time,
-  providing transparent insights into the AI's decision-making.
-  
-  Args:
-    user_payload: User profile and preferences
-    menu_payload: Menu data including allowed items
-    nutrition_targets: Calorie and protein goals
-    extra_system_messages: Optional additional instructions (not used with Gemini)
-    user_preferences_context: User preferences from mem0
-    
-  Yields:
-    Dict containing thinking updates, response updates, or final meal plan data
-  """
-  import json
-  import asyncio
-  
-  prompt = _build_agent_prompt(
-    user_payload,
-    menu_payload,
-    nutrition_targets,
-    user_preferences_context=user_preferences_context,
-  )
-  prompt_chars = len(prompt)
-  allowed_items_count = len(menu_payload.get("allowed_items") or [])
-
-  print(
-    f"[meal_plan_agent] Gemini 2.5 Flash streaming prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count} "
-    f"streaming=enabled thinking_mode=enabled"
-  )
-
-  cal_target = nutrition_targets['calories']
-  prot_target = nutrition_targets['protein_g']
-  cal_min = int(cal_target * 0.95)
-  cal_max = int(cal_target * 1.05)
-  prot_min = int(prot_target * 0.95)
-  prot_max = int(prot_target * 1.05)
-  
-  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-    cal_min=cal_min,
-    cal_max=cal_max,
-    cal_target=cal_target,
-    prot_min=prot_min,
-    prot_max=prot_max,
-    prot_target=prot_target
-  )
-
-  chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
-  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
-  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "16384"))  # Increased from 8192 to ensure complete responses
-
-  print(f"[meal_plan_agent] Using model {chosen_model} with thinking mode enabled, max_tokens={max_tokens}")
-
-  try:
-    # Create streaming response with thinking mode enabled
-    # Note: Cannot limit thinking steps via API - model decides based on complexity
-    # We'll show only headlines (truncated to 50 chars) to keep UI clean
-    def call_gemini_stream():
-      return client.models.generate_content_stream(
+    def call_gemini():
+      return client.models.generate_content(
         model=chosen_model,
-        contents=f"{instructions}\n\n{prompt}",
+        contents=f"{attempt_instructions}\n\n{prompt}",
         config=types.GenerateContentConfig(
-          temperature=temperature,
+          temperature=attempt_temperature,
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=DormdishMealPlannerSchema,
-          # Enable thinking mode to show AI reasoning process
-          thinking_config=types.ThinkingConfig(
-            include_thoughts=True
-          )
         )
       )
-    
-    stream = await asyncio.to_thread(call_gemini_stream)
 
-    final_response = ""
-    chunk_count = 0
-    thinking_count = 0
-    
-    for chunk in stream:
-      # Check if chunk has candidates
-      if not chunk.candidates:
-        continue
-        
-      candidate = chunk.candidates[0]
-      if not candidate.content or not candidate.content.parts:
-        continue
-      
-      # Process each part in the chunk
-      for part in candidate.content.parts:
-        if not part.text:
-          continue
-        
-        # Check if this is a thought or the actual response
-        if hasattr(part, 'thought') and part.thought:
-          # This is a thought summary from the model's reasoning process
-          thought_text = part.text.strip()
-          if thought_text:
-            thinking_count += 1
-            
-            # Extract only the headline (first line/paragraph before \n\n)
-            # Format is usually: "**Headline**\n\nDetailed thinking..."
-            headline = thought_text.split('\n\n')[0] if '\n\n' in thought_text else thought_text
-            headline = headline.split('\n')[0] if '\n' in headline else headline  # Take first line
-            
-            # Remove markdown formatting
-            headline = headline.replace('**', '').strip()
-            
-            # Truncate to 50 characters for mobile display
-            truncated_thought = headline[:50] + "..." if len(headline) > 50 else headline
-            
-            print(f"[meal_plan_agent] 💭 THINKING (step {thinking_count}): {truncated_thought}")
-            yield {
-              "type": "thinking",
-              "content": truncated_thought
-            }
-            await asyncio.sleep(0.05)  # Small delay for UI smoothness
-        else:
-          # This is the actual JSON response
-          text_chunk = part.text
-          final_response += text_chunk
-          chunk_count += 1
-          
-          # Optionally log progress for debugging
-          if chunk_count % 10 == 0:
-            print(f"[meal_plan_agent] 📝 Streamed {chunk_count} chunks, total: {len(final_response)} chars...")
-          
-          # Yield response chunks (frontend doesn't use these, but keep for compatibility)
-          yield {
-            "type": "response",
-            "content": text_chunk,
-            "full_response": final_response
-          }
-    
-    print(f"[meal_plan_agent] ✅ Streaming complete: {thinking_count} thoughts, {chunk_count} response chunks")
+    # Retry overloaded/503 responses a couple times with backoff.
+    overloaded_error: Optional[Exception] = None
+    response = None
+    overload_retries = int(os.getenv("MEALPLAN_OVERLOAD_RETRIES", "6"))
+    for overload_attempt in range(1, overload_retries + 1):
+      try:
+        response = await asyncio.to_thread(call_gemini)
+        overloaded_error = None
+        break
+      except Exception as e:
+        if _is_overloaded_error(e):
+          overloaded_error = e
+          if overload_attempt < overload_retries:
+            print(f"[meal_plan_agent] WARNING: Model overloaded (attempt={attempt} overload_try={overload_attempt})")
+            await _sleep_backoff(overload_attempt)
+            continue
+          break
+        raise
 
-    # Parse and validate the final response
-    if not final_response or not final_response.strip():
-      print(f"[meal_plan_agent] ERROR: Empty response from model. Tokens may have been exceeded.")
-      print(f"[meal_plan_agent] Prompt size: {prompt_chars} chars, Items: {allowed_items_count}")
-      yield {
-        "type": "error",
-        "error": "The AI response was incomplete. Please try again or contact support if this persists."
-      }
-      return
-    
-    raw_json = final_response.strip()
-    if raw_json.startswith("```"):
-      lines = raw_json.split("\n")
-      if lines[0].startswith("```"):
-        lines = lines[1:]
-      if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-      raw_json = "\n".join(lines).strip()
+    if response is None:
+      last_error = overloaded_error or ValueError("Model did not return a response")
+      continue
+    raw_response = response.text or ""
+    if not raw_response.strip():
+      last_error = ValueError("Model returned empty response")
+      print(f"[meal_plan_agent] WARNING: Empty response (attempt={attempt})")
+      continue
 
     try:
+      raw_json = _extract_first_json_object(raw_response)
       parsed = json.loads(raw_json)
-    except json.JSONDecodeError as e:
-      print(f"[meal_plan_agent] JSON parsing failed: {e}")
-      print(f"[meal_plan_agent] Raw response length: {len(final_response)} chars")
-      print(f"[meal_plan_agent] Raw response preview: {final_response[:500]}")
-      print(f"[meal_plan_agent] Prompt size: {prompt_chars} chars, Items: {allowed_items_count}")
-      yield {
-        "type": "error",
-        "error": "The AI response was malformed. Please try again or contact support if this persists."
-      }
-      return
+    except Exception as e:
+      last_error = e
+      print(f"[meal_plan_agent] JSON parsing failed (attempt={attempt}): {e}")
+      print(f"[meal_plan_agent] Raw response preview: {raw_response[:500]}")
+      continue
 
     if "explanation" not in parsed:
       print("[meal_plan_agent] Adding default explanation")
@@ -567,43 +428,29 @@ async def generate_meal_plan_with_streaming(
     try:
       result = DormdishMealPlannerSchema.model_validate(parsed)
     except ValidationError as e:
-      print(f"[meal_plan_agent] Model validation failed: {e}")
-      yield {
-        "type": "error",
-        "error": "Please try again."
-      }
-      return
+      last_error = e
+      print(f"[meal_plan_agent] Model validation failed (attempt={attempt}): {e}")
+      continue
 
-    # Recalculate totals from meals for accuracy
     recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
     gemini_calories = result.totals.calories
     gemini_protein = result.totals.protein_g
     actual_calories = recalculated_totals["calories"]
     actual_protein = recalculated_totals["protein_g"]
-    
+
     cal_diff = abs(actual_calories - gemini_calories)
     prot_diff = abs(actual_protein - gemini_protein)
     if cal_diff > 0 or prot_diff > 0:
       print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
-    
+
     result.totals.calories = actual_calories
     result.totals.protein_g = actual_protein
 
-    print(f"[meal_plan_agent] ✅ Meal plan validated and ready to send")
+    return result, raw_response
 
-    # Yield final meal plan
-    yield {
-      "type": "complete",
-      "meal_plan": result.model_dump(),
-      "raw_response": final_response
-    }
-
-  except Exception as e:
-    print(f"[meal_plan_agent] Streaming error: {e}")
-    yield {
-      "type": "error",
-      "error": "Please try again."
-    }
+  if last_error:
+    raise ValueError(f"Model returned invalid response: {last_error}")
+  raise ValueError("Model returned invalid response")
 
 
 class WorkflowInput(BaseModel):

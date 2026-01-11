@@ -4512,6 +4512,8 @@ async def export_meal_plan_to_calendar(
         refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
         if refreshed_creds:
             logger.info(f"[Calendar] Credentials were expired, refreshing for user {current_user['id']}")
+            # Always use refreshed credentials for this request (even if DB save fails)
+            creds_dict = refreshed_creds
             try:
                 # Update the database with new credentials
                 update_result = supabase.table("users").update({
@@ -4519,14 +4521,12 @@ async def export_meal_plan_to_calendar(
                 }).eq("id", current_user['id']).execute()
                 
                 if update_result.data:
-                    # Use the refreshed credentials for this request
-                    creds_dict = refreshed_creds
                     logger.info(f"[Calendar] ✅ Credentials refreshed and saved to database")
                 else:
-                    logger.warning(f"[Calendar] Failed to save refreshed credentials to database")
+                    logger.warning(f"[Calendar] Failed to save refreshed credentials to database (will use in-memory)")
             except Exception as update_error:
                 logger.error(f"[Calendar] Error updating credentials in database: {update_error}")
-                # Continue with the request anyway using refreshed creds in memory
+                # Continue with the request using refreshed creds in memory
         
         # Parse date
         try:
@@ -4590,8 +4590,10 @@ async def export_meal_plan_to_calendar(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to export meal plan: {e}")
-        raise HTTPException(status_code=500, detail="Failed to export meal plan to calendar")
+        logger.error(f"Failed to export meal plan: {e}", exc_info=True)
+        # Return actual error message to help debugging
+        error_detail = str(e) if str(e) else "Failed to export meal plan to calendar"
+        raise HTTPException(status_code=500, detail=f"Calendar export error: {error_detail}")
 
 if __name__ == '__main__':
     import uvicorn
