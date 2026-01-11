@@ -1,0 +1,58 @@
+# Virtual environment - Vercel installs dependencies from requirements.txt
+# THIS IS THE MAIN CULPRIT - 416MB!
+.venv/
+venv/
+env/
+ENV/
+
+# Git repository - not needed in deployment
+.git/
+.gitignore
+
+# Python cache - regenerated on deployment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Test files - not needed in production
+test_*.py
+*_test.py
+tests/
+.pytest_cache/
+
+# Development and documentation files
+*.md
+!README.md
+.DS_Store
+*.log
+LOADERIO_TEST_CONFIG.md
+loaderio_test_endpoints.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment files (use Vercel environment variables instead)
+.env
+.env.local
+.env.*.local
+
+# Other cache directories
+.cache/
+cache/
+.parcel-cache/
+
+# Node modules (if any)
+node_modules/
+
+# SQL directory (if not needed in deployment)
+sql/
