@@ -111,6 +111,8 @@ ipython_config.py
 LOADERIO_TEST_CONFIG.md
 loaderio_test_endpoints.json
 
+upload_universities.py
+
 
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is

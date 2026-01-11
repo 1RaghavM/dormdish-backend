@@ -10,7 +10,11 @@
     "PYTHONPATH": "."
   },
   "regions": ["iad1"],
-
+  "functions": {
+    "api/**/*.py": {
+      "excludeFiles": "{tests/**,__tests__/**,**/*.test.py,**/test_*.py,fixtures/**,__fixtures__/**,testdata/**,sample-data/**,static/**,assets/**,*.md,!README.md,LOADERIO_TEST_CONFIG.md,loaderio_test_endpoints.json,.DS_Store,*.log,.git/**,.venv/**,venv/**,env/**,ENV/**,__pycache__/**,*.pyc,*.pyo,*.pyd,.pytest_cache/**,sql/**,.cache/**,cache/**}"
+    }
+  },
   "crons": [{
       "path": "/api/send-daily-reminders",
       "schedule": "0 10 * * *"

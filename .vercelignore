@@ -56,3 +56,17 @@ node_modules/
 
 # SQL directory (if not needed in deployment)
 sql/
+
+# Large CSV file - data is now in Supabase
+us-colleges-and-universities.csv
+
+# One-time upload script (run locally)
+upload_universities.py
+
+# Google API discovery cache (if generated locally)
+googleapiclient/discovery_cache/
+
+# Any generated or cached files
+*.cache
+*.tmp
+*.temp

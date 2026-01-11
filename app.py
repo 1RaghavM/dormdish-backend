@@ -759,69 +759,58 @@ async def email_test(email: EmailStr):
 
 
 
-UNIVERSITIES_CSV_PATH = os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv') if os.path.exists(os.path.join(os.path.dirname(__file__), 'us-colleges-and-universities.csv')) else os.path.join(os.getcwd(), 'us-colleges-and-universities.csv')
+# Cache for universities loaded from Supabase
+_universities_cache: Optional[List[str]] = None
+_universities_cache_time: Optional[float] = None
+UNIVERSITIES_CACHE_TTL = 3600  # 1 hour cache
 
-@lru_cache(maxsize=1)
-def load_universities_list() -> List[str]:
+def load_universities_from_supabase() -> List[str]:
+    """Load universities from Supabase database."""
+    global _universities_cache, _universities_cache_time
+    
+    # Check cache
+    current_time = time.time()
+    if _universities_cache is not None and _universities_cache_time is not None:
+        if current_time - _universities_cache_time < UNIVERSITIES_CACHE_TTL:
+            return _universities_cache
+    
     universities: List[str] = []
     try:
-        path = UNIVERSITIES_CSV_PATH
-        if not os.path.isfile(path):
-            print(f"⚠️ Universities CSV not found at {path}")
-            return universities
-        with open(path, 'r', encoding='utf-8') as f:
+        # Fetch all universities from Supabase, paginate if needed
+        offset = 0
+        batch_size = 1000
+        
+        while True:
+            result = supabase.table('universities').select('name').order('name').range(offset, offset + batch_size - 1).execute()
             
-            sample = f.read(2048)
-            f.seek(0)
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=',;|\t')
-                delim = dialect.delimiter
-            except Exception:
+            if result.data:
+                for row in result.data:
+                    name = (row.get('name') or '').strip()
+                    if name:
+                        universities.append(name)
                 
-                first_line = sample.splitlines()[0] if sample else ''
-                delim = ';' if ';' in first_line else ("\t" if '\t' in first_line else ',')
-
-            reader = csv.DictReader(f, delimiter=delim)
-            header_lower = [h.lower() for h in (reader.fieldnames or [])]
-            name_key = None
-            for key in ['name', 'university', 'school', 'institution']:
-                if key in header_lower:
-                    name_key = reader.fieldnames[header_lower.index(key)]
-                    break
-            if name_key:
-                for row in reader:
-                    val = (row.get(name_key) or '').strip()
-                    if val:
-                        universities.append(val)
+                if len(result.data) < batch_size:
+                    break  # No more data
+                offset += batch_size
             else:
-                
-                f.seek(0)
-                reader2 = csv.reader(f, delimiter=delim)
-                first_row = True
-                for row in reader2:
-                    if first_row:
-                        first_row = False
-                        
-                        if any((col or '').strip().lower() == 'name' for col in row):
-                            continue
-                    if row:
-                        name = (row[0] or '').strip()
-                        if name:
-                            universities.append(name)
+                break
+        
+        # Update cache
+        _universities_cache = universities
+        _universities_cache_time = current_time
+        logger.info(f"✅ Loaded {len(universities)} universities from Supabase")
+        
     except Exception as e:
-        print(f"⚠️ Failed to load universities CSV: {e}")
+        logger.error(f"⚠️ Failed to load universities from Supabase: {e}")
+        # Return cached data if available, even if expired
+        if _universities_cache is not None:
+            return _universities_cache
     
-    seen = set()
-    deduped: List[str] = []
-    for u in universities:
-        if u not in seen:
-            seen.add(u)
-            deduped.append(u)
-    return deduped
+    return universities
 
 @app.get('/universities')
 def get_universities():
-    return {"universities": load_universities_list()}
+    return {"universities": load_universities_from_supabase()}
 
 
 # Ensure `/request-school` is registered on the currently active `app` instance.
