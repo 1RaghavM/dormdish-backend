@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "buildCommand": "python optimize_dependencies.py",
   "routes": [
     {
       "src": "/(.*)",

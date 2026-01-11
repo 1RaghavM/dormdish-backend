@@ -1,0 +1,10 @@
+#!/bin/bash
+# Vercel build script for Python project
+# This runs after dependencies are installed to optimize the deployment size
+
+echo "🔧 Running post-install optimization..."
+
+# Run the optimization script
+python optimize_dependencies.py
+
+echo "✅ Build optimization complete!"
