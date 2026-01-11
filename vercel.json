@@ -14,10 +14,5 @@
   "crons": [{
       "path": "/api/send-daily-reminders",
       "schedule": "0 10 * * *"
-    }],
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 60
-    }
-  }
+    }]
 }
