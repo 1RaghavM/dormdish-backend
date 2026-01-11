@@ -10,11 +10,6 @@
     "PYTHONPATH": "."
   },
   "regions": ["iad1"],
-  "functions": {
-    "api/**/*.py": {
-      "excludeFiles": "{tests/**,**/*test*.py,.venv/**,.git/**,__pycache__/**,*.md,*.log}"
-    }
-  },
   "crons": [{
       "path": "/api/send-daily-reminders",
       "schedule": "0 10 * * *"
