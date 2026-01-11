@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "python optimize_dependencies.py || true",
+  "buildCommand": "bash vercel-build || true",
   "routes": [
     {
       "src": "/(.*)",

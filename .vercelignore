@@ -13,17 +13,24 @@ ENV/
 **/env
 
 # Git repository - not needed in deployment (5.1MB)
-# Use absolute patterns to ensure exclusion
+# CRITICAL: Must be at the top and use multiple patterns
 .git
 .git/
 .git/**
+.git/*
 **/.git
 **/.git/**
-**/.git/**
+**/.git/*
 .gitignore
 .gitattributes
 .gitmodules
 .gitkeep
+.git/config
+.git/objects
+.git/refs
+.git/HEAD
+.git/index
+.git/logs
 
 # Python cache - regenerated on deployment (340KB+)
 **/__pycache__
@@ -162,3 +169,4 @@ credentials.json
 
 # Diagnostic scripts (not needed in production)
 check_deployment_size.py
+VERCEL_SIZE_FIX.md
