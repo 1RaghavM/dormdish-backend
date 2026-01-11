@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "python optimize_dependencies.py",
+  "buildCommand": "python optimize_dependencies.py || true",
   "routes": [
     {
       "src": "/(.*)",
@@ -14,5 +14,10 @@
   "crons": [{
       "path": "/api/send-daily-reminders",
       "schedule": "0 10 * * *"
-    }]
+    }],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  }
 }
