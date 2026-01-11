@@ -138,6 +138,7 @@ credentials.json
 .github
 .github/
 **/.github
+.git/
 
 # Large data files
 *.db
