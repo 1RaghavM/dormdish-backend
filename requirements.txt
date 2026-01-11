@@ -30,8 +30,7 @@ beautifulsoup4==4.12.3
 
 # Payment Processing
 
-# Memory Layer
-mem0ai==0.1.53
+# Memory Layer (using Mem0 Platform REST API directly via httpx - no SDK needed)
 
 # Google Calendar Integration
 google-auth==2.36.0
