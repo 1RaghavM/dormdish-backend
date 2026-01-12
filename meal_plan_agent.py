@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import queue
 import random
+import threading
 import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -488,7 +490,7 @@ async def generate_meal_plan_with_streaming(
   Yields:
     Dict with 'type' field:
       - {"type": "thinking", "content": "..."} - Progress updates
-      - {"type": "content", "content": "..."} - Partial content
+      - {"type": "response", "content": "..."} - Partial content
       - {"type": "complete", "meal_plan": {...}} - Final result
       - {"type": "error", "error": "..."} - Error message
   """
@@ -588,21 +590,56 @@ async def generate_meal_plan_with_streaming(
     try:
       yield {"type": "thinking", "content": "Building your personalized meal plan..."}
       
-      # Collect streaming chunks
-      def iterate_stream():
-        chunks = []
-        for chunk in stream:
-          if chunk.text:
-            chunks.append(chunk.text)
-        return chunks
+      # Process streaming chunks with proper async iteration
+      # We need to iterate in a thread since the Gemini stream is synchronous
+      chunk_queue: queue.Queue = queue.Queue()
+      stream_error: List[Exception] = []
       
-      chunks = await asyncio.to_thread(iterate_stream)
+      def stream_to_queue():
+        try:
+          for chunk in stream:
+            if chunk.text:
+              chunk_queue.put(chunk.text)
+          chunk_queue.put(None)  # Signal completion
+        except Exception as e:
+          stream_error.append(e)
+          chunk_queue.put(None)
       
-      for chunk_text in chunks:
-        accumulated_content += chunk_text
-        # Yield partial content updates periodically
-        if len(accumulated_content) % 200 < len(chunk_text):
-          yield {"type": "content", "content": accumulated_content[-100:] if len(accumulated_content) > 100 else accumulated_content}
+      # Start streaming in background thread
+      stream_thread = threading.Thread(target=stream_to_queue, daemon=True)
+      stream_thread.start()
+      
+      # Process chunks as they arrive
+      chunk_count = 0
+      thinking_messages = [
+        "Selecting optimal breakfast options...",
+        "Balancing your protein intake...",
+        "Planning your lunch...",
+        "Optimizing calorie distribution...",
+        "Crafting your dinner...",
+        "Fine-tuning portion sizes...",
+        "Almost there...",
+      ]
+      while True:
+        try:
+          # Wait for chunk with timeout to allow async cooperation
+          chunk_text = await asyncio.to_thread(chunk_queue.get, True, 0.1)
+          if chunk_text is None:
+            break
+          accumulated_content += chunk_text
+          chunk_count += 1
+          
+          # Yield thinking updates periodically to show progress
+          if chunk_count % 2 == 0 and chunk_count // 2 <= len(thinking_messages):
+            msg_idx = min(chunk_count // 2 - 1, len(thinking_messages) - 1)
+            yield {"type": "thinking", "content": thinking_messages[msg_idx]}
+        except queue.Empty:
+          await asyncio.sleep(0.05)
+          continue
+      
+      # Check for streaming errors
+      if stream_error:
+        raise stream_error[0]
       
     except Exception as e:
       if _is_overloaded_error(e):
@@ -653,6 +690,9 @@ async def generate_meal_plan_with_streaming(
 
     # Convert to dict for response
     meal_plan_dict = result.model_dump()
+    
+    # Final thinking update before completion
+    yield {"type": "thinking", "content": "Finalizing your meal plan..."}
     
     # Yield the complete result
     yield {
