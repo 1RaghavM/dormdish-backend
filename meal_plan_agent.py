@@ -470,3 +470,199 @@ async def run_workflow(workflow_input: WorkflowInput):
     }
   ]
   return {"input_as_text": workflow["input_as_text"], "conversation_history": conversation_history}
+
+
+async def generate_meal_plan_with_streaming(
+  *,
+  user_payload: Dict[str, Any],
+  menu_payload: Dict[str, Any],
+  nutrition_targets: Dict[str, Any],
+  extra_system_messages: Optional[Sequence[str]] = None,
+  user_preferences_context: Optional[str] = None,
+):
+  """Generate a meal plan using Gemini with streaming updates.
+  
+  This is an async generator that yields progress chunks during generation
+  and a final complete chunk with the meal plan result.
+  
+  Yields:
+    Dict with 'type' field:
+      - {"type": "thinking", "content": "..."} - Progress updates
+      - {"type": "content", "content": "..."} - Partial content
+      - {"type": "complete", "meal_plan": {...}} - Final result
+      - {"type": "error", "error": "..."} - Error message
+  """
+  
+  # Yield initial thinking state
+  yield {"type": "thinking", "content": "Analyzing menu items and nutritional requirements..."}
+  
+  prompt = _build_agent_prompt(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+    user_preferences_context=user_preferences_context,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  print(
+    f"[meal_plan_agent] Streaming: Gemini 2.5 Flash prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
+  )
+  
+  yield {"type": "thinking", "content": f"Processing {allowed_items_count} menu items..."}
+
+  # Build system instructions with targets
+  cal_target = nutrition_targets['calories']
+  prot_target = nutrition_targets['protein_g']
+  cal_min = int(cal_target * 0.95)
+  cal_max = int(cal_target * 1.05)
+  prot_min = int(prot_target * 0.95)
+  prot_max = int(prot_target * 1.05)
+  
+  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+    cal_min=cal_min,
+    cal_max=cal_max,
+    cal_target=cal_target,
+    prot_min=prot_min,
+    prot_max=prot_max,
+    prot_target=prot_target
+  )
+
+  chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
+  temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
+  max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
+
+  yield {"type": "thinking", "content": f"Generating meal plan targeting {cal_target} calories and {prot_target}g protein..."}
+
+  last_error: Optional[Exception] = None
+  accumulated_content = ""
+  
+  for attempt in (1, 2):
+    attempt_temperature = temperature if attempt == 1 else 0.1
+    attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
+    
+    if attempt > 1:
+      yield {"type": "thinking", "content": "Refining meal plan generation..."}
+
+    # Use streaming API
+    def call_gemini_stream():
+      return client.models.generate_content_stream(
+        model=chosen_model,
+        contents=f"{attempt_instructions}\n\n{prompt}",
+        config=types.GenerateContentConfig(
+          temperature=attempt_temperature,
+          max_output_tokens=max_tokens,
+          response_mime_type="application/json",
+          response_schema=DormdishMealPlannerSchema,
+        )
+      )
+
+    # Retry overloaded/503 responses with backoff
+    overloaded_error: Optional[Exception] = None
+    stream = None
+    overload_retries = int(os.getenv("MEALPLAN_OVERLOAD_RETRIES", "6"))
+    
+    for overload_attempt in range(1, overload_retries + 1):
+      try:
+        stream = await asyncio.to_thread(call_gemini_stream)
+        overloaded_error = None
+        break
+      except Exception as e:
+        if _is_overloaded_error(e):
+          overloaded_error = e
+          if overload_attempt < overload_retries:
+            print(f"[meal_plan_agent] WARNING: Model overloaded (attempt={attempt} overload_try={overload_attempt})")
+            yield {"type": "thinking", "content": "Model busy, retrying..."}
+            await _sleep_backoff(overload_attempt)
+            continue
+          break
+        raise
+
+    if stream is None:
+      last_error = overloaded_error or ValueError("Model did not return a response")
+      continue
+
+    # Stream the response chunks
+    accumulated_content = ""
+    try:
+      yield {"type": "thinking", "content": "Building your personalized meal plan..."}
+      
+      # Collect streaming chunks
+      def iterate_stream():
+        chunks = []
+        for chunk in stream:
+          if chunk.text:
+            chunks.append(chunk.text)
+        return chunks
+      
+      chunks = await asyncio.to_thread(iterate_stream)
+      
+      for chunk_text in chunks:
+        accumulated_content += chunk_text
+        # Yield partial content updates periodically
+        if len(accumulated_content) % 200 < len(chunk_text):
+          yield {"type": "content", "content": accumulated_content[-100:] if len(accumulated_content) > 100 else accumulated_content}
+      
+    except Exception as e:
+      if _is_overloaded_error(e):
+        last_error = e
+        continue
+      raise
+
+    if not accumulated_content.strip():
+      last_error = ValueError("Model returned empty response")
+      print(f"[meal_plan_agent] WARNING: Empty streaming response (attempt={attempt})")
+      continue
+
+    # Parse the accumulated response
+    try:
+      raw_json = _extract_first_json_object(accumulated_content)
+      parsed = json.loads(raw_json)
+    except Exception as e:
+      last_error = e
+      print(f"[meal_plan_agent] Streaming JSON parsing failed (attempt={attempt}): {e}")
+      print(f"[meal_plan_agent] Raw response preview: {accumulated_content[:500]}")
+      continue
+
+    if "explanation" not in parsed:
+      print("[meal_plan_agent] Adding default explanation")
+      parsed["explanation"] = "Meal plan generated to meet nutritional targets."
+
+    try:
+      result = DormdishMealPlannerSchema.model_validate(parsed)
+    except ValidationError as e:
+      last_error = e
+      print(f"[meal_plan_agent] Streaming model validation failed (attempt={attempt}): {e}")
+      continue
+
+    # Recalculate totals for accuracy
+    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+    gemini_calories = result.totals.calories
+    gemini_protein = result.totals.protein_g
+    actual_calories = recalculated_totals["calories"]
+    actual_protein = recalculated_totals["protein_g"]
+
+    cal_diff = abs(actual_calories - gemini_calories)
+    prot_diff = abs(actual_protein - gemini_protein)
+    if cal_diff > 0 or prot_diff > 0:
+      print(f"[meal_plan_agent] Math correction: {cal_diff} cal, {prot_diff}g protein")
+
+    result.totals.calories = actual_calories
+    result.totals.protein_g = actual_protein
+
+    # Convert to dict for response
+    meal_plan_dict = result.model_dump()
+    
+    # Yield the complete result
+    yield {
+      "type": "complete",
+      "meal_plan": meal_plan_dict,
+      "raw_response": accumulated_content,
+    }
+    return
+
+  # If we get here, all attempts failed
+  error_msg = f"Model returned invalid response: {last_error}" if last_error else "Model returned invalid response"
+  print(f"[meal_plan_agent] Streaming failed after all attempts: {error_msg}")
+  yield {"type": "error", "error": "Failed to generate meal plan. Please try again."}
