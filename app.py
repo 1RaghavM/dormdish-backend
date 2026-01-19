@@ -977,6 +977,84 @@ class GoogleRegisterRequest(BaseModel):
     university: str
     dietary_preference: Optional[str] = None
 
+
+class AppleIdTokenRequest(BaseModel):
+    id_token: str
+    # Apple may provide user info only on first authorization
+    user_data: Optional[Dict[str, Any]] = None
+
+
+class AppleRegisterRequest(BaseModel):
+    id_token: str
+    username: str
+    email: EmailStr
+    age: int
+    height_feet: int
+    height_inches: int
+    weight_lbs: float
+    gender: str
+    activity_level: str
+    goal: str
+    university: str
+    dietary_preference: Optional[str] = None
+
+
+async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
+    """Validate an Apple ID token (JWT).
+
+    Apple ID tokens are JWTs signed with Apple's private key. We verify them by:
+    1. Fetching Apple's public keys from their JWKS endpoint
+    2. Verifying the JWT signature
+    3. Validating standard claims (iss, aud, exp)
+    """
+    import jwt
+    from jwt import PyJWKClient
+
+    APPLE_KEYS_URL = "https://appleid.apple.com/auth/keys"
+    APPLE_ISSUER = "https://appleid.apple.com"
+
+    # Get the expected audience (your app's bundle ID or service ID)
+    apple_client_id = os.getenv("APPLE_CLIENT_ID")
+    if not apple_client_id:
+        raise HTTPException(status_code=500, detail="APPLE_CLIENT_ID not configured")
+
+    try:
+        # Fetch Apple's public keys and verify the token
+        def _sync_verify():
+            jwks_client = PyJWKClient(APPLE_KEYS_URL)
+            signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+
+            # Decode and verify the token
+            decoded = jwt.decode(
+                id_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=apple_client_id,
+                issuer=APPLE_ISSUER,
+            )
+            return decoded
+
+        token_data = await asyncio.to_thread(_sync_verify)
+
+        # Apple tokens contain 'sub' (subject) as the unique user identifier
+        # and optionally 'email' if the user shared it
+        if not token_data.get("sub"):
+            raise HTTPException(status_code=401, detail="Apple token missing subject identifier")
+
+        return token_data
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Apple token has expired")
+    except jwt.InvalidAudienceError:
+        raise HTTPException(status_code=401, detail="Apple token audience mismatch")
+    except jwt.InvalidIssuerError:
+        raise HTTPException(status_code=401, detail="Apple token issuer mismatch")
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid Apple ID token: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to verify Apple token: {exc}")
+
+
 async def _verify_google_id_token(id_token: str) -> Dict[str, Any]:
     """Validate a Google ID token.
 
@@ -1334,6 +1412,211 @@ async def auth_google_register(data: GoogleRegisterRequest):
     except Exception as e:
         print(f"[google.register] unhandled_error: {e}")
         raise HTTPException(status_code=500, detail="Google registration failed")
+
+
+@app.post('/auth/apple/login')
+async def auth_apple_login(payload: AppleIdTokenRequest):
+    """Login with Apple ID token.
+
+    Verifies the Apple identity token and either:
+    - Returns the user with a session token if they exist
+    - Returns needs_registration: true if the user needs to register
+    """
+    try:
+        print("[apple.login] start")
+        token_data = await _verify_apple_id_token(payload.id_token)
+        print(f"[apple.login] token sub={token_data.get('sub')} email={token_data.get('email')}")
+
+        # Apple uses 'sub' as the unique identifier
+        apple_sub = token_data.get('sub')
+        # Email may or may not be present (user can choose to hide it)
+        email = token_data.get('email', '').lower() if token_data.get('email') else None
+
+        # Apple may provide user info in payload.user_data only on first authorization
+        user_data = payload.user_data or {}
+        given_name = user_data.get('name', {}).get('firstName', '') if user_data else ''
+        family_name = user_data.get('name', {}).get('lastName', '') if user_data else ''
+
+        if not apple_sub:
+            raise HTTPException(status_code=400, detail="Apple token missing subject identifier")
+
+        # First, try to find user by apple_sub (unique Apple identifier)
+        res = supabase.table("users").select("*").eq("apple_sub", apple_sub).execute()
+
+        # If not found by apple_sub but email is provided, try finding by email
+        if not res.data and email:
+            res = supabase.table("users").select("*").eq("email", email).execute()
+
+        if not res.data:
+            # User not found - needs registration
+            return {
+                "success": True,
+                "message": "Apple account not registered",
+                "needs_registration": True,
+                "email": email,
+                "apple_sub": apple_sub,
+                "given_name": given_name,
+                "family_name": family_name,
+            }
+
+        user_row = res.data[0]
+
+        # If user exists but doesn't have apple_sub linked, link it now
+        if not user_row.get("apple_sub") and apple_sub:
+            try:
+                supabase.table("users").update({"apple_sub": apple_sub}).eq("id", user_row.get("id")).execute()
+                user_row["apple_sub"] = apple_sub
+            except Exception as e:
+                print(f"[apple.login] warning: failed to link apple_sub: {e}")
+
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        try:
+            supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
+        except Exception as e:
+            print(f"[apple.login] warning: failed to update last_login: {e}")
+
+        print(f"[apple.login] success user_id={user_row.get('id')}")
+        return {
+            "success": True,
+            "message": "Login successful",
+            "user": user_row,
+            "session_token": token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        debug = os.getenv("DEBUG", "0") in ("1", "true", "True")
+        if debug:
+            raise HTTPException(status_code=500, detail=f"Apple login failed: {e}")
+        else:
+            raise HTTPException(status_code=500, detail="Apple login failed")
+
+
+@app.post('/auth/apple/register')
+async def auth_apple_register(data: AppleRegisterRequest):
+    """Register a new user via Apple ID token.
+
+    Creates a new user account linked to the Apple identifier.
+    """
+    try:
+        print("[apple.register] start")
+        token_data = await _verify_apple_id_token(data.id_token)
+        print(f"[apple.register] token sub={token_data.get('sub')} email={token_data.get('email')}")
+
+        apple_sub = token_data.get('sub')
+        token_email = token_data.get('email', '').lower() if token_data.get('email') else None
+
+        if not apple_sub:
+            raise HTTPException(status_code=400, detail="Apple token missing subject identifier")
+
+        # Validate email - if token has email, it should match the provided email
+        # If token doesn't have email (user chose to hide), trust the provided email
+        if token_email and token_email != str(data.email).lower():
+            raise HTTPException(status_code=400, detail="Email mismatch between Apple token and registration data")
+
+        email = str(data.email).lower()
+
+        # Check if user already exists by apple_sub or email
+        existing_by_sub = supabase.table("users").select("id").eq("apple_sub", apple_sub).execute()
+        if existing_by_sub.data:
+            raise HTTPException(status_code=400, detail="An account with this Apple ID already exists")
+
+        existing_by_email = supabase.table("users").select("id").eq("email", email).execute()
+        if existing_by_email.data:
+            raise HTTPException(status_code=400, detail="An account with this email already exists")
+
+        # Generate a random password hash (user will authenticate via Apple)
+        random_secret = _secrets_for_google.token_urlsafe(32)
+        pwd_hash = hash_password(random_secret)
+
+        metrics = calculate_bmr_tdee(
+            age=int(data.age),
+            height_feet=int(data.height_feet),
+            height_inches=int(data.height_inches),
+            weight_lbs=float(data.weight_lbs),
+            gender=data.gender,
+            activity_level=data.activity_level,
+        )
+
+        payload = {
+            "username": data.username,
+            "email": email,
+            "password_hash": pwd_hash,
+            "apple_sub": apple_sub,  # Link Apple identifier
+            "age": int(data.age),
+            "height_feet": int(data.height_feet),
+            "height_inches": int(data.height_inches),
+            "weight_lbs": float(data.weight_lbs),
+            "gender": data.gender,
+            "activity_level": data.activity_level,
+            "goal": data.goal,
+            "university": data.university,
+            "dietary_preference": (data.dietary_preference or None),
+            "bmr": metrics.get("bmr"),
+            "tdee": metrics.get("tdee"),
+            "created_at": datetime.now().isoformat(),
+        }
+
+        print(f"[apple.register] inserting user payload keys={list(payload.keys())}")
+
+        # Username collision handling (same as Google/email registration)
+        max_attempts = 5
+        base_username = (payload.get("username") or "user").strip()
+        if not base_username:
+            base_username = email.split("@")[0]
+
+        user_row = None
+        for attempt in range(max_attempts):
+            try:
+                try_username = base_username if attempt == 0 else f"{base_username}-{attempt}"
+                payload["username"] = try_username
+                inserted = supabase.table("users").insert(payload).execute()
+                insert_error = getattr(inserted, "error", None)
+                if insert_error:
+                    msg = str(insert_error)
+                    if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
+                        logger.info("[apple.register] username collision for %s attempt=%s: %s", try_username, attempt + 1, msg)
+                        continue
+                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                if inserted.data and len(inserted.data) > 0:
+                    user_row = inserted.data[0]
+                    break
+                logger.warning("[apple.register] insert returned no data for username=%s on attempt=%s", try_username, attempt + 1)
+            except Exception as e:
+                emsg = str(e)
+                if ("23505" in emsg) or ("users_username_key" in emsg) or ("Key (username)" in emsg) or ("duplicate key value" in emsg):
+                    logger.info("[apple.register] caught unique-constraint username collision attempt=%s username=%s: %s", attempt + 1, payload.get("username"), emsg)
+                    continue
+                print(f"[apple.register] insert error (non-username): {e}")
+                raise HTTPException(status_code=500, detail=f"Apple registration failed: {e}")
+
+        if not user_row:
+            raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
+
+        token = create_user_session(user_row.get("id"))
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        user_row["session_token"] = token
+        print(f"[apple.register] success user_id={user_row.get('id')}")
+
+        return {
+            "success": True,
+            "message": "Registration successful",
+            "user": user_row,
+            "session_token": token,
+        }
+    except HTTPException as he:
+        print(f"[apple.register] http_error status={he.status_code} detail={he.detail}")
+        raise
+    except Exception as e:
+        print(f"[apple.register] unhandled_error: {e}")
+        raise HTTPException(status_code=500, detail="Apple registration failed")
 
 
 @app.post('/auth/google/initiate', summary='Initiate Google OAuth flow for sign-in/sign-up')
