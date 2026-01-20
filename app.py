@@ -1153,7 +1153,7 @@ def auth_register(data: RegisterRequest):
         if not base_username:
             # Fall back to a name derived from email local-part if username empty
             base_username = str(data.email).split("@")[0]
-
+        #hi
         user_row = None
         for attempt in range(max_attempts):
             try:
