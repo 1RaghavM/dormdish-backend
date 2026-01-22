@@ -404,6 +404,60 @@ def verify_password(password: str, hashed: str) -> bool:
     """Verify a password against its hash"""
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
+
+# Password Reset Code Generation and Email Sending
+def generate_reset_code() -> str:
+    """Generate a 6-digit reset code"""
+    return ''.join([str(random.randint(0, 9)) for _ in range(6)])
+
+
+def send_password_reset_email(to_email: str, code: str) -> bool:
+    """Send password reset code via Gmail SMTP"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_email = os.getenv("SMTP_EMAIL", "dormdish1@gmail.com")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+
+    if not smtp_password:
+        logger.error("SMTP_PASSWORD environment variable not set")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = smtp_email
+        msg['To'] = to_email
+        msg['Subject'] = 'DormDish - Password Reset Code'
+
+        body = f"""
+Hello,
+
+You requested to reset your password for DormDish.
+
+Your password reset code is: {code}
+
+This code will expire in 10 minutes.
+
+If you did not request this password reset, please ignore this email.
+
+- The DormDish Team
+        """
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(smtp_email, smtp_password)
+        server.send_message(msg)
+        server.quit()
+
+        logger.info(f"Password reset email sent to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send password reset email: {e}")
+        return False
+
 def generate_session_token() -> str:
     """Generate a secure session token"""
     return secrets.token_urlsafe(32)
@@ -999,6 +1053,22 @@ class AppleRegisterRequest(BaseModel):
     dietary_preference: Optional[str] = None
 
 
+# Password Reset Request Models
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyResetCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str
+
+
 async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
     """Validate an Apple ID token (JWT).
 
@@ -1266,6 +1336,142 @@ def auth_logout(authorization: Optional[str] = Header(None)):
     except Exception as e:
         print(f"⚠️ Logout cleanup failed: {e}")
     return {"success": True, "message": "Logged out"}
+
+
+# Password Reset Endpoints
+@app.post('/auth/forgot-password', summary='Request password reset code')
+def auth_forgot_password(data: ForgotPasswordRequest, background_tasks: BackgroundTasks):
+    """
+    Request a password reset code. If the email exists, a 6-digit code
+    is sent to the email address, valid for 10 minutes.
+    """
+    try:
+        email = str(data.email).lower()
+
+        # Check if user exists
+        res = supabase.table("users").select("id, email").eq("email", email).execute()
+        if not res.data:
+            # Don't reveal whether email exists - return success anyway
+            return {"success": True, "message": "If this email is registered, you will receive a reset code."}
+
+        user_row = res.data[0]
+        user_id = user_row.get("id")
+
+        # Generate 6-digit code
+        code = generate_reset_code()
+        expires_at = datetime.now() + timedelta(minutes=10)
+
+        # Delete any existing reset codes for this user
+        try:
+            supabase.table("password_reset_codes").delete().eq("user_id", user_id).execute()
+        except Exception:
+            pass  # Table might not exist yet or no existing codes
+
+        # Store the reset code
+        try:
+            supabase.table("password_reset_codes").insert({
+                "user_id": user_id,
+                "email": email,
+                "code": code,
+                "expires_at": expires_at.isoformat(),
+                "created_at": datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Failed to store reset code: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create reset code")
+
+        # Send email in background
+        background_tasks.add_task(send_password_reset_email, email, code)
+
+        return {"success": True, "message": "If this email is registered, you will receive a reset code."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Forgot password error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process password reset request")
+
+
+@app.post('/auth/verify-reset-code', summary='Verify password reset code')
+def auth_verify_reset_code(data: VerifyResetCodeRequest):
+    """
+    Verify a password reset code. Returns success if the code is valid and not expired.
+    """
+    try:
+        email = str(data.email).lower()
+        code = data.code.strip()
+
+        # Find the reset code
+        res = supabase.table("password_reset_codes")\
+            .select("*")\
+            .eq("email", email)\
+            .eq("code", code)\
+            .gt("expires_at", datetime.now().isoformat())\
+            .execute()
+
+        if not res.data:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+
+        return {"success": True, "message": "Code verified successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Verify reset code error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to verify reset code")
+
+
+@app.post('/auth/reset-password', summary='Reset password with verified code')
+def auth_reset_password(data: ResetPasswordRequest):
+    """
+    Reset the user's password using a verified code.
+    """
+    try:
+        email = str(data.email).lower()
+        code = data.code.strip()
+        new_password = data.new_password
+
+        # Validate new password
+        if len(new_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+        # Verify the code again
+        res = supabase.table("password_reset_codes")\
+            .select("*, users!inner(id)")\
+            .eq("email", email)\
+            .eq("code", code)\
+            .gt("expires_at", datetime.now().isoformat())\
+            .execute()
+
+        if not res.data:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+
+        reset_record = res.data[0]
+        user_id = reset_record.get("user_id")
+
+        # Hash the new password
+        pwd_hash = hash_password(new_password)
+
+        # Update the user's password
+        supabase.table("users").update({
+            "password_hash": pwd_hash,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", user_id).execute()
+
+        # Delete the used reset code
+        supabase.table("password_reset_codes").delete().eq("email", email).execute()
+
+        # Invalidate all existing sessions for this user (security measure)
+        try:
+            supabase.table("user_sessions").delete().eq("user_id", user_id).execute()
+        except Exception:
+            pass  # Non-critical
+
+        return {"success": True, "message": "Password reset successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reset password error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reset password")
+
 
 @app.post('/auth/google/login')
 async def auth_google_login(payload: GoogleIdTokenRequest):
