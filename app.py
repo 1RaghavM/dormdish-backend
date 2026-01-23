@@ -1338,6 +1338,94 @@ def auth_logout(authorization: Optional[str] = Header(None)):
     return {"success": True, "message": "Logged out"}
 
 
+@app.delete('/auth/account', summary='Delete user account and all associated data')
+async def delete_account(current_user=Depends(get_current_user)):
+    """
+    Permanently delete user account and all associated data.
+    This action cannot be undone.
+    """
+    user_id = current_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID not found")
+
+    print(f"🗑️ Starting account deletion for user {user_id}")
+
+    try:
+        # Delete user sessions
+        try:
+            supabase.table("user_sessions").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted user sessions")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete user sessions: {e}")
+
+        # Delete password reset codes
+        try:
+            supabase.table("password_reset_codes").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted password reset codes")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete password reset codes: {e}")
+
+        # Delete saved meal plans
+        try:
+            supabase.table("saved_meal_plans").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted saved meal plans")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete saved meal plans: {e}")
+
+        # Delete weight history
+        try:
+            supabase.table("weight_history").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted weight history")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete weight history: {e}")
+
+        # Delete push tokens
+        try:
+            supabase.table("push_tokens").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted push tokens")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete push tokens: {e}")
+
+        # Delete meal plan generations
+        try:
+            supabase.table("meal_plan_generations").delete().eq("user_id", user_id).execute()
+            print(f"  ✓ Deleted meal plan generations")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete meal plan generations: {e}")
+
+        # Delete mem0 memories (preferences, favorites, dislikes)
+        try:
+            from memory.mem0_client import get_memory_client
+            memory = get_memory_client()
+            # Get all memories for this user
+            all_memories = memory.get_all(str(user_id))
+            memories_list = all_memories.get("results", []) if isinstance(all_memories, dict) else all_memories
+            # Delete each memory
+            for mem in memories_list:
+                if isinstance(mem, dict) and mem.get("id"):
+                    memory.delete(mem["id"])
+            print(f"  ✓ Deleted {len(memories_list)} mem0 memories")
+        except Exception as e:
+            print(f"  ⚠️ Failed to delete mem0 memories: {e}")
+
+        # Finally, delete the user record
+        try:
+            supabase.table("users").delete().eq("id", user_id).execute()
+            print(f"  ✓ Deleted user record")
+        except Exception as e:
+            print(f"  ❌ Failed to delete user record: {e}")
+            raise HTTPException(status_code=500, detail="Failed to delete user account")
+
+        print(f"✅ Account deletion complete for user {user_id}")
+        return {"success": True, "message": "Account deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Account deletion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete account: {str(e)}")
+
+
 # Password Reset Endpoints
 @app.post('/auth/forgot-password', summary='Request password reset code')
 def auth_forgot_password(data: ForgotPasswordRequest, background_tasks: BackgroundTasks):
