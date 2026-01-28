@@ -150,30 +150,6 @@ Reported at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
         return False
 
 
-@app.post('/bug-report', summary='Submit a bug report')
-def submit_bug_report(data: BugReportRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
-    """
-    Submit a bug report. Requires authentication.
-    Sends an email to the DormDish team with the bug details.
-    """
-    try:
-        user_email = current_user.get("email", "Unknown")
-
-        # Send email in background
-        background_tasks.add_task(
-            send_bug_report_email,
-            user_email,
-            data.description.strip(),
-            data.screen_name,
-            data.app_version
-        )
-
-        return {"success": True, "message": "Bug report submitted successfully. Thank you for your feedback!"}
-    except Exception as e:
-        logger.error(f"Bug report submission failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to submit bug report")
-
-
 HTTP_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 HTTP_CLIENT_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=20)
 HTTP_CLIENT_HEADERS = {
@@ -316,10 +292,29 @@ app.add_middleware(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your_openai_api_key_here")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "your_supabase_url_here")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_key_here")
+# IMPORTANT: Don't default Supabase env vars to placeholder strings.
+# If create_client() is called with an invalid URL/key at import time, the whole
+# Vercel function fails to boot and Vercel returns FUNCTION_INVOCATION_FAILED for
+# every request.
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+class _SupabaseNotConfigured:
+    def table(self, *_args, **_kwargs):
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase is not configured on this server. Set SUPABASE_URL and SUPABASE_SERVICE_KEY.",
+        )
+
+try:
+    if SUPABASE_URL and SUPABASE_KEY:
+        supabase: Client | _SupabaseNotConfigured = create_client(SUPABASE_URL, SUPABASE_KEY)
+    else:
+        logger.warning("Supabase not configured: missing SUPABASE_URL and/or SUPABASE_SERVICE_KEY")
+        supabase = _SupabaseNotConfigured()
+except Exception as exc:
+    logger.error("Failed to initialize Supabase client: %s", exc)
+    supabase = _SupabaseNotConfigured()
 
 
 # ===================================
@@ -1250,6 +1245,30 @@ def get_current_user(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
     return user
+
+
+@app.post('/bug-report', summary='Submit a bug report')
+def submit_bug_report(data: BugReportRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+    """
+    Submit a bug report. Requires authentication.
+    Sends an email to the DormDish team with the bug details.
+    """
+    try:
+        user_email = current_user.get("email", "Unknown")
+
+        # Send email in background
+        background_tasks.add_task(
+            send_bug_report_email,
+            user_email,
+            data.description.strip(),
+            data.screen_name,
+            data.app_version
+        )
+
+        return {"success": True, "message": "Bug report submitted successfully. Thank you for your feedback!"}
+    except Exception as e:
+        logger.error(f"Bug report submission failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit bug report")
 
 
 @app.post('/auth/register')
