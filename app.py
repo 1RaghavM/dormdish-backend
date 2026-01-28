@@ -95,6 +95,85 @@ def request_school(data: SchoolRequest):
         raise HTTPException(status_code=500, detail="Failed to submit school request")
 
 
+# ---------------------------
+# Bug Report endpoint
+# ---------------------------
+class BugReportRequest(BaseModel):
+    description: str
+    screen_name: str
+    app_version: str
+
+
+def send_bug_report_email(user_email: str, description: str, screen_name: str, app_version: str) -> bool:
+    """Send bug report email via Gmail SMTP"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_email = os.getenv("SMTP_EMAIL", "dormdish1@gmail.com")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+
+    if not smtp_password:
+        logger.error("SMTP_PASSWORD environment variable not set")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = smtp_email
+        msg['To'] = "dormdish1@gmail.com"
+        msg['Subject'] = f'[DormDish Bug Report] - {screen_name}'
+
+        body = f"""New Bug Report from DormDish App
+
+Problem Description:
+{description}
+
+App Context:
+- Screen: {screen_name}
+- App Version: {app_version}
+- User Email: {user_email}
+
+Reported at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+"""
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+
+        logger.info(f"Bug report email sent for user {user_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send bug report email: {e}")
+        return False
+
+
+@app.post('/bug-report', summary='Submit a bug report')
+def submit_bug_report(data: BugReportRequest, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+    """
+    Submit a bug report. Requires authentication.
+    Sends an email to the DormDish team with the bug details.
+    """
+    try:
+        user_email = current_user.get("email", "Unknown")
+
+        # Send email in background
+        background_tasks.add_task(
+            send_bug_report_email,
+            user_email,
+            data.description.strip(),
+            data.screen_name,
+            data.app_version
+        )
+
+        return {"success": True, "message": "Bug report submitted successfully. Thank you for your feedback!"}
+    except Exception as e:
+        logger.error(f"Bug report submission failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit bug report")
+
+
 HTTP_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 HTTP_CLIENT_LIMITS = httpx.Limits(max_connections=40, max_keepalive_connections=20)
 HTTP_CLIENT_HEADERS = {
