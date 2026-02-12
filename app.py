@@ -1255,18 +1255,33 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+# Cache JWKS clients to avoid fetching keys on every request
+_apple_jwks_client = None
+_google_jwks_client = None
+
+def _get_apple_jwks_client():
+    """Get or create a cached Apple JWKS client."""
+    global _apple_jwks_client
+    if _apple_jwks_client is None:
+        from jwt import PyJWKClient
+        # Cache keys for 1 hour (Apple rotates keys infrequently)
+        _apple_jwks_client = PyJWKClient(
+            "https://appleid.apple.com/auth/keys",
+            cache_keys=True,
+            lifespan=3600
+        )
+    return _apple_jwks_client
+
 async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
     """Validate an Apple ID token (JWT).
 
     Apple ID tokens are JWTs signed with Apple's private key. We verify them by:
-    1. Fetching Apple's public keys from their JWKS endpoint
+    1. Fetching Apple's public keys from their JWKS endpoint (cached)
     2. Verifying the JWT signature
     3. Validating standard claims (iss, aud, exp)
     """
     import jwt
-    from jwt import PyJWKClient
 
-    APPLE_KEYS_URL = "https://appleid.apple.com/auth/keys"
     APPLE_ISSUER = "https://appleid.apple.com"
 
     # Get the expected audience (your app's bundle ID or service ID)
@@ -1275,9 +1290,9 @@ async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="APPLE_CLIENT_ID not configured")
 
     try:
-        # Fetch Apple's public keys and verify the token
+        # Use cached JWKS client to avoid fetching keys on every request
         def _sync_verify():
-            jwks_client = PyJWKClient(APPLE_KEYS_URL)
+            jwks_client = _get_apple_jwks_client()
             signing_key = jwks_client.get_signing_key_from_jwt(id_token)
 
             # Decode and verify the token
