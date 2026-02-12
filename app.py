@@ -2369,20 +2369,27 @@ async def loaderio_verification():
 # ==================== CRON JOBS ====================
 
 @app.post("/cron/refresh-menus", summary="Refresh all dining hall menus (cron job)")
+@app.get("/cron/refresh-menus", summary="Refresh all dining hall menus (cron job)")
 async def cron_refresh_menus(
-    authorization: Optional[str] = Header(None),
+    request: Request,
+    secret: Optional[str] = Query(None),  # Allow ?secret=xxx for easy testing
     x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret")
 ):
     """
     Pre-fetch and cache all dining hall menus for today.
     Called by Vercel Cron at 5 AM ET daily.
 
-    Security: Requires either a valid cron secret or admin authorization.
+    Security: Allows Vercel cron calls, or manual calls with secret.
     """
-    # Verify cron secret or admin auth
+    # Check if this is a Vercel cron call (has special header)
+    is_vercel_cron = request.headers.get("x-vercel-cron") is not None
+
+    # Verify: either Vercel cron, or valid secret in header/query
     cron_secret = os.getenv("CRON_SECRET", "")
-    if x_cron_secret != cron_secret and not authorization:
-        raise HTTPException(status_code=401, detail="Unauthorized - invalid cron secret")
+    secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
+
+    if not is_vercel_cron and cron_secret and not secret_valid:
+        raise HTTPException(status_code=401, detail="Unauthorized - pass ?secret=YOUR_CRON_SECRET")
 
     print("🕐 [CRON] Starting daily menu refresh...")
     start_time = time.time()
@@ -2413,19 +2420,6 @@ async def cron_refresh_menus(
         "elapsed_seconds": round(elapsed, 2),
         "results": results
     }
-
-
-@app.get("/cron/refresh-menus", summary="Refresh all dining hall menus (GET for easy testing)")
-async def cron_refresh_menus_get(
-    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret")
-):
-    """GET version for easy browser/curl testing. Same as POST."""
-    cron_secret = os.getenv("CRON_SECRET", "")
-    if x_cron_secret != cron_secret:
-        # Allow without secret for local testing, but log warning
-        print("⚠️ [CRON] Called without valid secret - proceeding anyway for testing")
-
-    return await cron_refresh_menus(authorization=None, x_cron_secret=x_cron_secret)
 
 
 @app.post('/api/register-push-token', summary='Register device push notification token')
@@ -2671,9 +2665,10 @@ ALL_DINING_HALLS = [
     ("rutgers", "busch-dining-hall", True),
     ("rutgers", "livingston-dining-commons", True),
     ("rutgers", "neilson-dining-hall", True),
-    ("hopkins", "hopkins-cafe", False),
-    ("hopkins", "nolans-on-33rd", False),
-    ("hopkins", "peabody-institute", False),
+    # Hopkins - commented out until deployment
+    # ("hopkins", "hopkins-cafe", False),
+    # ("hopkins", "nolans-on-33rd", False),
+    # ("hopkins", "peabody-institute", False),
 ]
 
 
