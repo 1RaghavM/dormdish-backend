@@ -1,0 +1,98 @@
+{
+  "breakfast": {},
+  "lunch": {
+    "2026-02-04": [
+      {
+        "category": "BROTH CHICKEN LEMONGRASS & GINGER",
+        "foods": [
+          {
+            "name": "Dining Services Menu",
+            "calories": 15.0,
+            "g_protein": 1.0,
+            "g_fat": 0.8,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "ozl"
+            }
+          }
+        ]
+      },
+      {
+        "category": "ITALIAN WEDDING SOUP",
+        "foods": [
+          {
+            "name": "Dining Services Menu",
+            "calories": 289.0,
+            "g_protein": 12.7,
+            "g_fat": 19.6,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "oz"
+            }
+          }
+        ]
+      },
+      {
+        "category": "POTATO LEEK SOUP",
+        "foods": [
+          {
+            "name": "Dining Services Menu",
+            "calories": 154.0,
+            "g_protein": 5.6,
+            "g_fat": 4.6,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "oz"
+            }
+          }
+        ]
+      },
+      {
+        "category": "VEGETABLE BROTH",
+        "foods": [
+          {
+            "name": "Dining Services Menu",
+            "calories": 36.0,
+            "g_protein": 1.3,
+            "g_fat": 0.8,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "oz"
+            }
+          }
+        ]
+      },
+      {
+        "category": "BAMBOO SHOOTS",
+        "foods": [
+          {
+            "name": "Dining Services Menu",
+            "calories": 3.0,
+            "g_protein": 0.2,
+            "g_fat": 0.1,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "dinner": {}
+}

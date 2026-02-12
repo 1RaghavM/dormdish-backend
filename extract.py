@@ -474,12 +474,14 @@ def fetch_nutrition(url: str) -> dict:
             if m2:
                 fat_g = float(m2.group(1))
     
-    # Extract carbs
-    m = re.search(r"Total\s+Carb(?:ohydrate)?s?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*g", text, re.I)
+    # Extract carbs - handles "Tot. Carb.", "Total Carbohydrate", etc.
+    m = re.search(r"Tot(?:al)?\.?\s*Carb(?:ohydrate)?s?\.?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*g", text, re.I)
     if m:
         carbs_g = float(m.group(1))
     else:
-        val = table_lookup("Total Carbohydrate")
+        val = table_lookup("Tot. Carb")
+        if not val:
+            val = table_lookup("Total Carbohydrate")
         if not val:
             val = table_lookup("Total Carbs")
         if not val:
@@ -651,6 +653,10 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                     item["calories"] = nut.get("calories")
                 if nut.get("protein_g") is not None:
                     item["protein_g"] = nut.get("protein_g")
+                if nut.get("g_fat") is not None:
+                    item["g_fat"] = nut.get("g_fat")
+                if nut.get("g_carbs") is not None:
+                    item["g_carbs"] = nut.get("g_carbs")
                 if nut.get("serving_size"):
                     item["serving_size"] = nut.get("serving_size")
 

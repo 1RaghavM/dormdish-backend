@@ -2385,18 +2385,10 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "peabody-institute": ("hopkins", "peabody-institute"),
         "peabody": ("hopkins", "peabody-institute"),
         
-        # Rutgers University - Nutrislice halls
+        # Rutgers University - FoodPro halls
         "busch": ("rutgers", "busch-dining-hall"),
         "busch-dining-hall": ("rutgers", "busch-dining-hall"),
         "busch dining hall": ("rutgers", "busch-dining-hall"),
-        "brower": ("rutgers", "brower-commons"),
-        "brower-commons": ("rutgers", "brower-commons"),
-        "brower commons": ("rutgers", "brower-commons"),
-        "college-ave": ("rutgers", "brower-commons"),
-        "college ave": ("rutgers", "brower-commons"),
-        "college avenue": ("rutgers", "brower-commons"),
-        
-        # Rutgers University - Now using Nutrislice instead of FoodPro for Neilson
         "neilson": ("rutgers", "neilson-dining-hall"),
         "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
         "neilson dining hall": ("rutgers", "neilson-dining-hall"),
@@ -2406,8 +2398,6 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "cook-douglass": ("rutgers", "neilson-dining-hall"),
         "cook douglass": ("rutgers", "neilson-dining-hall"),
         "cook/douglass": ("rutgers", "neilson-dining-hall"),
-        
-        # Rutgers University - FoodPro halls (legacy)
         "livingston": ("rutgers", "livingston-dining-commons"),
         "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
         "livingston dining hall": ("rutgers", "livingston-dining-commons"),
@@ -2415,46 +2405,54 @@ async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
         "the-atrium": ("rutgers", "the-atrium"),
         "the atrium": ("rutgers", "the-atrium"),
         "atrium": ("rutgers", "the-atrium"),
+
+        # Rutgers University - Nutrislice halls
+        "brower": ("rutgers", "brower-commons"),
+        "brower-commons": ("rutgers", "brower-commons"),
+        "brower commons": ("rutgers", "brower-commons"),
+        "college-ave": ("rutgers", "brower-commons"),
+        "college ave": ("rutgers", "brower-commons"),
+        "college avenue": ("rutgers", "brower-commons"),
     }
     mapping = dining_hall_mapping.get(dining_hall)
     if not mapping:
         return {"error": f"Unknown dining hall: {dining_hall}"}
     university, hall_slug = mapping
 
-    
+
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
-    cached_menu = await get_menu_from_supabase(university, dining_hall, date)
+    cached_menu = await get_menu_from_supabase(university, hall_slug, date)
     if cached_menu is not None:
         print(f"✅ Using cached menu from Supabase")
         return cached_menu
 
-    # FoodPro halls (legacy Rutgers halls that still use FoodPro scraper)
-    foodpro_halls = {"livingston-dining-commons", "the-atrium"}
-    
+    # FoodPro halls (Rutgers halls that use FoodPro scraper)
+    foodpro_halls = {"livingston-dining-commons", "busch-dining-hall", "neilson-dining-hall", "the-atrium"}
+
     if university == "rutgers" and hall_slug in foodpro_halls:
         print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
         try:
-            menu_data = await fetch_foodpro_menu_rutgers(dining_hall, hall_slug, date)
+            menu_data = await fetch_foodpro_menu_rutgers(hall_slug, hall_slug, date)
             if not menu_data.get("items"):
                 print(f"⚠️ FoodPro returned no items, skipping cache save")
                 return {"error": f"No menu items available for {hall_slug} on {date}"}
-            save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
+            save_result = await save_menu_to_supabase(university, hall_slug, date, menu_data)
             print(f"💾 Save to Supabase result: {save_result}")
             return menu_data
         except Exception as e:
             print(f"❌ FoodPro fetch failed: {e}")
             return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
 
-    # All other halls use Nutrislice API (including Neilson)
+    # Other halls use Nutrislice API (Brower Commons, Hopkins, etc.)
     print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
     try:
-        menu_data = await fetch_nutrislice_menu(university, hall_slug, dining_hall, date)
+        menu_data = await fetch_nutrislice_menu(university, hall_slug, hall_slug, date)
         if not menu_data.get("items"):
             print(f"⚠️ Nutrislice returned no items, skipping cache save")
             return {"error": f"No menu items available for {hall_slug} on {date}"}
-        save_result = await save_menu_to_supabase(university, dining_hall, date, menu_data)
+        save_result = await save_menu_to_supabase(university, hall_slug, date, menu_data)
         print(f"💾 Save to Supabase result: {save_result}")
         return menu_data
     except Exception as e:
@@ -2472,8 +2470,8 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
     
     location_map = {
         "livingston-dining-commons": {"locationNum": "03", "locationName": "Livingston Dining Commons"},
-        "neilson-dining-hall": {"locationNum": "04", "locationName": "Neilson Dining Hall"},
-        
+        "busch-dining-hall": {"locationNum": "04", "locationName": "Busch Dining Hall"},
+        "neilson-dining-hall": {"locationNum": "05", "locationName": "Neilson Dining Hall"},
         "the-atrium": {"locationNum": "07", "locationName": "The Atrium"},
     }
     params = location_map.get(hall_slug)
@@ -3678,7 +3676,25 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         
         # Auto-save the generated meal plan to database
         try:
-            plan_id = str(uuid4())
+            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
+
+            # Check if a plan already exists for this user+date to get its ID
+            # This handles race conditions and ensures we update rather than fail on duplicate
+            existing_check = supabase.table("saved_meal_plans")\
+                .select("id")\
+                .eq("user_id", authenticated_user["id"])\
+                .eq("date", today)\
+                .execute()
+
+            if existing_check.data and len(existing_check.data) > 0:
+                # Update existing plan
+                plan_id = existing_check.data[0]["id"]
+                logger.info(f"[MealPlan] Found existing plan {plan_id}, will update it")
+            else:
+                # Create new plan
+                plan_id = str(uuid4())
+                logger.info(f"[MealPlan] No existing plan found, creating new plan {plan_id}")
+
             save_data = {
                 "id": plan_id,
                 "user_id": authenticated_user["id"],
@@ -3688,10 +3704,10 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             }
-            
-            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
-            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
-            
+
+            # Use upsert to handle both insert and update cases
+            save_response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
                 response_payload["auto_saved"] = True

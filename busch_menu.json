@@ -1,0 +1,624 @@
+{
+  "breakfast": {},
+  "lunch": {
+    "2026-02-04": [
+      {
+        "category": "Uncategorized",
+        "foods": [
+          {
+            "name": "Grilled Turkey Sausage Links",
+            "calories": 111.0,
+            "g_protein": 13.5,
+            "g_fat": 5.9,
+            "g_carbs": 0.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Savory Plant-Based Breakfast Patties",
+            "calories": 140.0,
+            "g_protein": 12.0,
+            "g_fat": 7.0,
+            "g_carbs": 6.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Belgian Waffles",
+            "calories": 129.0,
+            "g_protein": 2.9,
+            "g_fat": 4.3,
+            "g_carbs": 18.6,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Hard Boiled Eggs",
+            "calories": 76.0,
+            "g_protein": 6.7,
+            "g_fat": 5.0,
+            "g_carbs": 0.4,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Oatmeal",
+            "calories": 146.0,
+            "g_protein": 4.9,
+            "g_fat": 2.9,
+            "g_carbs": 26.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Scrambled Eggs",
+            "calories": 141.0,
+            "g_protein": 11.1,
+            "g_fat": 9.6,
+            "g_carbs": 1.4,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Texas French Toast",
+            "calories": 119.0,
+            "g_protein": 5.3,
+            "g_fat": 3.2,
+            "g_carbs": 15.9,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "slice"
+            }
+          },
+          {
+            "name": "Assorted Bagels",
+            "calories": null,
+            "g_protein": null,
+            "g_fat": null,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Cantaloupe Melon",
+            "calories": 39.0,
+            "g_protein": 1.0,
+            "g_fat": 0.2,
+            "g_carbs": 9.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "slice"
+            }
+          },
+          {
+            "name": "Green Seedless Grapes",
+            "calories": 156.0,
+            "g_protein": 1.6,
+            "g_fat": 0.4,
+            "g_carbs": 41.1,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "cup"
+            }
+          },
+          {
+            "name": "Strawberries",
+            "calories": 34.0,
+            "g_protein": 0.7,
+            "g_fat": 0.4,
+            "g_carbs": 8.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Country Style Grits",
+            "calories": 140.0,
+            "g_protein": 1.6,
+            "g_fat": 0.2,
+            "g_carbs": 14.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "6",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Red Bliss Home Fries",
+            "calories": 238.0,
+            "g_protein": 2.8,
+            "g_fat": 17.6,
+            "g_carbs": 17.6,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Baby Spinach",
+            "calories": 7.0,
+            "g_protein": 0.8,
+            "g_fat": 0.1,
+            "g_carbs": 1.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Boiled Ham Sliced",
+            "calories": 30.0,
+            "g_protein": 4.1,
+            "g_fat": 1.3,
+            "g_carbs": 1.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Broccoli",
+            "calories": 19.0,
+            "g_protein": 1.6,
+            "g_fat": 0.2,
+            "g_carbs": 3.8,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Chopped Onions",
+            "calories": 12.0,
+            "g_protein": 0.3,
+            "g_fat": 0.0,
+            "g_carbs": 2.8,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Diced Green Bell Peppers",
+            "calories": 6.0,
+            "g_protein": 0.2,
+            "g_fat": 0.0,
+            "g_carbs": 1.3,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Diced Red Bell Peppers",
+            "calories": 9.0,
+            "g_protein": 0.3,
+            "g_fat": 0.1,
+            "g_carbs": 1.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Diced Tomatoes",
+            "calories": 15.0,
+            "g_protein": 1.0,
+            "g_fat": 0.1,
+            "g_carbs": 2.5,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Egg Whites",
+            "calories": 53.0,
+            "g_protein": 11.1,
+            "g_fat": 0.0,
+            "g_carbs": 1.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Eggs",
+            "calories": 168.0,
+            "g_protein": 13.6,
+            "g_fat": 11.6,
+            "g_carbs": 1.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Pork Bacon Bits",
+            "calories": 71.0,
+            "g_protein": 4.1,
+            "g_fat": 6.1,
+            "g_carbs": 0.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1/2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Pork Sausage Crumbles",
+            "calories": 190.0,
+            "g_protein": 7.0,
+            "g_fat": 17.0,
+            "g_carbs": 1.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Salsa",
+            "calories": 21.0,
+            "g_protein": 0.0,
+            "g_fat": 0.0,
+            "g_carbs": 6.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Shredded Cheddar Cheese",
+            "calories": 114.0,
+            "g_protein": 7.1,
+            "g_fat": 9.4,
+            "g_carbs": 0.4,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Shredded Mozzarella Cheese",
+            "calories": 182.0,
+            "g_protein": 12.2,
+            "g_fat": 14.2,
+            "g_carbs": 2.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Sliced Mushrooms",
+            "calories": 6.0,
+            "g_protein": 0.9,
+            "g_fat": 0.1,
+            "g_carbs": 0.9,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Sliced Yellow American Cheese",
+            "calories": 82.0,
+            "g_protein": 5.2,
+            "g_fat": 7.2,
+            "g_carbs": 0.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "2/3",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Turkey Breast",
+            "calories": 76.0,
+            "g_protein": 13.7,
+            "g_fat": 1.5,
+            "g_carbs": 1.5,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "3",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Vegan Egg",
+            "calories": 176.0,
+            "g_protein": 12.6,
+            "g_fat": 12.6,
+            "g_carbs": 2.5,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "4",
+              "serving_size_unit": "oz"
+            }
+          },
+          {
+            "name": "Lowfat Chocolate Milk",
+            "calories": 158.0,
+            "g_protein": 8.1,
+            "g_fat": 2.5,
+            "g_carbs": 26.1,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Skim Milk",
+            "calories": 83.0,
+            "g_protein": 8.3,
+            "g_fat": 0.2,
+            "g_carbs": 12.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Whole Milk",
+            "calories": 149.0,
+            "g_protein": 7.7,
+            "g_fat": 7.9,
+            "g_carbs": 11.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Apple & Cinnamon Oatmeal Cup",
+            "calories": 157.0,
+            "g_protein": 3.7,
+            "g_fat": 2.1,
+            "g_carbs": 32.5,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "cup"
+            }
+          },
+          {
+            "name": "Assorted Donuts",
+            "calories": 275.0,
+            "g_protein": 3.4,
+            "g_fat": 16.1,
+            "g_carbs": 29.9,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Assorted Jumbo Muffin",
+            "calories": 282.0,
+            "g_protein": 6.1,
+            "g_fat": 7.4,
+            "g_carbs": 48.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Croissant",
+            "calories": 330.0,
+            "g_protein": 6.0,
+            "g_fat": 17.0,
+            "g_carbs": 38.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Egg and Cheese Breakfast Sandwich",
+            "calories": 258.0,
+            "g_protein": 14.0,
+            "g_fat": 10.7,
+            "g_carbs": 25.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Fresh Fruit Cup",
+            "calories": 168.0,
+            "g_protein": 2.5,
+            "g_fat": 0.4,
+            "g_carbs": 42.4,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Fresh Fruit To Go",
+            "calories": null,
+            "g_protein": null,
+            "g_fat": null,
+            "g_carbs": null,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "ea"
+            }
+          },
+          {
+            "name": "Instructions for Nutrition Info × Instructions for Nutrition Info Looking for the nutrition info for one food ? Click on the Nutrition Info button located next to the food . This will give you a label and ingredient list for the one food . Looking for the for your entire meal? Check the box next to each food . Enter the quantity on the right side. Click on Create Nutrition Report on the bottom of the page. This will give you the nutrition profile for all foods chosen. Close Menus",
+            "calories": 170.0,
+            "g_protein": 0.0,
+            "g_fat": 0.0,
+            "g_carbs": 41.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "ea"
+            }
+          },
+          {
+            "name": "Instructions for Nutrition Info × Instructions for Nutrition Info Looking for the nutrition info for one food ? Click on the Nutrition Info button located next to the food . This will give you a label and ingredient list for the one food . Looking for the for your entire meal? Check the box next to each food . Enter the quantity on the right side. Click on Create Nutrition Report on the bottom of the page. This will give you the nutrition profile for all foods chosen. Close Menus",
+            "calories": 169.0,
+            "g_protein": 3.0,
+            "g_fat": 0.0,
+            "g_carbs": 40.0,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Oatmeal Cup Brown Sugar",
+            "calories": 180.0,
+            "g_protein": 4.0,
+            "g_fat": 2.5,
+            "g_carbs": 35.9,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Sausage,Egg & Cheese Sandwich",
+            "calories": 413.0,
+            "g_protein": 23.0,
+            "g_fat": 23.8,
+            "g_carbs": 25.7,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "each"
+            }
+          },
+          {
+            "name": "Take Out Cereal Individual",
+            "calories": 82.0,
+            "g_protein": 1.6,
+            "g_fat": 0.1,
+            "g_carbs": 18.2,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "1",
+              "serving_size_unit": "ea"
+            }
+          },
+          {
+            "name": "Yogurt Parfait",
+            "calories": 517.0,
+            "g_protein": 14.9,
+            "g_fat": 8.5,
+            "g_carbs": 97.6,
+            "meal_type": "lunch",
+            "date": "2026-02-04",
+            "serving_size": {
+              "serving_size_amount": "12",
+              "serving_size_unit": "oz"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "dinner": {}
+}
