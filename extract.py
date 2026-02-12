@@ -673,11 +673,13 @@ def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:
             if m:
                 protein_g = float(m.group(1))
 
-            m = re.search(r"(?:Total\s+)?Fat\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
+            # Handle "Total Fat" or "Tot. Fat" patterns
+            m = re.search(r"Tot(?:al)?\.?\s*Fat\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
             if m:
                 fat_g = float(m.group(1))
 
-            m = re.search(r"(?:Total\s+)?Carb(?:ohydrate)?s?\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
+            # Handle "Tot. Carb.", "Total Carbohydrate", "Carbohydrates", etc.
+            m = re.search(r"Tot(?:al)?\.?\s*Carb(?:ohydrate)?s?\.?\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
             if m:
                 carbs_g = float(m.group(1))
 
