@@ -3686,25 +3686,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         
         # Auto-save the generated meal plan to database
         try:
-            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
-
-            # Check if a plan already exists for this user+date to get its ID
-            # This handles race conditions and ensures we update rather than fail on duplicate
-            existing_check = supabase.table("saved_meal_plans")\
-                .select("id")\
-                .eq("user_id", authenticated_user["id"])\
-                .eq("date", today)\
-                .execute()
-
-            if existing_check.data and len(existing_check.data) > 0:
-                # Update existing plan
-                plan_id = existing_check.data[0]["id"]
-                logger.info(f"[MealPlan] Found existing plan {plan_id}, will update it")
-            else:
-                # Create new plan
-                plan_id = str(uuid4())
-                logger.info(f"[MealPlan] No existing plan found, creating new plan {plan_id}")
-
+            plan_id = str(uuid4())
             save_data = {
                 "id": plan_id,
                 "user_id": authenticated_user["id"],
@@ -3715,39 +3697,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "updated_at": datetime.now().isoformat(),
             }
 
-            # Log the save_data for debugging (excluding large meal_plan_data)
-            logger.info(f"[MealPlan] Save data: id={plan_id}, user_id={authenticated_user['id']}, date={today}, dining_hall={meal_plan_request.dining_hall}")
-
-            # Use upsert to handle both insert and update cases
-            save_response = supabase.table("saved_meal_plans").upsert(save_data).execute()
-
-            # Debug: Log the full response
-            logger.info(f"[MealPlan] Supabase response: data={bool(save_response.data)}, count={len(save_response.data) if save_response.data else 0}")
+            logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
+            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
 
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
                 response_payload["auto_saved"] = True
                 logger.info(f"[MealPlan] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
-
-                # Verify the save by querying back
-                verify_response = supabase.table("saved_meal_plans")\
-                    .select("id, date")\
-                    .eq("id", plan_id)\
-                    .execute()
-                if verify_response.data:
-                    logger.info(f"[MealPlan] ✅ Verified: plan {plan_id} exists in database with date {verify_response.data[0].get('date')}")
-                else:
-                    logger.error(f"[MealPlan] ⚠️ Verification FAILED: plan {plan_id} NOT found in database after upsert!")
             else:
-                # Try to get more error details
-                error_msg = getattr(save_response, 'error', None)
-                status_code = getattr(save_response, 'status_code', None)
-                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}, Status: {status_code}")
-                logger.error(f"[MealPlan] Full response object: {vars(save_response) if hasattr(save_response, '__dict__') else save_response}")
+                error_msg = getattr(save_response, 'error', 'Unknown error')
+                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}")
                 response_payload["auto_saved"] = False
         except Exception as save_error:
             # Don't fail the entire request if save fails
-            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {type(save_error).__name__}: {save_error}", exc_info=True)
+            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
         
         return response_payload
