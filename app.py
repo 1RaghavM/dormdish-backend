@@ -3715,20 +3715,39 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "updated_at": datetime.now().isoformat(),
             }
 
+            # Log the save_data for debugging (excluding large meal_plan_data)
+            logger.info(f"[MealPlan] Save data: id={plan_id}, user_id={authenticated_user['id']}, date={today}, dining_hall={meal_plan_request.dining_hall}")
+
             # Use upsert to handle both insert and update cases
             save_response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+
+            # Debug: Log the full response
+            logger.info(f"[MealPlan] Supabase response: data={bool(save_response.data)}, count={len(save_response.data) if save_response.data else 0}")
 
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
                 response_payload["auto_saved"] = True
                 logger.info(f"[MealPlan] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+
+                # Verify the save by querying back
+                verify_response = supabase.table("saved_meal_plans")\
+                    .select("id, date")\
+                    .eq("id", plan_id)\
+                    .execute()
+                if verify_response.data:
+                    logger.info(f"[MealPlan] ✅ Verified: plan {plan_id} exists in database with date {verify_response.data[0].get('date')}")
+                else:
+                    logger.error(f"[MealPlan] ⚠️ Verification FAILED: plan {plan_id} NOT found in database after upsert!")
             else:
-                error_msg = getattr(save_response, 'error', 'Unknown error')
-                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}")
+                # Try to get more error details
+                error_msg = getattr(save_response, 'error', None)
+                status_code = getattr(save_response, 'status_code', None)
+                logger.error(f"[MealPlan] ⚠️ Failed to auto-save meal plan - no data returned. Error: {error_msg}, Status: {status_code}")
+                logger.error(f"[MealPlan] Full response object: {vars(save_response) if hasattr(save_response, '__dict__') else save_response}")
                 response_payload["auto_saved"] = False
         except Exception as save_error:
             # Don't fail the entire request if save fails
-            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {save_error}", exc_info=True)
+            logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {type(save_error).__name__}: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
         
         return response_payload
@@ -4235,10 +4254,67 @@ async def delete_meal_plan(plan_id: str, current_user=Depends(get_current_user))
         raise HTTPException(status_code=500, detail=f"Failed to delete meal plan: {str(e)}")
 
 
+@app.get("/meal-plan/debug", summary="Debug meal plan database")
+async def debug_meal_plan_db(current_user=Depends(get_current_user)):
+    """Debug endpoint to check meal plan database state."""
+    try:
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        user_id = current_user["id"]
+
+        # Check all meal plans for this user
+        all_plans = supabase.table("saved_meal_plans")\
+            .select("id, date, dining_hall, created_at")\
+            .eq("user_id", user_id)\
+            .execute()
+
+        # Check today's meal plan specifically
+        today_plan = supabase.table("saved_meal_plans")\
+            .select("id, date")\
+            .eq("user_id", user_id)\
+            .eq("date", today)\
+            .execute()
+
+        # Test insert capability with a dummy record
+        test_id = str(uuid4())
+        test_result = None
+        try:
+            test_insert = supabase.table("saved_meal_plans").insert({
+                "id": test_id,
+                "user_id": user_id,
+                "dining_hall": "test",
+                "date": "1999-01-01",  # Use old date that won't conflict
+                "meal_plan_data": {"test": True},
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }).execute()
+            test_result = "INSERT_SUCCESS" if test_insert.data else "INSERT_FAILED_NO_DATA"
+            # Clean up test record
+            supabase.table("saved_meal_plans").delete().eq("id", test_id).execute()
+        except Exception as e:
+            test_result = f"INSERT_ERROR: {type(e).__name__}: {str(e)}"
+
+        return {
+            "success": True,
+            "user_id": user_id,
+            "user_id_type": type(user_id).__name__,
+            "today": today,
+            "all_plans_count": len(all_plans.data) if all_plans.data else 0,
+            "all_plans": [{"id": p["id"], "date": p["date"], "dining_hall": p["dining_hall"]} for p in (all_plans.data or [])],
+            "today_plan_found": bool(today_plan.data and len(today_plan.data) > 0),
+            "today_plan": today_plan.data[0] if today_plan.data else None,
+            "test_insert_result": test_result,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+        }
+
+
 @app.post("/meal-plan/cleanup-old", summary="Cleanup meal plans from previous days")
 async def cleanup_old_meal_plans(current_user=Depends(get_current_user)):
     """Delete meal plans from previous days for the current user.
-    
+
     This endpoint is automatically called when fetching today's meal plan,
     but can also be called manually to clean up old data.
     """
