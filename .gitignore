@@ -354,3 +354,6 @@ meals_trimmed copy.json
 
 
 evaluate_meal_plans.py
+
+migrations/
+BACKEND_ONBOARDING.md

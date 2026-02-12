@@ -626,6 +626,79 @@ def calculate_bmr_tdee(age: int, height_feet: int, height_inches: int, weight_lb
         "activity_breakdown": activity_breakdown,
     }
 
+
+# Weight change speed mapping (lbs per week)
+WEIGHT_CHANGE_RATES = {
+    "slow": 0.5,
+    "recommended": 1.0,
+    "fast": 2.0,
+}
+
+
+def calculate_extended_metrics(
+    age: int,
+    height_feet: int,
+    height_inches: int,
+    weight_lbs: float,
+    gender: str,
+    activity_level: str,
+    goal: Optional[str] = None,
+    goal_weight_lbs: Optional[float] = None,
+    weight_change_speed: Optional[str] = None,
+) -> Dict[str, object]:
+    """Calculate extended user metrics including BMI, daily calorie target, and goal projections."""
+
+    # Get base metrics
+    base_metrics = calculate_bmr_tdee(age, height_feet, height_inches, weight_lbs, gender, activity_level)
+
+    total_inches = (height_feet * 12) + height_inches
+    height_cm = total_inches * 2.54
+    weight_kg = weight_lbs * 0.453592
+
+    # Calculate BMI: (weight_lbs / height_inches^2) * 703
+    bmi = (weight_lbs / (total_inches ** 2)) * 703 if total_inches > 0 else None
+
+    # Calculate daily calorie target based on goal and weight change speed
+    tdee = base_metrics["tdee"]
+    daily_calorie_target = tdee  # Default to maintenance
+
+    weekly_change_rate = WEIGHT_CHANGE_RATES.get(weight_change_speed or "recommended", 1.0)
+    # 1 lb of fat = ~3500 calories
+    weekly_calorie_adjustment = weekly_change_rate * 3500
+    daily_calorie_adjustment = weekly_calorie_adjustment / 7
+
+    goal_normalized = (goal or "").lower()
+    if goal_normalized in {"lose", "cut"}:
+        daily_calorie_target = tdee - daily_calorie_adjustment
+    elif goal_normalized in {"gain", "bulk"}:
+        daily_calorie_target = tdee + daily_calorie_adjustment
+    # "maintain" keeps tdee as is
+
+    # Calculate estimated weeks to goal and target date
+    estimated_weeks_to_goal = None
+    target_date = None
+    goal_weight_kg = None
+
+    if goal_weight_lbs is not None:
+        goal_weight_kg = goal_weight_lbs * 0.453592
+        weight_diff = abs(weight_lbs - goal_weight_lbs)
+        if weekly_change_rate > 0:
+            estimated_weeks_to_goal = weight_diff / weekly_change_rate
+            target_date = (datetime.now() + timedelta(weeks=estimated_weeks_to_goal)).date().isoformat()
+
+    return {
+        **base_metrics,
+        "height_total_inches": total_inches,
+        "height_cm": round(height_cm, 2),
+        "weight_kg": round(weight_kg, 2),
+        "goal_weight_kg": round(goal_weight_kg, 2) if goal_weight_kg else None,
+        "bmi": round(bmi, 1) if bmi else None,
+        "daily_calorie_target": int(round(daily_calorie_target)),
+        "estimated_weeks_to_goal": round(estimated_weeks_to_goal, 1) if estimated_weeks_to_goal else None,
+        "target_date": target_date,
+    }
+
+
 @dataclass
 class User:
     """User profile with physical stats and fitness goals"""
@@ -1080,8 +1153,21 @@ class RegisterRequest(BaseModel):
     activity_level: str
     goal: str
     university: str
-    
+
     dietary_preference: Optional[str] = None
+    # New onboarding fields
+    birthday: Optional[str] = None  # ISO 8601 date string (YYYY-MM-DD)
+    goal_weight_lbs: Optional[float] = None
+    weight_change_speed: Optional[str] = None  # slow, recommended, fast
+    accomplishments: Optional[List[str]] = None
+    obstacles: Optional[List[str]] = None
+    school_id: Optional[str] = None
+    dining_halls: Optional[List[str]] = None
+    dietary_restrictions: Optional[List[str]] = None
+    attribution_source: Optional[str] = None
+    apple_health_connected: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
+    auth_provider: Optional[str] = None  # email, apple, google
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -1104,6 +1190,18 @@ class GoogleRegisterRequest(BaseModel):
     goal: str
     university: str
     dietary_preference: Optional[str] = None
+    # New onboarding fields
+    birthday: Optional[str] = None
+    goal_weight_lbs: Optional[float] = None
+    weight_change_speed: Optional[str] = None
+    accomplishments: Optional[List[str]] = None
+    obstacles: Optional[List[str]] = None
+    school_id: Optional[str] = None
+    dining_halls: Optional[List[str]] = None
+    dietary_restrictions: Optional[List[str]] = None
+    attribution_source: Optional[str] = None
+    apple_health_connected: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
 
 class AppleIdTokenRequest(BaseModel):
@@ -1125,6 +1223,18 @@ class AppleRegisterRequest(BaseModel):
     goal: str
     university: str
     dietary_preference: Optional[str] = None
+    # New onboarding fields
+    birthday: Optional[str] = None
+    goal_weight_lbs: Optional[float] = None
+    weight_change_speed: Optional[str] = None
+    accomplishments: Optional[List[str]] = None
+    obstacles: Optional[List[str]] = None
+    school_id: Optional[str] = None
+    dining_halls: Optional[List[str]] = None
+    dietary_restrictions: Optional[List[str]] = None
+    attribution_source: Optional[str] = None
+    apple_health_connected: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
 
 # Password Reset Request Models
@@ -1274,22 +1384,25 @@ def submit_bug_report(data: BugReportRequest, background_tasks: BackgroundTasks,
 @app.post('/auth/register')
 def auth_register(data: RegisterRequest):
     try:
-        
+
         existing = supabase.table("users").select("id").eq("email", str(data.email).lower()).execute()
         if existing.data and len(existing.data) > 0:
             raise HTTPException(status_code=400, detail="An account with this email already exists")
 
-        
+
         pwd_hash = hash_password(data.password)
 
-        
-        metrics = calculate_bmr_tdee(
+        # Calculate extended metrics (BMR, TDEE, BMI, daily calorie target, etc.)
+        metrics = calculate_extended_metrics(
             age=int(data.age),
             height_feet=int(data.height_feet),
             height_inches=int(data.height_inches),
             weight_lbs=float(data.weight_lbs),
             gender=data.gender,
             activity_level=data.activity_level,
+            goal=data.goal,
+            goal_weight_lbs=float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            weight_change_speed=data.weight_change_speed,
         )
 
         payload = {
@@ -1304,11 +1417,32 @@ def auth_register(data: RegisterRequest):
             "activity_level": data.activity_level,
             "goal": data.goal,
             "university": data.university,
-            
+
             "dietary_preference": (data.dietary_preference or None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
+            # New onboarding fields
+            "birthday": data.birthday,
+            "goal_weight_lbs": float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            "weight_change_speed": data.weight_change_speed,
+            "accomplishments": data.accomplishments,
+            "obstacles": data.obstacles,
+            "school_id": data.school_id,
+            "dining_halls": data.dining_halls,
+            "dietary_restrictions": data.dietary_restrictions,
+            "attribution_source": data.attribution_source,
+            "apple_health_connected": data.apple_health_connected,
+            "notifications_enabled": data.notifications_enabled,
+            "auth_provider": data.auth_provider or "email",
+            # Extended computed metrics
+            "height_cm": metrics.get("height_cm"),
+            "weight_kg": metrics.get("weight_kg"),
+            "goal_weight_kg": metrics.get("goal_weight_kg"),
+            "bmi": metrics.get("bmi"),
+            "daily_calorie_target": metrics.get("daily_calorie_target"),
+            "estimated_weeks_to_goal": metrics.get("estimated_weeks_to_goal"),
+            "target_date": metrics.get("target_date"),
         }
 
         # Try inserting the user. If the DB rejects due to a unique constraint on
@@ -1728,13 +1862,16 @@ async def auth_google_register(data: GoogleRegisterRequest):
             raise HTTPException(status_code=400, detail="An account with this email already exists")
         random_secret = _secrets_for_google.token_urlsafe(32)
         pwd_hash = hash_password(random_secret)
-        metrics = calculate_bmr_tdee(
+        metrics = calculate_extended_metrics(
             age=int(data.age),
             height_feet=int(data.height_feet),
             height_inches=int(data.height_inches),
             weight_lbs=float(data.weight_lbs),
             gender=data.gender,
             activity_level=data.activity_level,
+            goal=data.goal,
+            goal_weight_lbs=float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            weight_change_speed=data.weight_change_speed,
         )
         payload = {
             "username": data.username,
@@ -1752,6 +1889,27 @@ async def auth_google_register(data: GoogleRegisterRequest):
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
+            # New onboarding fields
+            "birthday": data.birthday,
+            "goal_weight_lbs": float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            "weight_change_speed": data.weight_change_speed,
+            "accomplishments": data.accomplishments,
+            "obstacles": data.obstacles,
+            "school_id": data.school_id,
+            "dining_halls": data.dining_halls,
+            "dietary_restrictions": data.dietary_restrictions,
+            "attribution_source": data.attribution_source,
+            "apple_health_connected": data.apple_health_connected,
+            "notifications_enabled": data.notifications_enabled,
+            "auth_provider": "google",
+            # Extended computed metrics
+            "height_cm": metrics.get("height_cm"),
+            "weight_kg": metrics.get("weight_kg"),
+            "goal_weight_kg": metrics.get("goal_weight_kg"),
+            "bmi": metrics.get("bmi"),
+            "daily_calorie_target": metrics.get("daily_calorie_target"),
+            "estimated_weeks_to_goal": metrics.get("estimated_weeks_to_goal"),
+            "target_date": metrics.get("target_date"),
         }
         print(f"[google.register] inserting user payload keys={list(payload.keys())}")
         # Same username-collision handling as auth_register: try a few suffixes
@@ -1926,13 +2084,16 @@ async def auth_apple_register(data: AppleRegisterRequest):
         random_secret = _secrets_for_google.token_urlsafe(32)
         pwd_hash = hash_password(random_secret)
 
-        metrics = calculate_bmr_tdee(
+        metrics = calculate_extended_metrics(
             age=int(data.age),
             height_feet=int(data.height_feet),
             height_inches=int(data.height_inches),
             weight_lbs=float(data.weight_lbs),
             gender=data.gender,
             activity_level=data.activity_level,
+            goal=data.goal,
+            goal_weight_lbs=float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            weight_change_speed=data.weight_change_speed,
         )
 
         payload = {
@@ -1952,6 +2113,27 @@ async def auth_apple_register(data: AppleRegisterRequest):
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
+            # New onboarding fields
+            "birthday": data.birthday,
+            "goal_weight_lbs": float(data.goal_weight_lbs) if data.goal_weight_lbs else None,
+            "weight_change_speed": data.weight_change_speed,
+            "accomplishments": data.accomplishments,
+            "obstacles": data.obstacles,
+            "school_id": data.school_id,
+            "dining_halls": data.dining_halls,
+            "dietary_restrictions": data.dietary_restrictions,
+            "attribution_source": data.attribution_source,
+            "apple_health_connected": data.apple_health_connected,
+            "notifications_enabled": data.notifications_enabled,
+            "auth_provider": "apple",
+            # Extended computed metrics
+            "height_cm": metrics.get("height_cm"),
+            "weight_kg": metrics.get("weight_kg"),
+            "goal_weight_kg": metrics.get("goal_weight_kg"),
+            "bmi": metrics.get("bmi"),
+            "daily_calorie_target": metrics.get("daily_calorie_target"),
+            "estimated_weeks_to_goal": metrics.get("estimated_weeks_to_goal"),
+            "target_date": metrics.get("target_date"),
         }
 
         print(f"[apple.register] inserting user payload keys={list(payload.keys())}")
@@ -2077,8 +2259,20 @@ class UpdateProfileRequest(BaseModel):
     activity_level: Optional[str] = None
     goal: Optional[str] = None
     university: Optional[str] = None
-    
+
     dietary_preference: Optional[str] = None
+    # New onboarding fields
+    birthday: Optional[str] = None
+    goal_weight_lbs: Optional[float] = None
+    weight_change_speed: Optional[str] = None
+    accomplishments: Optional[List[str]] = None
+    obstacles: Optional[List[str]] = None
+    school_id: Optional[str] = None
+    dining_halls: Optional[List[str]] = None
+    dietary_restrictions: Optional[List[str]] = None
+    attribution_source: Optional[str] = None
+    apple_health_connected: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
 class TrackWeightRequest(BaseModel):
     weight_lbs: float
@@ -3083,7 +3277,10 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
     """Update user profile"""
     try:
         update_data: Dict[str, object] = {}
-        
+
+        # Fields that trigger extended metrics recalculation
+        metrics_fields = {'age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level', 'goal', 'goal_weight_lbs', 'weight_change_speed'}
+
         for field, value in profile_data.model_dump(exclude_unset=True).items():
             # Special-case: allow clearing dietary_preference by explicitly setting it to null/None
             if field == 'dietary_preference' and value is None:
@@ -3091,23 +3288,47 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                 continue
 
             if value is not None:
-                if field == 'goal' and value not in ['cut', 'maintain', 'bulk']:
-                    raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', or 'bulk'")
+                if field == 'goal' and value not in ['cut', 'maintain', 'bulk', 'lose', 'gain']:
+                    raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', 'bulk', 'lose', or 'gain'")
                 if field == 'dietary_preference' and value not in ['vegan', 'vegetarian', 'pescetarian']:
                     raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', or 'pescetarian'")
+                if field == 'weight_change_speed' and value not in ['slow', 'recommended', 'fast']:
+                    raise HTTPException(status_code=400, detail="Invalid weight_change_speed. Must be 'slow', 'recommended', or 'fast'")
                 update_data[field] = value
-        if any(field in update_data for field in ['age', 'height_feet', 'height_inches', 'weight_lbs', 'gender', 'activity_level']):
-            current_age = update_data.get('age', current_user['age'])  
-            current_height_feet = update_data.get('height_feet', current_user['height_feet'])  
-            current_height_inches = update_data.get('height_inches', current_user['height_inches'])  
-            current_weight = update_data.get('weight_lbs', current_user['weight_lbs'])  
-            current_gender = update_data.get('gender', current_user['gender'])  
-            current_activity = update_data.get('activity_level', current_user['activity_level'])  
-            bmr_data = calculate_bmr_tdee(
-                int(current_age), int(current_height_feet), int(current_height_inches), float(current_weight), str(current_gender), str(current_activity)
-            )
-            update_data['bmr'] = bmr_data['bmr']
-            update_data['tdee'] = bmr_data['tdee']
+
+        # Recalculate extended metrics if any relevant field changed
+        if any(field in update_data for field in metrics_fields):
+            current_age = update_data.get('age', current_user.get('age'))
+            current_height_feet = update_data.get('height_feet', current_user.get('height_feet'))
+            current_height_inches = update_data.get('height_inches', current_user.get('height_inches'))
+            current_weight = update_data.get('weight_lbs', current_user.get('weight_lbs'))
+            current_gender = update_data.get('gender', current_user.get('gender'))
+            current_activity = update_data.get('activity_level', current_user.get('activity_level'))
+            current_goal = update_data.get('goal', current_user.get('goal'))
+            current_goal_weight = update_data.get('goal_weight_lbs', current_user.get('goal_weight_lbs'))
+            current_weight_change_speed = update_data.get('weight_change_speed', current_user.get('weight_change_speed'))
+
+            if all(v is not None for v in [current_age, current_height_feet, current_height_inches, current_weight, current_gender, current_activity]):
+                metrics = calculate_extended_metrics(
+                    age=int(current_age),
+                    height_feet=int(current_height_feet),
+                    height_inches=int(current_height_inches),
+                    weight_lbs=float(current_weight),
+                    gender=str(current_gender),
+                    activity_level=str(current_activity),
+                    goal=current_goal,
+                    goal_weight_lbs=float(current_goal_weight) if current_goal_weight else None,
+                    weight_change_speed=current_weight_change_speed,
+                )
+                update_data['bmr'] = metrics['bmr']
+                update_data['tdee'] = metrics['tdee']
+                update_data['height_cm'] = metrics.get('height_cm')
+                update_data['weight_kg'] = metrics.get('weight_kg')
+                update_data['goal_weight_kg'] = metrics.get('goal_weight_kg')
+                update_data['bmi'] = metrics.get('bmi')
+                update_data['daily_calorie_target'] = metrics.get('daily_calorie_target')
+                update_data['estimated_weeks_to_goal'] = metrics.get('estimated_weeks_to_goal')
+                update_data['target_date'] = metrics.get('target_date')
         if update_data:
             response = supabase.table("users").update(update_data).eq("id", current_user['id']).execute()
             
