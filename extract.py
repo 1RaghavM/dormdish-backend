@@ -617,8 +617,12 @@ def _looks_like_nutrition_phrase(name: str | None) -> bool:
 
 
 # Configuration for parallel nutrition fetching
-MAX_NUTRITION_WORKERS = 10  # Max concurrent requests (matches connection pool)
-NUTRITION_FETCH_TIMEOUT = 8.0  # Reduced timeout for individual nutrition requests
+MAX_NUTRITION_WORKERS = 5  # Reduced to be gentler on Rutgers server
+NUTRITION_FETCH_TIMEOUT = 12.0  # Increased timeout for slow server responses
+BATCH_SIZE = 20  # Process URLs in smaller batches
+BATCH_DELAY = 0.5  # Delay between batches in seconds
+
+import time
 
 
 def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:
@@ -626,6 +630,7 @@ def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:
 
     Returns a dict mapping URL -> nutrition data.
     Uses ThreadPoolExecutor for concurrent HTTP requests.
+    Processes in batches to avoid overwhelming the server.
     """
     if not urls:
         return {}
@@ -634,7 +639,7 @@ def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:
 
     def _fetch_single(url: str) -> tuple[str, dict]:
         try:
-            # Use shorter timeout for batch fetching
+            # Use longer timeout for slow server
             r = SESSION.get(url, timeout=NUTRITION_FETCH_TIMEOUT)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")

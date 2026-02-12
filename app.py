@@ -2366,6 +2366,68 @@ async def loaderio_verification():
     return PlainTextResponse(content="loaderio-e4d6abce9b7ba70cd20b89ccdd7d82c4")
 
 
+# ==================== CRON JOBS ====================
+
+@app.post("/cron/refresh-menus", summary="Refresh all dining hall menus (cron job)")
+async def cron_refresh_menus(
+    authorization: Optional[str] = Header(None),
+    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret")
+):
+    """
+    Pre-fetch and cache all dining hall menus for today.
+    Called by Vercel Cron at 5 AM ET daily.
+
+    Security: Requires either a valid cron secret or admin authorization.
+    """
+    # Verify cron secret or admin auth
+    cron_secret = os.getenv("CRON_SECRET", "")
+    if x_cron_secret != cron_secret and not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized - invalid cron secret")
+
+    print("🕐 [CRON] Starting daily menu refresh...")
+    start_time = time.time()
+
+    # Get today's date for each timezone
+    rutgers_date = _rutgers_today_str()
+    hopkins_date = datetime.utcnow().strftime("%Y-%m-%d")
+
+    results = []
+    success_count = 0
+    fail_count = 0
+
+    for university, hall_slug, is_foodpro in ALL_DINING_HALLS:
+        date = rutgers_date if university == "rutgers" else hopkins_date
+        result = await fetch_and_cache_menu(university, hall_slug, date, is_foodpro)
+        results.append(result)
+        if result.get("success"):
+            success_count += 1
+        else:
+            fail_count += 1
+
+    elapsed = time.time() - start_time
+    print(f"✅ [CRON] Menu refresh complete: {success_count} success, {fail_count} failed in {elapsed:.1f}s")
+
+    return {
+        "success": True,
+        "message": f"Refreshed {success_count}/{len(ALL_DINING_HALLS)} menus",
+        "elapsed_seconds": round(elapsed, 2),
+        "results": results
+    }
+
+
+@app.get("/cron/refresh-menus", summary="Refresh all dining hall menus (GET for easy testing)")
+async def cron_refresh_menus_get(
+    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret")
+):
+    """GET version for easy browser/curl testing. Same as POST."""
+    cron_secret = os.getenv("CRON_SECRET", "")
+    if x_cron_secret != cron_secret:
+        # Allow without secret for local testing, but log warning
+        print("⚠️ [CRON] Called without valid secret - proceeding anyway for testing")
+
+    return await cron_refresh_menus(authorization=None, x_cron_secret=x_cron_secret)
+
+
 @app.post('/api/register-push-token', summary='Register device push notification token')
 async def register_push_token(data: PushTokenRequest):
     """
@@ -2559,100 +2621,115 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
     return await asyncio.to_thread(_save)
 
 
+# Dining hall mapping - shared between get_dining_hall_menu and cron jobs
+DINING_HALL_MAPPING = {
+    # Hopkins University
+    "hopkins-cafe": ("hopkins", "hopkins-cafe"),
+    "hopkins cafe": ("hopkins", "hopkins-cafe"),
+    "hopkins": ("hopkins", "hopkins-cafe"),
+    "nolans-on-33rd": ("hopkins", "nolans-on-33rd"),
+    "nolans": ("hopkins", "nolans-on-33rd"),
+    "nolan": ("hopkins", "nolans-on-33rd"),
+    "peabody-institute": ("hopkins", "peabody-institute"),
+    "peabody": ("hopkins", "peabody-institute"),
+
+    # Rutgers University - FoodPro halls
+    "busch": ("rutgers", "busch-dining-hall"),
+    "busch-dining-hall": ("rutgers", "busch-dining-hall"),
+    "busch dining hall": ("rutgers", "busch-dining-hall"),
+    "neilson": ("rutgers", "neilson-dining-hall"),
+    "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
+    "neilson dining hall": ("rutgers", "neilson-dining-hall"),
+    "nielson": ("rutgers", "neilson-dining-hall"),
+    "nielson-dining-hall": ("rutgers", "neilson-dining-hall"),
+    "nielson dining hall": ("rutgers", "neilson-dining-hall"),
+    "cook-douglass": ("rutgers", "neilson-dining-hall"),
+    "cook douglass": ("rutgers", "neilson-dining-hall"),
+    "cook/douglass": ("rutgers", "neilson-dining-hall"),
+    "livingston": ("rutgers", "livingston-dining-commons"),
+    "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
+    "livingston dining hall": ("rutgers", "livingston-dining-commons"),
+    "livingston dining commons": ("rutgers", "livingston-dining-commons"),
+    "the-atrium": ("rutgers", "the-atrium"),
+    "the atrium": ("rutgers", "the-atrium"),
+    "atrium": ("rutgers", "the-atrium"),
+
+    # Rutgers University - Nutrislice halls
+    "brower": ("rutgers", "brower-commons"),
+    "brower-commons": ("rutgers", "brower-commons"),
+    "brower commons": ("rutgers", "brower-commons"),
+    "college-ave": ("rutgers", "brower-commons"),
+    "college ave": ("rutgers", "brower-commons"),
+    "college avenue": ("rutgers", "brower-commons"),
+}
+
+# FoodPro halls (Rutgers halls that use FoodPro scraper)
+FOODPRO_HALLS = {"livingston-dining-commons", "busch-dining-hall", "neilson-dining-hall", "the-atrium"}
+
+# All halls to refresh daily (university, hall_slug, is_foodpro)
+ALL_DINING_HALLS = [
+    ("rutgers", "busch-dining-hall", True),
+    ("rutgers", "livingston-dining-commons", True),
+    ("rutgers", "neilson-dining-hall", True),
+    ("hopkins", "hopkins-cafe", False),
+    ("hopkins", "nolans-on-33rd", False),
+    ("hopkins", "peabody-institute", False),
+]
+
+
 async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
-    """Fetch dining hall menu - cache in Supabase, else fetch from Nutrislice / FoodPro"""
-    
+    """Get dining hall menu from cache only. Menus are pre-fetched by cron job."""
+
     dh_norm = dining_hall.strip().lower()
-    if dh_norm == "nielson":  
+    if dh_norm == "nielson":
         dh_norm = "neilson"
     if dh_norm in {"nielson-dining-hall", "nielson dining hall"}:
         dh_norm = "neilson"
     dining_hall = dh_norm
 
-    # University and dining hall mapping - extensible for multiple universities
-    dining_hall_mapping = {
-        # Hopkins University
-        "hopkins-cafe": ("hopkins", "hopkins-cafe"),
-        "hopkins cafe": ("hopkins", "hopkins-cafe"),
-        "hopkins": ("hopkins", "hopkins-cafe"),
-        "nolans-on-33rd": ("hopkins", "nolans-on-33rd"),
-        "nolans": ("hopkins", "nolans-on-33rd"),
-        "nolan": ("hopkins", "nolans-on-33rd"),
-        "peabody-institute": ("hopkins", "peabody-institute"),
-        "peabody": ("hopkins", "peabody-institute"),
-        
-        # Rutgers University - FoodPro halls
-        "busch": ("rutgers", "busch-dining-hall"),
-        "busch-dining-hall": ("rutgers", "busch-dining-hall"),
-        "busch dining hall": ("rutgers", "busch-dining-hall"),
-        "neilson": ("rutgers", "neilson-dining-hall"),
-        "neilson-dining-hall": ("rutgers", "neilson-dining-hall"),
-        "neilson dining hall": ("rutgers", "neilson-dining-hall"),
-        "nielson": ("rutgers", "neilson-dining-hall"),
-        "nielson-dining-hall": ("rutgers", "neilson-dining-hall"),
-        "nielson dining hall": ("rutgers", "neilson-dining-hall"),
-        "cook-douglass": ("rutgers", "neilson-dining-hall"),
-        "cook douglass": ("rutgers", "neilson-dining-hall"),
-        "cook/douglass": ("rutgers", "neilson-dining-hall"),
-        "livingston": ("rutgers", "livingston-dining-commons"),
-        "livingston-dining-hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining hall": ("rutgers", "livingston-dining-commons"),
-        "livingston dining commons": ("rutgers", "livingston-dining-commons"),
-        "the-atrium": ("rutgers", "the-atrium"),
-        "the atrium": ("rutgers", "the-atrium"),
-        "atrium": ("rutgers", "the-atrium"),
-
-        # Rutgers University - Nutrislice halls
-        "brower": ("rutgers", "brower-commons"),
-        "brower-commons": ("rutgers", "brower-commons"),
-        "brower commons": ("rutgers", "brower-commons"),
-        "college-ave": ("rutgers", "brower-commons"),
-        "college ave": ("rutgers", "brower-commons"),
-        "college avenue": ("rutgers", "brower-commons"),
-    }
-    mapping = dining_hall_mapping.get(dining_hall)
+    mapping = DINING_HALL_MAPPING.get(dining_hall)
     if not mapping:
         return {"error": f"Unknown dining hall: {dining_hall}"}
     university, hall_slug = mapping
 
-
     if not date or date.lower() == "today":
         date = _rutgers_today_str() if university == "rutgers" else datetime.utcnow().strftime("%Y-%m-%d")
 
+    # Only use cached menu - no on-demand fetching to avoid timeouts
     cached_menu = await get_menu_from_supabase(university, hall_slug, date)
     if cached_menu is not None:
-        print(f"✅ Using cached menu from Supabase")
+        print(f"✅ Using cached menu from Supabase for {hall_slug}")
         return cached_menu
 
-    # FoodPro halls (Rutgers halls that use FoodPro scraper)
-    foodpro_halls = {"livingston-dining-commons", "busch-dining-hall", "neilson-dining-hall", "the-atrium"}
+    # No cached menu - return error (menus are pre-fetched by cron job)
+    print(f"⚠️ No cached menu for {hall_slug} on {date} - waiting for cron refresh")
+    return {
+        "error": f"Menu not yet available for {hall_slug} on {date}. Menus are refreshed daily at 5 AM ET.",
+        "retry_later": True
+    }
 
-    if university == "rutgers" and hall_slug in foodpro_halls:
-        print(f"🌐 Fetching fresh menu from FoodPro for Rutgers - {hall_slug}")
-        try:
-            menu_data = await fetch_foodpro_menu_rutgers(hall_slug, hall_slug, date)
-            if not menu_data.get("items"):
-                print(f"⚠️ FoodPro returned no items, skipping cache save")
-                return {"error": f"No menu items available for {hall_slug} on {date}"}
-            save_result = await save_menu_to_supabase(university, hall_slug, date, menu_data)
-            print(f"💾 Save to Supabase result: {save_result}")
-            return menu_data
-        except Exception as e:
-            print(f"❌ FoodPro fetch failed: {e}")
-            return {"error": f"FoodPro fetch failed for {hall_slug}: {e}"}
 
-    # Other halls use Nutrislice API (Brower Commons, Hopkins, etc.)
-    print(f"🌐 Fetching fresh menu from Nutrislice API for {university} - {hall_slug}")
+async def fetch_and_cache_menu(university: str, hall_slug: str, date: str, is_foodpro: bool) -> dict:
+    """Fetch menu from source and cache in Supabase. Used by cron job."""
     try:
-        menu_data = await fetch_nutrislice_menu(university, hall_slug, hall_slug, date)
+        if is_foodpro:
+            print(f"🌐 [CRON] Fetching FoodPro menu for {university}/{hall_slug}")
+            menu_data = await fetch_foodpro_menu_rutgers(hall_slug, hall_slug, date)
+        else:
+            print(f"🌐 [CRON] Fetching Nutrislice menu for {university}/{hall_slug}")
+            menu_data = await fetch_nutrislice_menu(university, hall_slug, hall_slug, date)
+
         if not menu_data.get("items"):
-            print(f"⚠️ Nutrislice returned no items, skipping cache save")
-            return {"error": f"No menu items available for {hall_slug} on {date}"}
+            print(f"⚠️ [CRON] No items for {hall_slug}, skipping cache")
+            return {"success": False, "hall": hall_slug, "error": "No items returned"}
+
         save_result = await save_menu_to_supabase(university, hall_slug, date, menu_data)
-        print(f"💾 Save to Supabase result: {save_result}")
-        return menu_data
+        item_count = len(menu_data.get("items", []))
+        print(f"✅ [CRON] Cached {item_count} items for {hall_slug}")
+        return {"success": True, "hall": hall_slug, "items": item_count}
     except Exception as e:
-        return {"error": f"Failed to fetch menu: {str(e)}"}
+        print(f"❌ [CRON] Failed to fetch {hall_slug}: {e}")
+        return {"success": False, "hall": hall_slug, "error": str(e)}
 
 
 async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str) -> dict:

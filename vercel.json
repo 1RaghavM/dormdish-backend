@@ -16,8 +16,14 @@
     "PYTHONPATH": "."
   },
   "regions": ["iad1"],
-  "crons": [{
-    "path": "/api/send-daily-reminders",
-    "schedule": "0 10 * * *"
-  }]
+  "crons": [
+    {
+      "path": "/api/send-daily-reminders",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/cron/refresh-menus",
+      "schedule": "0 9 * * *"
+    }
+  ]
 }
