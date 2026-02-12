@@ -5,6 +5,7 @@ import re
 import sys
 from datetime import datetime
 from urllib.parse import urljoin, urlencode, urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -602,11 +603,111 @@ def _looks_like_nutrition_phrase(name: str | None) -> bool:
     return bool(re.search(r"^\s*(nutrition|nutritional)\b", name, re.I))
 
 
+# Configuration for parallel nutrition fetching
+MAX_NUTRITION_WORKERS = 15  # Max concurrent requests
+NUTRITION_FETCH_TIMEOUT = 8.0  # Reduced timeout for individual nutrition requests
+
+
+def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:
+    """Fetch nutrition info for multiple URLs in parallel.
+
+    Returns a dict mapping URL -> nutrition data.
+    Uses ThreadPoolExecutor for concurrent HTTP requests.
+    """
+    if not urls:
+        return {}
+
+    results = {}
+
+    def _fetch_single(url: str) -> tuple[str, dict]:
+        try:
+            # Use shorter timeout for batch fetching
+            r = SESSION.get(url, timeout=NUTRITION_FETCH_TIMEOUT)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # Extract nutrition data (simplified version of fetch_nutrition)
+            text = soup.get_text(" ", strip=True)
+
+            # Extract item name
+            item_name = None
+            by_id = soup.find(attrs={"id": re.compile(r"(lblItemName|itemName|ItemName|recipeName|lblRecipeName|lblShortDesc|lblItemDesc|lblRecipeDesc|ctl00_Body_lblItemName)", re.I)})
+            if by_id:
+                item_name = _clean(by_id.get_text(" "))
+            if not item_name:
+                by_class = soup.find(["div", "span", "h1", "h2"], class_=re.compile(r"(item.?name|recipe.?name|item.?desc|recipe.?desc)", re.I))
+                if by_class:
+                    item_name = _clean(by_class.get_text(" "))
+            if not item_name:
+                hdr = soup.find(["h1", "h2", "h3"])
+                if hdr:
+                    t = _clean(hdr.get_text(" "))
+                    if t and "nutrition" not in t.lower():
+                        item_name = t
+
+            # Extract macros
+            calories = None
+            protein_g = None
+            fat_g = None
+            carbs_g = None
+            serving = None
+
+            m = re.search(r"Calories\s*[:\-]?\s*(\d{1,4})", text, re.I)
+            if m:
+                calories = float(m.group(1))
+
+            m = re.search(r"Protein\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g?", text, re.I)
+            if m:
+                protein_g = float(m.group(1))
+
+            m = re.search(r"(?:Total\s+)?Fat\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
+            if m:
+                fat_g = float(m.group(1))
+
+            m = re.search(r"(?:Total\s+)?Carb(?:ohydrate)?s?\s*[:\-]?\s*(\d{1,3}(?:\.\d+)?)\s*g", text, re.I)
+            if m:
+                carbs_g = float(m.group(1))
+
+            m = re.search(r"Serving\s+Size\s*[:\-]?\s*(.+?)(?:\s{2,}|$)", text, re.I)
+            if m:
+                serving = _clean(m.group(1))
+
+            return (url, {
+                "item_name": item_name,
+                "calories": calories,
+                "protein_g": protein_g,
+                "g_fat": fat_g,
+                "g_carbs": carbs_g,
+                "serving_size": serving,
+            })
+        except Exception:
+            return (url, {})
+
+    # Use ThreadPoolExecutor for parallel fetching
+    with ThreadPoolExecutor(max_workers=MAX_NUTRITION_WORKERS) as executor:
+        futures = {executor.submit(_fetch_single, url): url for url in urls}
+        for future in as_completed(futures):
+            try:
+                url, data = future.result()
+                results[url] = data
+            except Exception:
+                results[futures[future]] = {}
+
+    return results
+
+
 def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
+    """Parse menu HTML and fetch nutrition data in parallel for much faster performance.
+
+    This optimized version:
+    1. First pass: collect all items with their nutrition URLs (no HTTP requests)
+    2. Batch fetch all nutrition data in parallel using ThreadPoolExecutor
+    3. Merge the nutrition data into items
+    """
     soup = BeautifulSoup(html, "html.parser")
 
-    items: list[dict] = []
-    categorized: dict[str, list[dict]] = {}
+    # Phase 1: Collect all items with their nutrition URLs (no fetching yet)
+    pending_items: list[dict] = []  # Items with nutrition_url but no nutrition data yet
     current_category: str | None = None
     seen_urls: set[str] = set()
 
@@ -638,66 +739,14 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                     "name": title_case_name(name),
                     "category": cat_for_item,
                     "nutrition_url": full,
+                    "_anchor": a,  # Keep reference for fallback name extraction
+                    "_row": row,
                 }
                 if serving_size:
                     item["serving_size"] = serving_size
 
-                try:
-                    nut = fetch_nutrition(full) or {}
-                except Exception:
-                    nut = {}
-                label_name = _clean(nut.get("item_name")) if nut.get("item_name") else None
-                if label_name:
-                    item["name"] = title_case_name(label_name)
-                if nut.get("calories") is not None:
-                    item["calories"] = nut.get("calories")
-                if nut.get("protein_g") is not None:
-                    item["protein_g"] = nut.get("protein_g")
-                if nut.get("g_fat") is not None:
-                    item["g_fat"] = nut.get("g_fat")
-                if nut.get("g_carbs") is not None:
-                    item["g_carbs"] = nut.get("g_carbs")
-                if nut.get("serving_size"):
-                    item["serving_size"] = nut.get("serving_size")
-
-                if not item.get("name") or len(str(item.get("name"))) < 2 or _looks_like_nutrition_phrase(item.get("name")):
-                    title = a.get("title")
-                    if title:
-                        t = _clean(re.sub(r"\bNutrition(al)?\s+Information\s+for\s+", " ", title, flags=re.I))
-                        m_title = re.search(r"[\"“](.+?)[\"”]", t)
-                        if m_title:
-                            item["name"] = title_case_name(_clean(m_title.group(1)))
-                    if not item.get("name"):
-                        ar = a.get("aria-label")
-                        if ar and "nutrit" not in ar.lower():
-                            item["name"] = title_case_name(_clean(ar))
-                    if not item.get("name"):
-                        at = _clean(a.get_text(" "))
-                        if at and "nutrit" not in at.lower():
-                            item["name"] = title_case_name(at)
-                    if not item.get("name"):
-                        trow = _clean(row.get_text(" "))
-                        trow = re.sub(r"\bNutritional\s+Information\b", " ", trow, flags=re.I)
-                        trow = re.sub(r"\bNutrition\s+Information\b", " ", trow, flags=re.I)
-                        trow = re.sub(r"\bNutrition\s+Facts\b", " ", trow, flags=re.I)
-                        trow = _clean(re.split(r"\s{2,}|\s\|\s| - ", trow)[0]) if trow else None
-                        if trow and "nutrit" not in trow.lower():
-                            item["name"] = title_case_name(trow)
-
-                if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
-                    continue
-
                 seen_urls.add(full)
-                items.append(item)
-                categorized.setdefault(cat_for_item, []).append({
-                    "name": title_case_name(item.get("name")),
-                    "calories": item.get("calories"),
-                    "protein_g": item.get("protein_g"),
-                    "g_fat": item.get("g_fat"),
-                    "g_carbs": item.get("g_carbs"),
-                    "serving_size": item.get("serving_size"),
-                    "nutrition_url": item.get("nutrition_url"),
-                })
+                pending_items.append(item)
             continue
 
         # If no item link, detect and update category
@@ -706,11 +755,8 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
             current_category = cat
             continue
 
-        # Otherwise ignore row
-        continue
-
-    # Fallback: if still empty, directly collect all nutrition anchors and backtrack categories
-    if not items:
+    # Fallback: if still empty, directly collect all nutrition anchors
+    if not pending_items:
         anchors = soup.find_all("a", href=NUTRITION_HREF_RE)
         for a in anchors:
             href = a.get("href")
@@ -722,11 +768,10 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
             container = a.find_parent(["tr", "li", "div", "p"]) or a
             name, serving_size = _extract_name_and_portion_from_container(container, a)
             if not name:
-                # Fallbacks from title/aria/text
                 title = a.get("title")
                 if title:
                     t = _clean(re.sub(r"\bNutrition(al)?\s+Information\s+for\s+", " ", title, flags=re.I))
-                    m_title = re.search(r"[\"“](.+?)[\"”]", t)
+                    m_title = re.search(r'["\u201c\u201d](.+?)["\u201c\u201d]', t)
                     if m_title:
                         name = _clean(m_title.group(1))
             if not name:
@@ -745,48 +790,89 @@ def parse_menu(html: str, meal_type: str, date: str, base_url: str) -> dict:
                 "name": title_case_name(name),
                 "category": cat_for_item,
                 "nutrition_url": full,
+                "_anchor": a,
+                "_row": container,
             }
             if serving_size:
                 item["serving_size"] = serving_size
-            try:
-                nut = fetch_nutrition(full) or {}
-            except Exception:
-                nut = {}
-            label_name = _clean(nut.get("item_name")) if nut.get("item_name") else None
-            if label_name:
-                item["name"] = title_case_name(label_name)
-            if nut.get("calories") is not None:
-                item["calories"] = nut.get("calories")
-            if nut.get("protein_g") is not None:
-                item["protein_g"] = nut.get("protein_g")
-            if nut.get("g_fat") is not None:
-                item["g_fat"] = nut.get("g_fat")
-            if nut.get("g_carbs") is not None:
-                item["g_carbs"] = nut.get("g_carbs")
-            if nut.get("serving_size"):
-                item["serving_size"] = nut.get("serving_size")
 
-            if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
+            seen_urls.add(full)
+            pending_items.append(item)
+
+    # Phase 2: Batch fetch all nutrition data in parallel
+    nutrition_urls = [item["nutrition_url"] for item in pending_items if item.get("nutrition_url")]
+    nutrition_data = fetch_nutrition_batch(nutrition_urls) if nutrition_urls else {}
+
+    # Phase 3: Merge nutrition data into items and build final output
+    items: list[dict] = []
+    categorized: dict[str, list[dict]] = {}
+
+    for item in pending_items:
+        url = item.get("nutrition_url")
+        nut = nutrition_data.get(url, {}) if url else {}
+
+        # Apply nutrition data
+        label_name = _clean(nut.get("item_name")) if nut.get("item_name") else None
+        if label_name:
+            item["name"] = title_case_name(label_name)
+        if nut.get("calories") is not None:
+            item["calories"] = nut.get("calories")
+        if nut.get("protein_g") is not None:
+            item["protein_g"] = nut.get("protein_g")
+        if nut.get("g_fat") is not None:
+            item["g_fat"] = nut.get("g_fat")
+        if nut.get("g_carbs") is not None:
+            item["g_carbs"] = nut.get("g_carbs")
+        if nut.get("serving_size"):
+            item["serving_size"] = nut.get("serving_size")
+
+        # Fallback name extraction if name is still invalid
+        if not item.get("name") or len(str(item.get("name"))) < 2 or _looks_like_nutrition_phrase(item.get("name")):
+            a = item.get("_anchor")
+            row = item.get("_row")
+            if a:
                 title = a.get("title")
                 if title:
                     t = _clean(re.sub(r"\bNutrition(al)?\s+Information\s+for\s+", " ", title, flags=re.I))
-                    m_title = re.search(r"[\"“](.+?)[\"”]", t)
+                    m_title = re.search(r'["\u201c\u201d](.+?)["\u201c\u201d]', t)
                     if m_title:
                         item["name"] = title_case_name(_clean(m_title.group(1)))
-            if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
-                continue
+                if not item.get("name"):
+                    ar = a.get("aria-label")
+                    if ar and "nutrit" not in ar.lower():
+                        item["name"] = title_case_name(_clean(ar))
+                if not item.get("name"):
+                    at = _clean(a.get_text(" "))
+                    if at and "nutrit" not in at.lower():
+                        item["name"] = title_case_name(at)
+            if not item.get("name") and row:
+                trow = _clean(row.get_text(" "))
+                trow = re.sub(r"\bNutritional\s+Information\b", " ", trow, flags=re.I)
+                trow = re.sub(r"\bNutrition\s+Information\b", " ", trow, flags=re.I)
+                trow = re.sub(r"\bNutrition\s+Facts\b", " ", trow, flags=re.I)
+                trow = _clean(re.split(r"\s{2,}|\s\|\s| - ", trow)[0]) if trow else None
+                if trow and "nutrit" not in trow.lower():
+                    item["name"] = title_case_name(trow)
 
-            seen_urls.add(full)
-            items.append(item)
-            categorized.setdefault(cat_for_item, []).append({
-                "name": title_case_name(item.get("name")),
-                "calories": item.get("calories"),
-                "protein_g": item.get("protein_g"),
-                "g_fat": item.get("g_fat"),
-                "g_carbs": item.get("g_carbs"),
-                "serving_size": item.get("serving_size"),
-                "nutrition_url": item.get("nutrition_url"),
-            })
+        # Skip items without valid names
+        if _looks_like_nutrition_phrase(item.get("name")) or not item.get("name") or len(str(item.get("name"))) < 2:
+            continue
+
+        # Clean up temporary keys
+        item.pop("_anchor", None)
+        item.pop("_row", None)
+
+        cat_for_item = item.get("category", "Uncategorized")
+        items.append(item)
+        categorized.setdefault(cat_for_item, []).append({
+            "name": title_case_name(item.get("name")),
+            "calories": item.get("calories"),
+            "protein_g": item.get("protein_g"),
+            "g_fat": item.get("g_fat"),
+            "g_carbs": item.get("g_carbs"),
+            "serving_size": item.get("serving_size"),
+            "nutrition_url": item.get("nutrition_url"),
+        })
 
     # Return meals_trimmed-style schema
     return to_meals_output(categorized, meal_type, date)

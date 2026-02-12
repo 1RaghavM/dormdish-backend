@@ -2538,36 +2538,36 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
             weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
         except Exception:
             weekday = None
-        if weekday is not None and weekday >= 5:  
+        if weekday is not None and weekday >= 5:
             meals_sequence = ("brunch", "dinner", "breakfast", "lunch")
         else:
             meals_sequence = ("breakfast", "brunch", "lunch", "dinner")
 
-        for meal in meals_sequence:
+        # Helper function to fetch and parse a single meal
+        async def _fetch_and_parse_meal(meal: str) -> tuple[str, List[dict], str | None]:
+            """Fetch and parse a single meal, returns (meal_name, items, warning_or_none)"""
             meal_url = _set_meal_in_url(base_url, meal)
             logger.debug("foodpro_meal_request meal=%s url=%s", meal, meal_url)
             try:
                 html_text = await _fetch_with_retries(meal_url)
             except Exception as exc:
-                warnings.append(f"Failed to fetch {meal}: {exc}")
-                continue
+                return (meal, [], f"Failed to fetch {meal}: {exc}")
             try:
-                parsed = fp_parse_menu(html_text, meal_type=meal, date=date, base_url=meal_url)
+                # Run synchronous parse_menu in thread pool to not block event loop
+                # (parse_menu now uses ThreadPoolExecutor internally for parallel nutrition fetching)
+                parsed = await asyncio.to_thread(fp_parse_menu, html_text, meal, date, meal_url)
             except Exception as exc:
-                warnings.append(f"Failed to parse {meal}: {exc}")
-                continue
+                return (meal, [], f"Failed to parse {meal}: {exc}")
 
-            
             items: List[dict] = []
             if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
-                
                 for it in parsed.get("items", []):
                     if not isinstance(it, dict):
                         continue
                     name = it.get("name")
                     if not name:
                         continue
-                    
+
                     out_item: Dict[str, object] = {"name": title_case_name(name)}
                     if it.get("protein_g") is not None:
                         out_item["protein_g"] = it.get("protein_g")
@@ -2580,13 +2580,7 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                     if it.get("serving_size"):
                         out_item["serving_size"] = it.get("serving_size")
                     items.append(out_item)
-                    
-                    # DEBUG: Log first item with macros
-                    if len(items) == 1:
-                        print(f"🔍 FIRST ITEM PROCESSED: {out_item.get('name')}")
-                        print(f"🔍 FIRST ITEM MACROS: protein={out_item.get('protein_g')}, fat={out_item.get('fat_g')}, carbs={out_item.get('carbs_g')}, cal={out_item.get('calories')}")
             else:
-                
                 if isinstance(parsed, dict):
                     meal_map = parsed.get(meal) or {}
                     blocks = meal_map.get(date) or [] if isinstance(meal_map, dict) else []
@@ -2600,10 +2594,26 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                                     _add_food_obj_from_new_schema(food, items)
 
             if items:
+                return (meal, items, None)
+            else:
+                return (meal, [], f"No items found for {meal}")
+
+        # Fetch all meals in parallel using asyncio.gather
+        logger.info(f"[FoodPro] Fetching {len(meals_sequence)} meals in parallel: {meals_sequence}")
+        results = await asyncio.gather(*[_fetch_and_parse_meal(meal) for meal in meals_sequence])
+
+        # Process results and maintain meal order
+        for meal, items, warning in results:
+            if warning:
+                warnings.append(warning)
+            if items:
                 meal_sources.append(meal)
                 all_items.extend(items)
-            else:
-                warnings.append(f"No items found for {meal}")
+                # DEBUG: Log first item with macros
+                if items:
+                    first = items[0]
+                    print(f"🔍 FIRST ITEM from {meal}: {first.get('name')}")
+                    print(f"🔍 MACROS: protein={first.get('protein_g')}, fat={first.get('fat_g')}, carbs={first.get('carbs_g')}, cal={first.get('calories')}")
 
         return {"items": all_items, "meal_sources": meal_sources, "warnings": warnings, "url": base_url}
 
