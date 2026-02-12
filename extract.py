@@ -7,11 +7,24 @@ from datetime import datetime
 from urllib.parse import urljoin, urlencode, urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Configure session with larger connection pool to handle parallel nutrition fetching
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "DormDishBot/1.0 (+https://dormdish.com) Python-requests",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 })
+
+# Configure connection pooling - pool_connections is # of host pools, pool_maxsize is connections per host
+adapter = HTTPAdapter(
+    pool_connections=5,
+    pool_maxsize=20,  # Allow up to 20 concurrent connections per host
+    max_retries=Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+)
+SESSION.mount("http://", adapter)
+SESSION.mount("https://", adapter)
 
 BASE_PICKMENU = (
     "https://menuportal23.dining.rutgers.edu/foodpronet/pickmenu.aspx"
@@ -604,7 +617,7 @@ def _looks_like_nutrition_phrase(name: str | None) -> bool:
 
 
 # Configuration for parallel nutrition fetching
-MAX_NUTRITION_WORKERS = 15  # Max concurrent requests
+MAX_NUTRITION_WORKERS = 10  # Max concurrent requests (matches connection pool)
 NUTRITION_FETCH_TIMEOUT = 8.0  # Reduced timeout for individual nutrition requests
 
 

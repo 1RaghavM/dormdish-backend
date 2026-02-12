@@ -536,10 +536,11 @@ def generate_session_token() -> str:
     """Generate a secure session token"""
     return secrets.token_urlsafe(32)
 
-def create_user_session(user_id: str, expires_hours: int = 24) -> str:
+def create_user_session(user_id: str, expires_days: int = 30) -> str:
     """Create a new user session and return the token"""
     token = generate_session_token()
-    expires_at = datetime.now() + timedelta(hours=expires_hours)
+    # Use UTC timezone for consistency with Supabase
+    expires_at = datetime.now(ZoneInfo("UTC")) + timedelta(days=expires_days)
     
     try:
         supabase.table("user_sessions").insert({
@@ -555,18 +556,19 @@ def create_user_session(user_id: str, expires_hours: int = 24) -> str:
 def verify_session_token(token: str) -> Optional[dict]:
     """Verify a session token and return user data if valid"""
     try:
-        
+        # Use UTC timezone for consistency with Supabase
+        now_utc = datetime.now(ZoneInfo("UTC")).isoformat()
         response = supabase.table("user_sessions")\
             .select("*, users(*)")\
             .eq("session_token", token)\
-            .gt("expires_at", datetime.now().isoformat())\
+            .gt("expires_at", now_utc)\
             .execute()
         
         if response.data and len(response.data) > 0:
             session = response.data[0]
             
             supabase.table("users")\
-                .update({"last_login": datetime.now().isoformat()})\
+                .update({"last_login": datetime.now(ZoneInfo("UTC")).isoformat()})\
                 .eq("id", session["user_id"])\
                 .execute()
             return session["users"]
