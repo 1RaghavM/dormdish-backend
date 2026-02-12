@@ -3895,6 +3895,9 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                 "dislike_keys": [],
             }
 
+        # Get today's date for auto-save (same timezone as other endpoints)
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
         async def event_generator():
             """Generator function for Server-Sent Events"""
             try:
@@ -3906,6 +3909,44 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                 ):
                     if isinstance(chunk, dict) and chunk.get("type") == "complete":
                         chunk["preferences_snapshot"] = preferences_snapshot
+
+                        # Auto-save the completed meal plan to database
+                        try:
+                            plan_id = str(uuid4())
+                            # Build the response payload similar to non-streaming endpoint
+                            response_payload = {
+                                "success": True,
+                                "meal_plan": chunk.get("meal_plan"),
+                                "nutrition_targets": nutrition_targets,
+                                "dining_hall": meal_plan_request.dining_hall,
+                                "date": today,
+                            }
+                            save_data = {
+                                "id": plan_id,
+                                "user_id": authenticated_user["id"],
+                                "dining_hall": meal_plan_request.dining_hall,
+                                "date": today,
+                                "meal_plan_data": response_payload,
+                                "created_at": datetime.now().isoformat(),
+                                "updated_at": datetime.now().isoformat(),
+                            }
+
+                            logger.info(f"[MealPlan-Stream] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
+                            save_response = await asyncio.to_thread(
+                                lambda: supabase.table("saved_meal_plans").insert(save_data).execute()
+                            )
+
+                            if save_response.data:
+                                chunk["saved_plan_id"] = plan_id
+                                chunk["auto_saved"] = True
+                                logger.info(f"[MealPlan-Stream] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+                            else:
+                                chunk["auto_saved"] = False
+                                logger.error(f"[MealPlan-Stream] ⚠️ Failed to auto-save meal plan - no data returned")
+                        except Exception as save_error:
+                            chunk["auto_saved"] = False
+                            logger.error(f"[MealPlan-Stream] ⚠️ Auto-save failed: {save_error}")
+
                     # Format as SSE
                     yield f"data: {json.dumps(chunk)}\n\n"
             except Exception as e:
