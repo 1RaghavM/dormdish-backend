@@ -23,7 +23,7 @@
     },
     {
       "path": "/cron/refresh-menus",
-      "schedule": "0 9 * * *"
+      "schedule": "0 10 * * *"
     }
   ]
 }
