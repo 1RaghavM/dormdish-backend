@@ -1255,6 +1255,31 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+# ── Barcode Lookup Models ──
+
+class BarcodeLookupRequest(BaseModel):
+    barcode: str
+
+class ScannedProduct(BaseModel):
+    barcode: str
+    name: str
+    brand: Optional[str] = None
+    serving_size: Optional[str] = None
+    calories: float = 0.0
+    protein_g: float = 0.0
+    carbs_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    fiber_g: Optional[float] = None
+    sugar_g: Optional[float] = None
+    image_url: Optional[str] = None
+    nutri_score: Optional[str] = None
+
+class BarcodeLookupResponse(BaseModel):
+    success: bool
+    message: str
+    product: Optional[ScannedProduct] = None
+
+
 # Cache JWKS clients to avoid fetching keys on every request
 _apple_jwks_client = None
 _google_jwks_client = None
@@ -4726,6 +4751,132 @@ async def get_menu(dining_hall: str, date: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
 
 
+# ==================== BARCODE LOOKUP ENDPOINT ====================
+
+@app.post("/barcode/lookup", summary="Look up nutrition info by food barcode")
+async def barcode_lookup(
+    req: BarcodeLookupRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Look up a food product by barcode (EAN-13, UPC-A, etc.).
+    Checks local cache first, then falls back to Open Food Facts API.
+    """
+    barcode = req.barcode.strip()
+    if not barcode:
+        raise HTTPException(status_code=400, detail="Barcode is required")
+
+    # 1. Check cache
+    try:
+        cached = supabase.table("barcode_cache") \
+            .select("product_data, created_at") \
+            .eq("barcode", barcode) \
+            .execute()
+
+        if cached.data and len(cached.data) > 0:
+            row = cached.data[0]
+            # Check if cache is fresh (< 30 days)
+            created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            if datetime.now(ZoneInfo("UTC")) - created < timedelta(days=30):
+                logger.info(f"Barcode cache hit: {barcode}")
+                return BarcodeLookupResponse(
+                    success=True,
+                    message="Product found (cached)",
+                    product=ScannedProduct(**row["product_data"]),
+                )
+    except Exception as e:
+        logger.warning(f"Cache lookup failed for {barcode}: {e}")
+
+    # 2. Call Open Food Facts API
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            url = f"https://world.openfoodfacts.org/api/v2/product/{barcode}"
+            params = {
+                "fields": "product_name,brands,nutriments,nutrition_grades,"
+                          "image_front_url,serving_size,serving_quantity"
+            }
+            headers = {"User-Agent": "DormDish/1.0 (contact@dormdish.com)"}
+            resp = await client.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.error(f"Open Food Facts request failed for {barcode}: {e}")
+        return BarcodeLookupResponse(
+            success=False,
+            message="Could not reach nutrition database. Please try again.",
+        )
+
+    if data.get("status") != 1 or not data.get("product"):
+        return BarcodeLookupResponse(
+            success=False,
+            message="Product not found. Try scanning again or check the barcode.",
+        )
+
+    # 3. Normalize nutrition data
+    p = data["product"]
+    n = p.get("nutriments", {})
+
+    # Prefer per-serving values; fall back to per-100g
+    serving_size = p.get("serving_size") or "100g"
+    serving_qty = p.get("serving_quantity")
+
+    # If per-serving values exist, use them directly
+    if n.get("energy-kcal_serving") is not None:
+        cal = n.get("energy-kcal_serving", 0)
+        pro = n.get("proteins_serving", 0)
+        carb = n.get("carbohydrates_serving")
+        fat = n.get("fat_serving")
+        fib = n.get("fiber_serving")
+        sug = n.get("sugars_serving")
+    elif serving_qty and serving_qty > 0:
+        # Convert per-100g to per-serving
+        factor = serving_qty / 100.0
+        cal = (n.get("energy-kcal_100g") or 0) * factor
+        pro = (n.get("proteins_100g") or 0) * factor
+        carb = (n.get("carbohydrates_100g") or 0) * factor if n.get("carbohydrates_100g") is not None else None
+        fat = (n.get("fat_100g") or 0) * factor if n.get("fat_100g") is not None else None
+        fib = (n.get("fiber_100g") or 0) * factor if n.get("fiber_100g") is not None else None
+        sug = (n.get("sugars_100g") or 0) * factor if n.get("sugars_100g") is not None else None
+    else:
+        # Use per-100g as-is
+        cal = n.get("energy-kcal_100g", 0)
+        pro = n.get("proteins_100g", 0)
+        carb = n.get("carbohydrates_100g")
+        fat = n.get("fat_100g")
+        fib = n.get("fiber_100g")
+        sug = n.get("sugars_100g")
+
+    product = ScannedProduct(
+        barcode=barcode,
+        name=p.get("product_name") or "Unknown Product",
+        brand=p.get("brands"),
+        serving_size=serving_size,
+        calories=round(cal or 0, 1),
+        protein_g=round(pro or 0, 1),
+        carbs_g=round(carb, 1) if carb is not None else None,
+        fat_g=round(fat, 1) if fat is not None else None,
+        fiber_g=round(fib, 1) if fib is not None else None,
+        sugar_g=round(sug, 1) if sug is not None else None,
+        image_url=p.get("image_front_url"),
+        nutri_score=p.get("nutrition_grades"),
+    )
+
+    # 4. Cache the result
+    try:
+        supabase.table("barcode_cache").upsert({
+            "barcode": barcode,
+            "product_data": product.model_dump(),
+            "source": "openfoodfacts",
+            "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to cache barcode {barcode}: {e}")
+
+    return BarcodeLookupResponse(
+        success=True,
+        message="Product found",
+        product=product,
+    )
 
 
 # ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
