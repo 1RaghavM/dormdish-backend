@@ -1279,6 +1279,49 @@ class BarcodeLookupResponse(BaseModel):
     message: str
     product: Optional[ScannedProduct] = None
 
+# ── Food Log Models ──
+
+class FoodLogAddRequest(BaseModel):
+    date: str
+    meal_type: str
+    barcode: Optional[str] = None
+    name: str
+    brand: Optional[str] = None
+    serving_size: Optional[str] = None
+    servings: float = 1.0
+    calories: float = 0.0
+    protein_g: float = 0.0
+    carbs_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    fiber_g: Optional[float] = None
+    sugar_g: Optional[float] = None
+    image_url: Optional[str] = None
+
+class FoodLogEntry(BaseModel):
+    id: str
+    user_id: str
+    date: str
+    meal_type: str
+    barcode: Optional[str] = None
+    name: str
+    brand: Optional[str] = None
+    serving_size: Optional[str] = None
+    servings: float = 1.0
+    calories: float = 0.0
+    protein_g: float = 0.0
+    carbs_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    fiber_g: Optional[float] = None
+    sugar_g: Optional[float] = None
+    image_url: Optional[str] = None
+    created_at: Optional[str] = None
+
+class FoodLogResponse(BaseModel):
+    success: bool
+    message: str
+    entries: Optional[list] = None
+    entry: Optional[dict] = None
+
 
 # Cache JWKS clients to avoid fetching keys on every request
 _apple_jwks_client = None
@@ -3763,6 +3806,26 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
 
+        # Subtract any food log entries for today from targets
+        try:
+            food_log_result = supabase.table("food_log") \
+                .select("calories, protein_g, carbs_g, fat_g") \
+                .eq("user_id", str(authenticated_user["id"])) \
+                .eq("date", meal_plan_request.date) \
+                .execute()
+            if food_log_result.data:
+                logged_cal = sum(e.get("calories", 0) or 0 for e in food_log_result.data)
+                logged_pro = sum(e.get("protein_g", 0) or 0 for e in food_log_result.data)
+                logged_carb = sum(e.get("carbs_g", 0) or 0 for e in food_log_result.data)
+                logged_fat = sum(e.get("fat_g", 0) or 0 for e in food_log_result.data)
+                calorie_target = max(0, calorie_target - int(logged_cal))
+                protein_target = max(0, protein_target - int(logged_pro))
+                carbs_target = max(0, carbs_target - int(logged_carb))
+                fat_target = max(0, fat_target - int(logged_fat))
+                logger.info(f"Adjusted targets after food log: cal={calorie_target}, pro={protein_target}, carb={carbs_target}, fat={fat_target}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch food log for target adjustment: {e}")
+
         selected_activity_metrics: Dict[str, Any] = {}
         if isinstance(user_act_breakdown, dict):
             selected_entry = user_act_breakdown.get(user.activity_level)
@@ -4159,6 +4222,26 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         )
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
+
+        # Subtract any food log entries for today from targets
+        try:
+            food_log_result = supabase.table("food_log") \
+                .select("calories, protein_g, carbs_g, fat_g") \
+                .eq("user_id", str(authenticated_user["id"])) \
+                .eq("date", meal_plan_request.date) \
+                .execute()
+            if food_log_result.data:
+                logged_cal = sum(e.get("calories", 0) or 0 for e in food_log_result.data)
+                logged_pro = sum(e.get("protein_g", 0) or 0 for e in food_log_result.data)
+                logged_carb = sum(e.get("carbs_g", 0) or 0 for e in food_log_result.data)
+                logged_fat = sum(e.get("fat_g", 0) or 0 for e in food_log_result.data)
+                calorie_target = max(0, calorie_target - int(logged_cal))
+                protein_target = max(0, protein_target - int(logged_pro))
+                carbs_target = max(0, carbs_target - int(logged_carb))
+                fat_target = max(0, fat_target - int(logged_fat))
+                logger.info(f"Adjusted targets (stream) after food log: cal={calorie_target}, pro={protein_target}, carb={carbs_target}, fat={fat_target}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch food log for target adjustment: {e}")
 
         # Prepare payloads for streaming agent
         user_payload = {
@@ -4877,6 +4960,88 @@ async def barcode_lookup(
         message="Product found",
         product=product,
     )
+
+
+# ==================== FOOD LOG ENDPOINTS ====================
+
+@app.post("/food-log/add", summary="Add item to food log")
+async def add_food_log_entry(
+    req: FoodLogAddRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Add a scanned or manually entered food item to the daily food log."""
+    try:
+        entry_data = {
+            "user_id": str(user["id"]),
+            "date": req.date,
+            "meal_type": req.meal_type,
+            "barcode": req.barcode,
+            "name": req.name,
+            "brand": req.brand,
+            "serving_size": req.serving_size,
+            "servings": req.servings,
+            "calories": req.calories,
+            "protein_g": req.protein_g,
+            "carbs_g": req.carbs_g,
+            "fat_g": req.fat_g,
+            "fiber_g": req.fiber_g,
+            "sugar_g": req.sugar_g,
+            "image_url": req.image_url,
+        }
+        result = supabase.table("food_log").insert(entry_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save food log entry")
+
+        return {"success": True, "message": "Item logged", "entry": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add food log entry: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to log item: {str(e)}")
+
+
+@app.get("/food-log/{date}", summary="Get food log entries for a date")
+async def get_food_log(
+    date: str,
+    user: dict = Depends(get_current_user),
+):
+    """Get all food log entries for a specific date."""
+    try:
+        result = supabase.table("food_log") \
+            .select("*") \
+            .eq("user_id", str(user["id"])) \
+            .eq("date", date) \
+            .order("created_at") \
+            .execute()
+
+        return {
+            "success": True,
+            "message": "Food log retrieved",
+            "entries": result.data or [],
+        }
+    except Exception as e:
+        logger.error(f"Failed to get food log: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get food log: {str(e)}")
+
+
+@app.delete("/food-log/{entry_id}", summary="Delete a food log entry")
+async def delete_food_log_entry(
+    entry_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Delete a food log entry by ID."""
+    try:
+        result = supabase.table("food_log") \
+            .delete() \
+            .eq("id", entry_id) \
+            .eq("user_id", str(user["id"])) \
+            .execute()
+
+        return {"success": True, "message": "Entry deleted"}
+    except Exception as e:
+        logger.error(f"Failed to delete food log entry: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete entry: {str(e)}")
 
 
 # ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
