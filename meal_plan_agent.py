@@ -32,9 +32,13 @@ CRITICAL REQUIREMENTS - MUST BE MET:
 CALCULATION METHOD (MANDATORY):
 1. For each item, calculate: servings × calories_per_serving = item_calories
 2. For each item, calculate: servings × protein_per_serving = item_protein
-3. Sum all item_calories across all meals = total_calories
-4. Sum all item_protein across all meals = total_protein
-5. VERIFY totals are within required ranges BEFORE finalizing
+3. For each item, calculate: servings × fat_per_serving = item_fat
+4. For each item, calculate: servings × carbs_per_serving = item_carbs
+5. Sum all item_calories across all meals = total_calories
+6. Sum all item_protein across all meals = total_protein
+7. Sum all item_fat across all meals = total_fat
+8. Sum all item_carbs across all meals = total_carbs
+9. VERIFY totals are within required ranges BEFORE finalizing
 
 MEAL STRUCTURE:
 • Create exactly 3 meals: breakfast, lunch, dinner
@@ -57,17 +61,17 @@ DIETARY PREFERENCES:
 • Respect the user's dietary preference specified in the prompt
 
 OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
-{{"totals":{{"calories":<int>,"protein_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
+{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"fat_g":<float>,"carbs_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
 
 EXPLANATION:
 • Write 1-3 sentences explaining how the plan meets the calorie/protein targets
 • Mention any notable trade-offs or optimizations made
 
 EXAMPLE CALCULATION:
-If target is 2000 cal / 150g protein:
-- Grilled Chicken (250 cal, 45g protein) × 2 servings = 500 cal, 90g protein
-- Brown Rice (200 cal, 4g protein) × 1.5 servings = 300 cal, 6g protein
-Continue until totals reach 1900-2100 cal and 143-158g protein.
+If target is 2000 cal / 150g protein / 65g fat / 250g carbs:
+- Grilled Chicken (250 cal, 45g protein, 5g fat, 0g carbs) × 2 servings = 500 cal, 90g protein, 10g fat, 0g carbs
+- Brown Rice (200 cal, 4g protein, 1g fat, 42g carbs) × 1.5 servings = 300 cal, 6g protein, 1.5g fat, 63g carbs
+Continue until totals reach targets within ±5%.
 
 Remember: This is a mathematical optimization task. Precision is mandatory.
 
@@ -127,6 +131,8 @@ async def _sleep_backoff(attempt: int) -> None:
 class DormdishMealPlannerSchema__Totals(BaseModel):
     calories: float
     protein_g: float
+    fat_g: float
+    carbs_g: float
 
 
 class DormdishMealPlannerSchema__MealItem(BaseModel):
@@ -134,7 +140,9 @@ class DormdishMealPlannerSchema__MealItem(BaseModel):
     servings: float
     calories: float
     protein_g: float
-    serving_size: str  
+    fat_g: float
+    carbs_g: float
+    serving_size: str
 
 
 class DormdishMealPlannerSchema__Meal(BaseModel):
@@ -171,17 +179,23 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
     name = str(item.get("name", "")).strip()
     cal = item.get("calories")
     prot = item.get("protein_g")
+    fat = item.get("fat_g")
+    carbs = item.get("carbs_g")
     serving = item.get("serving_size")
-    
-    
+
+
     parts: List[str] = [name or "(unnamed)"]
     if cal is not None:
-      parts.append(f"{float(cal):.0f}cal")  
+      parts.append(f"{float(cal):.0f}cal")
     if prot is not None:
-      parts.append(f"{float(prot):.1f}g")  
+      parts.append(f"{float(prot):.1f}g prot")
+    if fat is not None:
+      parts.append(f"{float(fat):.1f}g fat")
+    if carbs is not None:
+      parts.append(f"{float(carbs):.1f}g carb")
     if serving:
-      parts.append(f"{serving}")  
-    lines.append("|".join(parts))  
+      parts.append(f"{serving}")
+    lines.append("|".join(parts))
 
   remaining = max(0, len(items) - limit)
   if remaining:
@@ -206,32 +220,42 @@ def _recalculate_totals_from_meals(
     item_lookup[name] = {
       "calories": float(item.get("calories", 0)),
       "protein_g": float(item.get("protein_g", 0)),
+      "fat_g": float(item.get("fat_g", 0)),
+      "carbs_g": float(item.get("carbs_g", 0)),
     }
-  
+
   total_calories = 0.0
   total_protein = 0.0
-  
-  
+  total_fat = 0.0
+  total_carbs = 0.0
+
+
   for meal_name in ["breakfast", "lunch", "dinner"]:
     meal = getattr(result.meals, meal_name)
     for meal_item in meal.items:
       item_name = meal_item.name.strip().lower()
       servings = float(meal_item.servings)
-      
-      
+
+
       if item_name in item_lookup:
         item_data = item_lookup[item_name]
         total_calories += item_data["calories"] * servings
         total_protein += item_data["protein_g"] * servings
+        total_fat += item_data["fat_g"] * servings
+        total_carbs += item_data["carbs_g"] * servings
       else:
-        
+
         print(f"[meal_plan_agent] WARNING: Item '{meal_item.name}' not found in menu, using LLM values")
         total_calories += float(meal_item.calories)
         total_protein += float(meal_item.protein_g)
-  
+        total_fat += float(meal_item.fat_g)
+        total_carbs += float(meal_item.carbs_g)
+
   return {
     "calories": round(total_calories),
     "protein_g": round(total_protein),
+    "fat_g": round(total_fat),
+    "carbs_g": round(total_carbs),
   }
 
 
@@ -269,7 +293,7 @@ def _build_agent_prompt(
     dining_context["meta"] = menu_meta
 
   
-  menu_header = "MENU (name|cal|prot|serving)"
+  menu_header = "MENU (name|cal|prot|fat|carb|serving)"
 
   
   prompt_sections = [
@@ -447,6 +471,8 @@ async def generate_meal_plan_with_agent(
 
     result.totals.calories = actual_calories
     result.totals.protein_g = actual_protein
+    result.totals.fat_g = recalculated_totals["fat_g"]
+    result.totals.carbs_g = recalculated_totals["carbs_g"]
 
     return result, raw_response
 
@@ -687,6 +713,8 @@ async def generate_meal_plan_with_streaming(
 
     result.totals.calories = actual_calories
     result.totals.protein_g = actual_protein
+    result.totals.fat_g = recalculated_totals["fat_g"]
+    result.totals.carbs_g = recalculated_totals["carbs_g"]
 
     # Convert to dict for response
     meal_plan_dict = result.model_dump()
