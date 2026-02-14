@@ -19,7 +19,7 @@ import httpx
 import traceback
 from difflib import get_close_matches
 from dotenv import load_dotenv
-from fastapi import Body, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Query, status
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
@@ -5042,6 +5042,31 @@ async def delete_food_log_entry(
     except Exception as e:
         logger.error(f"Failed to delete food log entry: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete entry: {str(e)}")
+
+
+# ==================== FOOD SCAN ENDPOINTS ====================
+
+from food_scan_endpoints import handle_food_scan_analyze, handle_food_scan_feedback
+from food_scan_models import FoodScanFeedbackRequest
+
+
+@app.post('/food-scan/analyze', summary='Analyze a food photo using AI')
+async def food_scan_analyze(
+    image: UploadFile = File(...),
+    dining_hall: str = Form(...),
+    date: str = Form(...),
+    description: Optional[str] = Form(None),
+    current_user=Depends(get_current_user),
+):
+    return await handle_food_scan_analyze(image, dining_hall, date, description, current_user)
+
+
+@app.post('/food-scan/feedback', summary='Submit feedback on food scan accuracy')
+async def food_scan_feedback(
+    data: FoodScanFeedbackRequest,
+    current_user=Depends(get_current_user),
+):
+    return await handle_food_scan_feedback(data, current_user, supabase)
 
 
 # ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
