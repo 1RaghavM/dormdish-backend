@@ -742,7 +742,6 @@ async def generate_meal_plan_with_streaming(
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=response_schema,
-          thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
         )
       )
 
