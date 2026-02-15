@@ -784,8 +784,14 @@ async def generate_meal_plan_with_streaming(
       def stream_to_queue():
         try:
           for chunk in stream:
-            if chunk.text:
-              chunk_queue.put(chunk.text)
+            # Thinking chunks may have None candidates; accessing .text
+            # raises ValueError. Guard with try/except to skip them safely.
+            try:
+              text = chunk.text
+            except (ValueError, AttributeError):
+              continue
+            if text:
+              chunk_queue.put(text)
           chunk_queue.put(None)  # Signal completion
         except Exception as e:
           stream_error.append(e)
