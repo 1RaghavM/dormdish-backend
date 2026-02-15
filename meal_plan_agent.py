@@ -78,6 +78,57 @@ Remember: This is a mathematical optimization task. Precision is mandatory.
 DO NOT output your reasoning or "thoughts". Output ONLY the final JSON object exactly matching the schema."""
 
 
+PARTIAL_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create a PARTIAL daily meal plan with ONLY {meal_list} using ONLY the provided menu items.
+
+CRITICAL REQUIREMENTS - MUST BE MET:
+• Total calories across {meal_count} meal(s) MUST be between {cal_min} and {cal_max} calories (target: {cal_target})
+• Total protein across {meal_count} meal(s) MUST be between {prot_min}g and {prot_max}g (target: {prot_target}g)
+• These are HARD CONSTRAINTS, not suggestions. The plan will be rejected if outside these ranges.
+• The user has already eaten other meals today. These targets represent ONLY what remains for {meal_list}.
+
+CALCULATION METHOD (MANDATORY):
+1. For each item, calculate: servings × calories_per_serving = item_calories
+2. For each item, calculate: servings × protein_per_serving = item_protein
+3. For each item, calculate: servings × fat_per_serving = item_fat
+4. For each item, calculate: servings × carbs_per_serving = item_carbs
+5. Sum all item_calories across all meals = total_calories
+6. Sum all item_protein across all meals = total_protein
+7. Sum all item_fat across all meals = total_fat
+8. Sum all item_carbs across all meals = total_carbs
+9. VERIFY totals are within required ranges BEFORE finalizing
+
+MEAL STRUCTURE:
+• Create exactly {meal_count} meal(s): {meal_list}
+• Each meal should have 2-4 items (main dish + sides/accompaniments)
+• Include companions (e.g., pasta→sauce, salad→dressing)
+• Use realistic servings: 0.5, 1, 1.5, 2 (fractional amounts allowed)
+• Vary items - don't repeat the same item more than once per day
+• Don't stack multiple protein mains in one meal
+• Do not include drinks, or desserts.
+Do not repeat items in the same meal, do not give multiple variations of the same item in the same meal (ex. hard-boiled eggs and scrambled eggs).
+
+OPTIMIZATION STRATEGY:
+1. Start with high-protein items to meet protein target
+2. Add calorie-dense items if under calorie target
+3. Use fractional servings (0.5, 1.5) for fine-tuning
+4. Adjust portion sizes to hit BOTH targets simultaneously
+5. Double-check math before submitting
+
+DIETARY PREFERENCES:
+• Respect the user's dietary preference specified in the prompt
+
+OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
+{output_schema}
+
+EXPLANATION:
+• Write 1-3 sentences explaining how the plan meets the calorie/protein targets
+• Mention any notable trade-offs or optimizations made
+
+Remember: This is a mathematical optimization task. Precision is mandatory.
+
+DO NOT output your reasoning or "thoughts". Output ONLY the final JSON object exactly matching the schema."""
+
+
 _REPAIR_INSTRUCTIONS = """Your previous response could not be parsed/validated.
 Return ONLY a single valid JSON object (no markdown, no comments, no extra text).
 Use double quotes for all keys and string values."""
@@ -160,7 +211,22 @@ class DormdishMealPlannerSchema(BaseModel):
     totals: DormdishMealPlannerSchema__Totals
     meals: DormdishMealPlannerSchema__Meals
     explanation: str
-    
+
+
+def build_partial_meals_schema(include_meals: List[str]):
+    """Build a dynamic Pydantic model that only includes the specified meals."""
+    PartialMeals = type(
+        "PartialMeals",
+        (BaseModel,),
+        {"__annotations__": {m: DormdishMealPlannerSchema__Meal for m in include_meals}},
+    )
+
+    class PartialMealPlanSchema(BaseModel):
+        totals: DormdishMealPlannerSchema__Totals
+        meals: PartialMeals
+        explanation: str
+
+    return PartialMealPlanSchema
 
 
 def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] = None) -> str:
@@ -204,16 +270,23 @@ def _render_allowed_items(items: Sequence[Dict[str, Any]], limit: Optional[int] 
 
 
 def _recalculate_totals_from_meals(
-  result: DormdishMealPlannerSchema,
+  result,
   menu_payload: Dict[str, Any],
+  include_meals: Optional[List[str]] = None,
 ) -> Dict[str, float]:
   """
   Recalculate totals deterministically from the meal plan items.
   This ensures perfect math instead of relying on LLM calculations.
+
+  Args:
+    result: Validated meal plan schema (full or partial)
+    menu_payload: Menu data including allowed items
+    include_meals: Optional list of meal names to iterate over.
+                   Defaults to ["breakfast", "lunch", "dinner"].
   """
   allowed_items = menu_payload.get("allowed_items") or []
-  
-  
+
+
   item_lookup: Dict[str, Dict[str, Any]] = {}
   for item in allowed_items:
     name = str(item.get("name", "")).strip().lower()
@@ -229,8 +302,9 @@ def _recalculate_totals_from_meals(
   total_fat = 0.0
   total_carbs = 0.0
 
+  meals_to_iterate = include_meals if include_meals else ["breakfast", "lunch", "dinner"]
 
-  for meal_name in ["breakfast", "lunch", "dinner"]:
+  for meal_name in meals_to_iterate:
     meal = getattr(result.meals, meal_name)
     for meal_item in meal.items:
       item_name = meal_item.name.strip().lower()
@@ -335,20 +409,23 @@ async def generate_meal_plan_with_agent(
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
   user_preferences_context: Optional[str] = None,
+  exclude_meals: Optional[List[str]] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
   """Generate a meal plan using Gemini 2.5 Flash with optional user preferences from mem0.
-  
+
   Uses Gemini's structured output for precision and accuracy.
-  
+
   Args:
     user_payload: User profile and preferences
     menu_payload: Menu data including allowed items
     nutrition_targets: Calorie and protein goals
     extra_system_messages: Optional additional instructions (not used with Gemini)
-    
+    user_preferences_context: Optional user preferences from mem0
+    exclude_meals: Optional list of meal names to exclude (e.g. ["breakfast"])
+
   Returns:
     Tuple of (validated meal plan schema, raw JSON string)
-    
+
   Raises:
     ValueError: If model fails to return valid JSON
   """
@@ -362,37 +439,72 @@ async def generate_meal_plan_with_agent(
   prompt_chars = len(prompt)
   allowed_items_count = len(menu_payload.get("allowed_items") or [])
 
-  
+
   print(
     f"[meal_plan_agent] Gemini 2.5 Flash prompt_size chars={prompt_chars} "
     f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
   )
 
-  
+
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
   cal_min = int(cal_target * 0.95)
   cal_max = int(cal_target * 1.05)
   prot_min = int(prot_target * 0.95)
   prot_max = int(prot_target * 1.05)
-  
-  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-    cal_min=cal_min,
-    cal_max=cal_max,
-    cal_target=cal_target,
-    prot_min=prot_min,
-    prot_max=prot_max,
-    prot_target=prot_target
-  )
 
-  
+  # Determine which meals to include
+  all_meals = ["breakfast", "lunch", "dinner"]
+  if exclude_meals:
+    include_meals = [m for m in all_meals if m.lower() not in [e.lower() for e in exclude_meals]]
+  else:
+    include_meals = all_meals
+
+  meal_count = len(include_meals)
+  meal_list = " and ".join(include_meals)
+
+  if exclude_meals and len(include_meals) < 3:
+    # Build partial output schema string
+    meal_schema_parts = []
+    for m in include_meals:
+      meal_schema_parts.append(
+        f'"{m}":' + '{"description":"<str>","items":[{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"fat_g":<float>,"carbs_g":<float>,"serving_size":"<str>"}]}'
+      )
+    output_schema = '{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{{meals_schema}}},"explanation":"<str>"}}'.format(
+      meals_schema=",".join(meal_schema_parts)
+    )
+
+    instructions = PARTIAL_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+      cal_min=cal_min,
+      cal_max=cal_max,
+      cal_target=cal_target,
+      prot_min=prot_min,
+      prot_max=prot_max,
+      prot_target=prot_target,
+      meal_list=meal_list,
+      meal_count=meal_count,
+      output_schema=output_schema,
+    )
+    response_schema = build_partial_meals_schema(include_meals)
+  else:
+    instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+      cal_min=cal_min,
+      cal_max=cal_max,
+      cal_target=cal_target,
+      prot_min=prot_min,
+      prot_max=prot_max,
+      prot_target=prot_target,
+    )
+    response_schema = DormdishMealPlannerSchema
+
+
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   # Keep outputs bounded. Larger values encourage verbose/non-essential output and
   # can increase failure rates. Override via env if needed.
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
 
-  
+
   last_error: Optional[Exception] = None
   for attempt in (1, 2):
     attempt_temperature = temperature if attempt == 1 else 0.1
@@ -406,7 +518,7 @@ async def generate_meal_plan_with_agent(
           temperature=attempt_temperature,
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
-          response_schema=DormdishMealPlannerSchema,
+          response_schema=response_schema,
         )
       )
 
@@ -452,13 +564,13 @@ async def generate_meal_plan_with_agent(
       parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
     try:
-      result = DormdishMealPlannerSchema.model_validate(parsed)
+      result = response_schema.model_validate(parsed)
     except ValidationError as e:
       last_error = e
       print(f"[meal_plan_agent] Model validation failed (attempt={attempt}): {e}")
       continue
 
-    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload, include_meals=include_meals)
     gemini_calories = result.totals.calories
     gemini_protein = result.totals.protein_g
     actual_calories = recalculated_totals["calories"]
@@ -507,12 +619,21 @@ async def generate_meal_plan_with_streaming(
   nutrition_targets: Dict[str, Any],
   extra_system_messages: Optional[Sequence[str]] = None,
   user_preferences_context: Optional[str] = None,
+  exclude_meals: Optional[List[str]] = None,
 ):
   """Generate a meal plan using Gemini with streaming updates.
-  
+
   This is an async generator that yields progress chunks during generation
   and a final complete chunk with the meal plan result.
-  
+
+  Args:
+    user_payload: User profile and preferences
+    menu_payload: Menu data including allowed items
+    nutrition_targets: Calorie and protein goals
+    extra_system_messages: Optional additional instructions (not used with Gemini)
+    user_preferences_context: Optional user preferences from mem0
+    exclude_meals: Optional list of meal names to exclude (e.g. ["breakfast"])
+
   Yields:
     Dict with 'type' field:
       - {"type": "thinking", "content": "..."} - Progress updates
@@ -520,10 +641,10 @@ async def generate_meal_plan_with_streaming(
       - {"type": "complete", "meal_plan": {...}} - Final result
       - {"type": "error", "error": "..."} - Error message
   """
-  
+
   # Yield initial thinking state
   yield {"type": "thinking", "content": "Analyzing menu items and nutritional requirements..."}
-  
+
   prompt = _build_agent_prompt(
     user_payload,
     menu_payload,
@@ -537,7 +658,7 @@ async def generate_meal_plan_with_streaming(
     f"[meal_plan_agent] Streaming: Gemini 2.5 Flash prompt_size chars={prompt_chars} "
     f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
   )
-  
+
   yield {"type": "thinking", "content": f"Processing {allowed_items_count} menu items..."}
 
   # Build system instructions with targets
@@ -547,15 +668,50 @@ async def generate_meal_plan_with_streaming(
   cal_max = int(cal_target * 1.05)
   prot_min = int(prot_target * 0.95)
   prot_max = int(prot_target * 1.05)
-  
-  instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-    cal_min=cal_min,
-    cal_max=cal_max,
-    cal_target=cal_target,
-    prot_min=prot_min,
-    prot_max=prot_max,
-    prot_target=prot_target
-  )
+
+  # Determine which meals to include
+  all_meals = ["breakfast", "lunch", "dinner"]
+  if exclude_meals:
+    include_meals = [m for m in all_meals if m.lower() not in [e.lower() for e in exclude_meals]]
+  else:
+    include_meals = all_meals
+
+  meal_count = len(include_meals)
+  meal_list = " and ".join(include_meals)
+
+  if exclude_meals and len(include_meals) < 3:
+    # Build partial output schema string
+    meal_schema_parts = []
+    for m in include_meals:
+      meal_schema_parts.append(
+        f'"{m}":' + '{"description":"<str>","items":[{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"fat_g":<float>,"carbs_g":<float>,"serving_size":"<str>"}]}'
+      )
+    output_schema = '{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{{meals_schema}}},"explanation":"<str>"}}'.format(
+      meals_schema=",".join(meal_schema_parts)
+    )
+
+    instructions = PARTIAL_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+      cal_min=cal_min,
+      cal_max=cal_max,
+      cal_target=cal_target,
+      prot_min=prot_min,
+      prot_max=prot_max,
+      prot_target=prot_target,
+      meal_list=meal_list,
+      meal_count=meal_count,
+      output_schema=output_schema,
+    )
+    response_schema = build_partial_meals_schema(include_meals)
+  else:
+    instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+      cal_min=cal_min,
+      cal_max=cal_max,
+      cal_target=cal_target,
+      prot_min=prot_min,
+      prot_max=prot_max,
+      prot_target=prot_target,
+    )
+    response_schema = DormdishMealPlannerSchema
 
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
@@ -565,11 +721,11 @@ async def generate_meal_plan_with_streaming(
 
   last_error: Optional[Exception] = None
   accumulated_content = ""
-  
+
   for attempt in (1, 2):
     attempt_temperature = temperature if attempt == 1 else 0.1
     attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
-    
+
     if attempt > 1:
       yield {"type": "thinking", "content": "Refining meal plan generation..."}
 
@@ -582,7 +738,7 @@ async def generate_meal_plan_with_streaming(
           temperature=attempt_temperature,
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
-          response_schema=DormdishMealPlannerSchema,
+          response_schema=response_schema,
         )
       )
 
@@ -590,7 +746,7 @@ async def generate_meal_plan_with_streaming(
     overloaded_error: Optional[Exception] = None
     stream = None
     overload_retries = int(os.getenv("MEALPLAN_OVERLOAD_RETRIES", "6"))
-    
+
     for overload_attempt in range(1, overload_retries + 1):
       try:
         stream = await asyncio.to_thread(call_gemini_stream)
@@ -615,12 +771,12 @@ async def generate_meal_plan_with_streaming(
     accumulated_content = ""
     try:
       yield {"type": "thinking", "content": "Building your personalized meal plan..."}
-      
+
       # Process streaming chunks with proper async iteration
       # We need to iterate in a thread since the Gemini stream is synchronous
       chunk_queue: queue.Queue = queue.Queue()
       stream_error: List[Exception] = []
-      
+
       def stream_to_queue():
         try:
           for chunk in stream:
@@ -630,11 +786,11 @@ async def generate_meal_plan_with_streaming(
         except Exception as e:
           stream_error.append(e)
           chunk_queue.put(None)
-      
+
       # Start streaming in background thread
       stream_thread = threading.Thread(target=stream_to_queue, daemon=True)
       stream_thread.start()
-      
+
       # Process chunks as they arrive
       chunk_count = 0
       thinking_messages = [
@@ -654,7 +810,7 @@ async def generate_meal_plan_with_streaming(
             break
           accumulated_content += chunk_text
           chunk_count += 1
-          
+
           # Yield thinking updates periodically to show progress
           if chunk_count % 2 == 0 and chunk_count // 2 <= len(thinking_messages):
             msg_idx = min(chunk_count // 2 - 1, len(thinking_messages) - 1)
@@ -662,11 +818,11 @@ async def generate_meal_plan_with_streaming(
         except queue.Empty:
           await asyncio.sleep(0.05)
           continue
-      
+
       # Check for streaming errors
       if stream_error:
         raise stream_error[0]
-      
+
     except Exception as e:
       if _is_overloaded_error(e):
         last_error = e
@@ -693,14 +849,14 @@ async def generate_meal_plan_with_streaming(
       parsed["explanation"] = "Meal plan generated to meet nutritional targets."
 
     try:
-      result = DormdishMealPlannerSchema.model_validate(parsed)
+      result = response_schema.model_validate(parsed)
     except ValidationError as e:
       last_error = e
       print(f"[meal_plan_agent] Streaming model validation failed (attempt={attempt}): {e}")
       continue
 
     # Recalculate totals for accuracy
-    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload)
+    recalculated_totals = _recalculate_totals_from_meals(result, menu_payload, include_meals=include_meals)
     gemini_calories = result.totals.calories
     gemini_protein = result.totals.protein_g
     actual_calories = recalculated_totals["calories"]
@@ -718,10 +874,10 @@ async def generate_meal_plan_with_streaming(
 
     # Convert to dict for response
     meal_plan_dict = result.model_dump()
-    
+
     # Final thinking update before completion
     yield {"type": "thinking", "content": "Finalizing your meal plan..."}
-    
+
     # Yield the complete result
     yield {
       "type": "complete",

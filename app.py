@@ -2366,6 +2366,7 @@ class TrackWeightRequest(BaseModel):
 class MealPlanRequest(BaseModel):
     dining_hall: str
     date: str
+    exclude_meals: Optional[List[str]] = None
 
 class MealPlanFeedbackRequest(BaseModel):
     generation_id: str
@@ -3915,6 +3916,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 menu_payload=agent_menu_payload,
                 nutrition_targets=agent_nutrition_targets,
                 user_preferences_context=user_preferences_context,
+                exclude_meals=meal_plan_request.exclude_meals,
             )
         except ValueError as e:
             raise HTTPException(status_code=500, detail="Please try again.")
@@ -4324,6 +4326,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                     menu_payload=menu_payload,
                     nutrition_targets=nutrition_targets,
                     user_preferences_context=user_preferences_context,
+                    exclude_meals=meal_plan_request.exclude_meals,
                 ):
                     if isinstance(chunk, dict) and chunk.get("type") == "complete":
                         chunk["preferences_snapshot"] = preferences_snapshot
