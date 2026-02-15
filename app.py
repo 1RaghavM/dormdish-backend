@@ -3448,8 +3448,8 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
             if value is not None:
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk', 'lose', 'gain']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', 'bulk', 'lose', or 'gain'")
-                if field == 'dietary_preference' and value not in ['vegan', 'vegetarian', 'pescetarian']:
-                    raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', or 'pescetarian'")
+                if field == 'dietary_preference' and value not in ['vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', 'dairy_free']:
+                    raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', or 'dairy_free'")
                 if field == 'weight_change_speed' and value not in ['slow', 'recommended', 'fast']:
                     raise HTTPException(status_code=400, detail="Invalid weight_change_speed. Must be 'slow', 'recommended', or 'fast'")
                 update_data[field] = value

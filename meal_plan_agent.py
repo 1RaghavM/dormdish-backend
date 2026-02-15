@@ -503,6 +503,7 @@ async def generate_meal_plan_with_agent(
   # Keep outputs bounded. Larger values encourage verbose/non-essential output and
   # can increase failure rates. Override via env if needed.
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
+  thinking_budget = int(os.getenv("MEALPLAN_THINKING_BUDGET", "2048"))
 
 
   last_error: Optional[Exception] = None
@@ -519,6 +520,7 @@ async def generate_meal_plan_with_agent(
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=response_schema,
+          thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
         )
       )
 
@@ -716,6 +718,7 @@ async def generate_meal_plan_with_streaming(
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
+  thinking_budget = int(os.getenv("MEALPLAN_THINKING_BUDGET", "2048"))
 
   yield {"type": "thinking", "content": f"Generating meal plan targeting {cal_target} calories and {prot_target}g protein..."}
 
@@ -739,6 +742,7 @@ async def generate_meal_plan_with_streaming(
           max_output_tokens=max_tokens,
           response_mime_type="application/json",
           response_schema=response_schema,
+          thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
         )
       )
 
@@ -886,7 +890,27 @@ async def generate_meal_plan_with_streaming(
     }
     return
 
-  # If we get here, all attempts failed
-  error_msg = f"Model returned invalid response: {last_error}" if last_error else "Model returned invalid response"
-  print(f"[meal_plan_agent] Streaming failed after all attempts: {error_msg}")
-  yield {"type": "error", "error": "Failed to generate meal plan. Please try again."}
+  # If we get here, all streaming attempts failed — fall back to non-streaming
+  print(f"[meal_plan_agent] Streaming failed after all attempts, falling back to non-streaming: {last_error}")
+  yield {"type": "thinking", "content": "Switching to alternate generation method..."}
+
+  try:
+    result, raw_response = await generate_meal_plan_with_agent(
+      user_payload=user_payload,
+      menu_payload=menu_payload,
+      nutrition_targets=nutrition_targets,
+      extra_system_messages=extra_system_messages,
+      user_preferences_context=user_preferences_context,
+      exclude_meals=exclude_meals,
+    )
+    meal_plan_dict = result.model_dump()
+    yield {"type": "thinking", "content": "Finalizing your meal plan..."}
+    yield {
+      "type": "complete",
+      "meal_plan": meal_plan_dict,
+      "raw_response": raw_response,
+    }
+    return
+  except Exception as fallback_error:
+    print(f"[meal_plan_agent] Non-streaming fallback also failed: {fallback_error}")
+    yield {"type": "error", "error": "Failed to generate meal plan. Please try again."}
