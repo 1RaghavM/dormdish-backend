@@ -2336,6 +2336,7 @@ async def initiate_google_auth():
 
 hi = "hi"
 class UpdateProfileRequest(BaseModel):
+    username: Optional[str] = None
     age: Optional[int] = None
     height_feet: Optional[int] = None
     height_inches: Optional[int] = None
@@ -2677,7 +2678,7 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
                 
             data_to_insert = {
                 "id": menu_id,
-                "university": university,
+                "university": UNIVERSITY_DISPLAY_NAMES.get(university, university),
                 "dining_hall": dining_hall,
                 "hall_slug": hall_slug,
                 "date": date,
@@ -2739,6 +2740,12 @@ DINING_HALL_MAPPING = {
     "college-ave": ("rutgers", "brower-commons"),
     "college ave": ("rutgers", "brower-commons"),
     "college avenue": ("rutgers", "brower-commons"),
+}
+
+# Slug -> display name mapping for database storage
+UNIVERSITY_DISPLAY_NAMES = {
+    "rutgers": "Rutgers University",
+    "hopkins": "Johns Hopkins University",
 }
 
 # FoodPro halls (Rutgers halls that use FoodPro scraper)
@@ -3010,7 +3017,7 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
     meal_sources = attempt.get("meal_sources", [])
 
     return {
-        "university": "rutgers",
+        "university": "Rutgers University",
         "hall": dining_hall,
         "hall_slug": hall_slug,
         "date": date,
@@ -3100,7 +3107,7 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         print(f"✅ fetch_nutrislice_menu got {len(unique_items)} unique items")
     
     return {
-        "university": university,
+        "university": UNIVERSITY_DISPLAY_NAMES.get(university, university),
         "hall": dining_hall,
         "hall_slug": hall_slug,
         "date": date,
@@ -3446,6 +3453,12 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                 continue
 
             if value is not None:
+                if field == 'username':
+                    value = value.strip()
+                    if not value or len(value) > 100:
+                        raise HTTPException(status_code=400, detail="Username must be between 1 and 100 characters")
+                    update_data[field] = value
+                    continue
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk', 'lose', 'gain']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', 'bulk', 'lose', or 'gain'")
                 if field == 'dietary_preference' and value not in ['vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', 'dairy_free']:
@@ -4778,7 +4791,7 @@ def load_universities_config() -> List[dict]:
     fallback_dining_halls = [
         {
             "id": "rutgers",
-            "university": "rutgers",
+            "university": "Rutgers University",
             "name": "Rutgers University",
             "dining_halls": [
                 {"id": "busch", "name": "Busch Dining Hall"},
@@ -4790,7 +4803,7 @@ def load_universities_config() -> List[dict]:
         },
         {
             "id": "hopkins",
-            "university": "hopkins",
+            "university": "Johns Hopkins University",
             "name": "Johns Hopkins University",
             "dining_halls": [
                 {"id": "hopkins-cafe", "name": "Hopkins Cafe"},

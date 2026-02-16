@@ -2,7 +2,7 @@
   "universities": [
     {
       "id": "rutgers",
-      "university": "rutgers",
+      "university": "Rutgers University",
       "name": "Rutgers University",
       "dining_halls": [
         {
@@ -24,7 +24,7 @@
     },
     {
       "id": "hopkins",
-      "university": "hopkins",
+      "university": "Johns Hopkins University",
       "name": "Johns Hopkins University",
       "dining_halls": [
         {
