@@ -65,30 +65,10 @@ logger = logging.getLogger("dormdish.api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="DormDish API", description="Meal planning API for college students", version="1.0.0")
-# ---------------------------
-# School Request endpoint
-# ---------------------------
 class SchoolRequest(BaseModel):
     name: str
     email: EmailStr
     university: str
-
-@app.post('/request-school', summary='Request a new school/university to be added')
-def request_school(data: SchoolRequest):
-    try:
-        # Store the request in Supabase (table: school_requests)
-        payload = {
-            "name": data.name.strip(),
-            "email": data.email.strip().lower(),
-            "university": data.university.strip(),
-            "created_at": datetime.now().isoformat()
-        }
-        supabase.table('school_requests').insert(payload).execute()
-        return {"success": True, "message": "School request submitted successfully."}
-    except Exception as e:
-        print(f"⚠️ School request failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to submit school request")
 
 
 # ---------------------------
@@ -1011,9 +991,6 @@ def get_universities():
     return {"universities": load_universities_from_supabase()}
 
 
-# Ensure `/request-school` is registered on the currently active `app` instance.
-# (There is an older definition earlier in the file that was attached to a prior
-# FastAPI instance; adding this ensures the route exists for the running app.)
 @app.post('/request-school', summary='Request a new school/university to be added')
 async def request_school_endpoint(data: SchoolRequest):
     try:
