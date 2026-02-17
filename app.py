@@ -566,11 +566,6 @@ def verify_session_token(token: str) -> Optional[dict]:
         
         if response.data and len(response.data) > 0:
             session = response.data[0]
-            
-            supabase.table("users")\
-                .update({"last_login": datetime.now(ZoneInfo("UTC")).isoformat()})\
-                .eq("id", session["user_id"])\
-                .execute()
             user = session["users"]
             user.pop('password_hash', None)
             return user
