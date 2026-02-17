@@ -7,7 +7,6 @@ import threading
 import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError, PydanticDeprecatedSince20
 from dotenv import load_dotenv
@@ -19,7 +18,14 @@ warnings.filterwarnings("ignore", category=PydanticDeprecatedSince20)
 load_dotenv()
 
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+_client = None
+
+def _get_client():
+    global _client
+    if _client is None:
+        from google import genai
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _client
 
 
 BASE_SYSTEM_INSTRUCTIONS_TEMPLATE = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
@@ -512,7 +518,7 @@ async def generate_meal_plan_with_agent(
     attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
 
     def call_gemini():
-      return client.models.generate_content(
+      return _get_client().models.generate_content(
         model=chosen_model,
         contents=f"{attempt_instructions}\n\n{prompt}",
         config=types.GenerateContentConfig(
@@ -734,7 +740,7 @@ async def generate_meal_plan_with_streaming(
 
     # Use streaming API
     def call_gemini_stream():
-      return client.models.generate_content_stream(
+      return _get_client().models.generate_content_stream(
         model=chosen_model,
         contents=f"{attempt_instructions}\n\n{prompt}",
         config=types.GenerateContentConfig(
