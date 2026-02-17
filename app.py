@@ -2517,11 +2517,14 @@ async def cron_refresh_menus(
 
 
 @app.post('/api/register-push-token', summary='Register device push notification token')
-async def register_push_token(data: PushTokenRequest):
+async def register_push_token(data: PushTokenRequest, current_user=Depends(get_current_user)):
     """
     Register or update a user's push notification token.
     This endpoint stores the Expo push token for sending notifications.
     """
+    # Verify the caller owns this user_id
+    if str(data.user_id) != str(current_user.get("id")):
+        raise HTTPException(status_code=403, detail="Cannot register push token for another user")
     try:
         # Validate token format
         if not data.token or not data.token.startswith('ExponentPushToken['):
