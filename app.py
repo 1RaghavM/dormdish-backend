@@ -571,7 +571,9 @@ def verify_session_token(token: str) -> Optional[dict]:
                 .update({"last_login": datetime.now(ZoneInfo("UTC")).isoformat()})\
                 .eq("id", session["user_id"])\
                 .execute()
-            return session["users"]
+            user = session["users"]
+            user.pop('password_hash', None)
+            return user
         return None
     except Exception as e:
         print(f"Error verifying session: {e}")
@@ -1756,7 +1758,7 @@ async def delete_account(current_user=Depends(get_current_user)):
 @app.post('/auth/forgot-password', summary='Request password reset code')
 def auth_forgot_password(data: ForgotPasswordRequest, background_tasks: BackgroundTasks):
     """
-    Request a password reset code. If the email exists, a 6-digit code
+    Request a password reset code. If the email exists, an 8-digit code
     is sent to the email address, valid for 10 minutes.
     """
     try:
@@ -2264,7 +2266,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
                     logger.info("[apple.register] caught unique-constraint username collision attempt=%s username=%s: %s", attempt + 1, payload.get("username"), emsg)
                     continue
                 print(f"[apple.register] insert error (non-username): {e}")
-                raise HTTPException(status_code=500, detail=f"Apple registration failed: {e}")
+                raise HTTPException(status_code=500, detail="Apple registration failed")
 
         if not user_row:
             raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
@@ -2483,11 +2485,14 @@ async def cron_refresh_menus(
     is_vercel_cron = request.headers.get("x-vercel-cron") is not None
 
     # Verify: either Vercel cron, or valid secret in header/query
-    cron_secret = os.getenv("CRON_SECRET", "")
-    secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
-
-    if not is_vercel_cron and cron_secret and not secret_valid:
-        raise HTTPException(status_code=401, detail="Unauthorized - pass ?secret=YOUR_CRON_SECRET")
+    if not is_vercel_cron:
+        cron_secret = os.getenv("CRON_SECRET")
+        if not cron_secret:
+            logger.error("CRON_SECRET env var not set - rejecting cron request")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+        secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
+        if not secret_valid:
+            raise HTTPException(status_code=401, detail="Unauthorized - pass ?secret=YOUR_CRON_SECRET")
 
     print("🕐 [CRON] Starting daily menu refresh...")
     start_time = time.time()
@@ -2596,10 +2601,14 @@ async def send_daily_reminders(
     """
     # Verify: either Vercel cron, or valid secret
     is_vercel_cron = request.headers.get("x-vercel-cron") is not None
-    cron_secret = os.getenv("CRON_SECRET", "")
-    secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
-    if not is_vercel_cron and cron_secret and not secret_valid:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not is_vercel_cron:
+        cron_secret = os.getenv("CRON_SECRET")
+        if not cron_secret:
+            logger.error("CRON_SECRET env var not set - rejecting cron request")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+        secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
+        if not secret_valid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         # Get all users with active push tokens
         response = supabase.table('push_tokens')\
