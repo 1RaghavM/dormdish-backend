@@ -76,9 +76,9 @@ async def handle_food_scan_analyze(
 
     image_data = await image.read()
 
-    # Limit image size (10MB)
-    if len(image_data) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+    # Limit image size (4MB – Vercel free plan has a 4.5MB body limit)
+    if len(image_data) > 4 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 4MB)")
 
     # ── 2. Validate dining_hall ──
     if not dining_hall or not dining_hall.strip():
