@@ -481,8 +481,8 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # Password Reset Code Generation and Email Sending
 def generate_reset_code() -> str:
-    """Generate a 6-digit reset code"""
-    return ''.join([str(random.randint(0, 9)) for _ in range(6)])
+    """Generate an 8-digit cryptographically secure reset code"""
+    return ''.join([str(secrets.choice(range(10))) for _ in range(8)])
 
 
 def send_password_reset_email(to_email: str, code: str) -> bool:
