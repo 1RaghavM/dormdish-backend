@@ -44,7 +44,9 @@ class Mem0Client:
             "Content-Type": "application/json"
         }
         # Use a persistent client for connection pooling
-        self._client = httpx.Client(timeout=30.0)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
+        )
     
     def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
         """Make an HTTP request to the Mem0 API."""
