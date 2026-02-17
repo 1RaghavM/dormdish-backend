@@ -961,7 +961,7 @@ async def email_test(email: EmailStr):
     except HTTPException as exc:
         raise exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Test email failed: {exc}")
+        raise HTTPException(status_code=500, detail="Test email failed")
 
 
 
@@ -1565,7 +1565,7 @@ def auth_register(data: RegisterRequest):
                         logger.info("username collision detected for %s (attempt %s): %s", try_username, attempt + 1, msg)
                         continue
                     # If it's a different DB error, surface it
-                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                    raise HTTPException(status_code=500, detail="Registration failed")
 
                 if inserted.data and len(inserted.data) > 0:
                     user_row = inserted.data[0]
@@ -1580,7 +1580,7 @@ def auth_register(data: RegisterRequest):
                     logger.info("caught unique-constraint username collision (attempt %s) for username=%s: %s", attempt + 1, payload.get("username"), emsg)
                     continue
                 print(f"⚠️ Register insert error (non-username): {e}")
-                raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
+                raise HTTPException(status_code=500, detail="Registration failed")
 
         if not user_row:
             # All attempts exhausted
@@ -2025,7 +2025,7 @@ async def auth_google_register(data: GoogleRegisterRequest):
                     if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
                         logger.info("[google.register] username collision for %s attempt=%s: %s", try_username, attempt + 1, msg)
                         continue
-                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                    raise HTTPException(status_code=500, detail="Registration failed")
                 if inserted.data and len(inserted.data) > 0:
                     user_row = inserted.data[0]
                     break
@@ -2036,7 +2036,7 @@ async def auth_google_register(data: GoogleRegisterRequest):
                     logger.info("[google.register] caught unique-constraint username collision attempt=%s username=%s: %s", attempt + 1, payload.get("username"), emsg)
                     continue
                 print(f"[google.register] insert error (non-username): {e}")
-                raise HTTPException(status_code=500, detail=f"Google registration failed: {e}")
+                raise HTTPException(status_code=500, detail="Google registration failed")
 
         if not user_row:
             raise HTTPException(status_code=500, detail="Failed to create user after resolving username conflicts")
@@ -2253,7 +2253,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
                     if ("users_username_key" in msg) or ("Key (username)" in msg) or ("duplicate key value" in msg):
                         logger.info("[apple.register] username collision for %s attempt=%s: %s", try_username, attempt + 1, msg)
                         continue
-                    raise HTTPException(status_code=500, detail=f"Supabase insert error: {msg}")
+                    raise HTTPException(status_code=500, detail="Registration failed")
                 if inserted.data and len(inserted.data) > 0:
                     user_row = inserted.data[0]
                     break
@@ -3559,7 +3559,7 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update profile")
 
 
 @app.post("/auth/weight", summary="Track user weight")
@@ -4522,7 +4522,7 @@ async def save_meal_plan(
         raise
     except Exception as e:
         print(f"Error saving meal plan: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save meal plan: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save meal plan")
 
 
 @app.get("/meal-plan/history", summary="Get user's saved meal plans")
@@ -5045,7 +5045,7 @@ async def add_food_log_entry(
         raise
     except Exception as e:
         logger.error(f"Failed to add food log entry: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to log item: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to log food item")
 
 
 @app.get("/food-log/{date}", summary="Get food log entries for a date")
@@ -6063,7 +6063,7 @@ async def export_meal_plan_to_calendar(
         logger.error(f"Failed to export meal plan: {e}", exc_info=True)
         # Return actual error message to help debugging
         error_detail = str(e) if str(e) else "Failed to export meal plan to calendar"
-        raise HTTPException(status_code=500, detail=f"Calendar export error: {error_detail}")
+        raise HTTPException(status_code=500, detail="Calendar export failed")
 
 if __name__ == '__main__':
     import uvicorn
