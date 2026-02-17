@@ -5486,7 +5486,15 @@ def send_meal_plan_generation_email(user_row: dict, generation_id: Optional[str]
 # Google Calendar Integration Endpoints
 # ============================================================================
 
-from google_calendar_service import calendar_service
+# Google Calendar service loaded lazily inside calendar endpoints
+_calendar_service = None
+
+def _get_calendar_service():
+    global _calendar_service
+    if _calendar_service is None:
+        from google_calendar_service import GoogleCalendarService
+        _calendar_service = GoogleCalendarService()
+    return _calendar_service
 
 class GoogleCalendarAuthRequest(BaseModel):
     """Request to initiate Google Calendar OAuth"""
@@ -5523,7 +5531,7 @@ async def initiate_google_calendar_auth(current_user=Depends(get_current_user)):
         state_with_user = f"{current_user['id']}:{state}"
         
         # Create authorization URL
-        auth_url = calendar_service.create_authorization_url(state_with_user)
+        auth_url = _get_calendar_service().create_authorization_url(state_with_user)
         
         return {
             "success": True,
@@ -5608,7 +5616,7 @@ async def google_calendar_callback_get(
         
         # Exchange code for credentials (pass the ORIGINAL state as received from Google)
         # But use the decoded state for the exchange
-        creds_dict = calendar_service.exchange_code_for_credentials(code, state)
+        creds_dict = _get_calendar_service().exchange_code_for_credentials(code, state)
         
         # Store credentials in database
         try:
@@ -5650,7 +5658,7 @@ async def google_calendar_callback_post(payload: GoogleCalendarCallbackRequest):
         user_id = state_parts[0]
         
         # Exchange code for credentials
-        creds_dict = calendar_service.exchange_code_for_credentials(
+        creds_dict = _get_calendar_service().exchange_code_for_credentials(
             payload.code,
             payload.state
         )
@@ -5826,7 +5834,7 @@ async def get_calendar_events_for_day(
             )
         
         # Refresh credentials if needed
-        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        refreshed_creds = _get_calendar_service().refresh_credentials_if_needed(creds_dict)
         if refreshed_creds:
             try:
                 supabase.table("users").update({
@@ -5844,7 +5852,7 @@ async def get_calendar_events_for_day(
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
         # Get events
-        events = calendar_service.get_events_for_day(
+        events = _get_calendar_service().get_events_for_day(
             creds_dict,
             date_obj,
             timezone="America/New_York"  # TODO: Get from user preferences
@@ -5881,7 +5889,7 @@ async def find_meal_time_slots(
             )
         
         # Refresh credentials if needed
-        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        refreshed_creds = _get_calendar_service().refresh_credentials_if_needed(creds_dict)
         if refreshed_creds:
             try:
                 supabase.table("users").update({
@@ -5899,14 +5907,14 @@ async def find_meal_time_slots(
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         
         # Get events for the day
-        events = calendar_service.get_events_for_day(
+        events = _get_calendar_service().get_events_for_day(
             creds_dict,
             date_obj,
             timezone="America/New_York"
         )
         
         # Find meal slots
-        meal_slots = calendar_service.find_meal_time_slots(
+        meal_slots = _get_calendar_service().find_meal_time_slots(
             events,
             date_obj,
             timezone="America/New_York"
@@ -5984,7 +5992,7 @@ async def export_meal_plan_to_calendar(
             )
         
         # ✅ FIX: Refresh credentials if needed and save back to database
-        refreshed_creds = calendar_service.refresh_credentials_if_needed(creds_dict)
+        refreshed_creds = _get_calendar_service().refresh_credentials_if_needed(creds_dict)
         if refreshed_creds:
             logger.info(f"[Calendar] Credentials were expired, refreshing for user {current_user['id']}")
             # Always use refreshed credentials for this request (even if DB save fails)
@@ -6034,21 +6042,21 @@ async def export_meal_plan_to_calendar(
             raise HTTPException(status_code=500, detail="Failed to fetch meal plan")
         
         # Get events for the day
-        events = calendar_service.get_events_for_day(
+        events = _get_calendar_service().get_events_for_day(
             creds_dict,
             date_obj,
             timezone="America/New_York"
         )
         
         # Find meal slots
-        meal_slots = calendar_service.find_meal_time_slots(
+        meal_slots = _get_calendar_service().find_meal_time_slots(
             events,
             date_obj,
             timezone="America/New_York"
         )
         
         # Export to calendar
-        created_events = calendar_service.export_meal_plan_to_calendar(
+        created_events = _get_calendar_service().export_meal_plan_to_calendar(
             creds_dict,
             meal_plan,
             meal_slots,
