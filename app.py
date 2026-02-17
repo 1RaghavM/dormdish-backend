@@ -167,8 +167,6 @@ async def lifespan(app: FastAPI):
             app.state.http = None
 
 
-from meal_plan_agent import generate_meal_plan_with_agent
-
 app = FastAPI(
     title="DormDish API",
     description="Meal planning API for college students",
@@ -3692,9 +3690,10 @@ async def get_weight_history(
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
     Auto-saves the meal plan to the database. Returns legacy MealPlanResponse wrapper expected by frontend.
-    
+
     Rate limit: One meal plan per day. Meal plans reset at the start of each new day.
     """
+    from meal_plan_agent import generate_meal_plan_with_agent
     t_start = time.time()
     menu_fetch_start = t_start
     try:
@@ -5098,7 +5097,6 @@ async def delete_food_log_entry(
 
 # ==================== FOOD SCAN ENDPOINTS ====================
 
-from food_scan_endpoints import handle_food_scan_analyze, handle_food_scan_feedback
 from food_scan_models import FoodScanFeedbackRequest
 
 
@@ -5110,6 +5108,7 @@ async def food_scan_analyze(
     description: Optional[str] = Form(None),
     current_user=Depends(get_current_user),
 ):
+    from food_scan_endpoints import handle_food_scan_analyze
     return await handle_food_scan_analyze(image, dining_hall, date, description, current_user)
 
 
@@ -5118,6 +5117,7 @@ async def food_scan_feedback(
     data: FoodScanFeedbackRequest,
     current_user=Depends(get_current_user),
 ):
+    from food_scan_endpoints import handle_food_scan_feedback
     return await handle_food_scan_feedback(data, current_user, supabase)
 
 
