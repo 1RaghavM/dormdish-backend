@@ -1536,10 +1536,10 @@ def auth_register(data: RegisterRequest):
         # username. This avoids returning an internal server error for a
         # username collision while preserving the email-uniqueness check above.
         max_attempts = 5
-        base_username = (payload.get("username") or "user").strip()
+        base_username = (payload.get("username") or "").strip()
         if not base_username:
             # Fall back to a name derived from email local-part if username empty
-            base_username = str(data.email).split("@")[0]
+            base_username = str(data.email).split("@")[0] if data.email else "user"
         #hi
         user_row = None
         for attempt in range(max_attempts):
@@ -1999,9 +1999,9 @@ async def auth_google_register(data: GoogleRegisterRequest):
         print(f"[google.register] inserting user payload keys={list(payload.keys())}")
         # Same username-collision handling as auth_register: try a few suffixes
         max_attempts = 5
-        base_username = (payload.get("username") or "user").strip()
+        base_username = (payload.get("username") or "").strip()
         if not base_username:
-            base_username = email.split("@")[0]
+            base_username = email.split("@")[0] if email else "user"
 
         user_row = None
         for attempt in range(max_attempts):
@@ -2225,9 +2225,9 @@ async def auth_apple_register(data: AppleRegisterRequest):
 
         # Username collision handling (same as Google/email registration)
         max_attempts = 5
-        base_username = (payload.get("username") or "user").strip()
+        base_username = (payload.get("username") or "").strip()
         if not base_username:
-            base_username = email.split("@")[0]
+            base_username = email.split("@")[0] if email else "user"
 
         user_row = None
         for attempt in range(max_attempts):
