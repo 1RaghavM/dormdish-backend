@@ -917,6 +917,8 @@ async def subscribe(req: SubscribeRequest, background_tasks: BackgroundTasks):
 
 @app.get('/health/brevo', summary='Brevo configuration and template health check')
 async def brevo_health():
+    if os.getenv("DEBUG", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         from_email = os.getenv("BREVO_FROM_EMAIL")
         from_name = os.getenv("BREVO_FROM_NAME")
@@ -950,6 +952,8 @@ async def brevo_health():
 
 @app.get('/email/test', summary='Send a Brevo test email using the configured template')
 async def email_test(email: EmailStr):
+    if os.getenv("DEBUG", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         payload = build_brevo_template_payload(str(email))
         await _send_brevo_email_async(payload)
@@ -4720,6 +4724,8 @@ async def delete_meal_plan(plan_id: str, current_user=Depends(get_current_user))
 @app.get("/meal-plan/debug", summary="Debug meal plan database")
 async def debug_meal_plan_db(current_user=Depends(get_current_user)):
     """Debug endpoint to check meal plan database state."""
+    if os.getenv("DEBUG", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         user_id = current_user["id"]
@@ -5260,6 +5266,8 @@ async def debug_all_memories(
     current_user=Depends(get_current_user)
 ):
     """Get ALL raw memories for debugging (shows everything stored in mem0)"""
+    if os.getenv("DEBUG", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         from memory.preference_manager import PreferenceManager
         preference_manager = PreferenceManager()
