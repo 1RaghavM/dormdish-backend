@@ -28,35 +28,31 @@ from supabase import Client, create_client
 
 import secrets as _secrets_for_google
 
-try:
-    from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu, title_case_name
-except Exception as exc:
-    print(f"⚠️ Failed to import FoodPro scraper helpers: {exc}")
-    traceback.print_exc()
-    fp_build_menu_url = None  
-    fp_fetch = None  
-    fp_parse_menu = None
-    # Fallback title_case_name function if extract import fails
-    def title_case_name(name: str | None) -> str:
-        """Convert menu item name to proper title case."""
-        if not name:
-            return ""
-        name = re.sub(r"\s+", " ", name).strip()
-        if not name:
-            return ""
-        if name.isupper():
-            name = name.title()
-            name = re.sub(r'\bAnd\b', 'and', name, flags=re.IGNORECASE)
-            name = re.sub(r'\bOr\b', 'or', name, flags=re.IGNORECASE)
-            name = re.sub(r'\bOf\b', 'of', name, flags=re.IGNORECASE)
-            name = re.sub(r'\bThe\b', 'the', name, flags=re.IGNORECASE)
-            name = re.sub(r'\bA\b', 'a', name, flags=re.IGNORECASE)
-            if name:
-                name = name[0].upper() + name[1:]
-        else:
-            if name:
-                name = name[0].upper() + name[1:]
-        return name  
+# extract module loaded lazily inside fetch_foodpro_menu_rutgers() - only needed for cron
+fp_build_menu_url = None
+fp_fetch = None
+fp_parse_menu = None
+
+def title_case_name(name: str | None) -> str:
+    """Convert menu item name to proper title case."""
+    if not name:
+        return ""
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name:
+        return ""
+    if name.isupper():
+        name = name.title()
+        name = re.sub(r'\bAnd\b', 'and', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bOr\b', 'or', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bOf\b', 'of', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bThe\b', 'the', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bA\b', 'a', name, flags=re.IGNORECASE)
+        if name:
+            name = name[0].upper() + name[1:]
+    else:
+        if name:
+            name = name[0].upper() + name[1:]
+    return name
 
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -2852,6 +2848,7 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
     """Fetch menu from Rutgers FoodPro pickmenu pages and format like Nutrislice output.
     Now aggregates breakfast, lunch, and dinner by invoking the scraper per meal.
     """
+    from extract import build_menu_url as fp_build_menu_url, fetch as fp_fetch, parse_menu as fp_parse_menu
     if not (fp_build_menu_url and fp_parse_menu):
         raise RuntimeError("FoodPro scraper not available")
 
