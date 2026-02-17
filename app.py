@@ -3924,12 +3924,14 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             print(f"[mem0] Meal Plan Generation - User ID from auth: {user_id}")
             print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
             
-            # Retrieve all preference types (only favorites and dislikes)
-            favorites = await preference_manager.get_favorites(user_id)
-            dislikes = await preference_manager.get_dislikes(user_id)
-            profile = await preference_manager.get_user_profile(user_id)
+            # Retrieve all preference types in parallel
+            favorites, dislikes, profile = await asyncio.gather(
+                preference_manager.get_favorites(user_id),
+                preference_manager.get_dislikes(user_id),
+                preference_manager.get_user_profile(user_id),
+            )
             prefs = [profile] if profile else []
-            
+
             # DEBUG: Log what was retrieved
             print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
             if favorites:
@@ -4330,12 +4332,14 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             print(f"[mem0] Streaming Generation - User ID from auth: {user_id}")
             print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
             
-            # Retrieve all preference types (only favorites and dislikes)
-            favorites = await preference_manager.get_favorites(user_id)
-            dislikes = await preference_manager.get_dislikes(user_id)
-            profile = await preference_manager.get_user_profile(user_id)
+            # Retrieve all preference types in parallel
+            favorites, dislikes, profile = await asyncio.gather(
+                preference_manager.get_favorites(user_id),
+                preference_manager.get_dislikes(user_id),
+                preference_manager.get_user_profile(user_id),
+            )
             prefs = [profile] if profile else []
-            
+
             # DEBUG: Log what was retrieved
             print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
             if favorites:
