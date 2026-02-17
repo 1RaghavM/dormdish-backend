@@ -1418,7 +1418,10 @@ async def _verify_google_id_token(id_token: str) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to verify Google token: {exc}") from exc
     aud_expected = os.getenv("GOOGLE_CLIENT_ID")
-    if aud_expected and data.get("aud") != aud_expected:
+    if not aud_expected:
+        logger.error("GOOGLE_CLIENT_ID env var not set - cannot validate Google tokens")
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    if data.get("aud") != aud_expected:
         raise HTTPException(status_code=401, detail="Google token audience mismatch")
     if data.get("email_verified") not in ("true", True):
         raise HTTPException(status_code=401, detail="Google email not verified")
