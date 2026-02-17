@@ -1586,7 +1586,8 @@ def auth_register(data: RegisterRequest):
 
         
         
-        user_row["session_token"] = token  
+        user_row["session_token"] = token
+        user_row.pop('password_hash', None)
         return {
             "success": True,
             "message": "Registration successful",
@@ -1625,6 +1626,7 @@ def auth_login(data: LoginRequest):
         except Exception:
             pass
 
+        user_row.pop('password_hash', None)
         return {
             "success": True,
             "message": "Login successful",
@@ -1911,6 +1913,7 @@ async def auth_google_login(payload: GoogleIdTokenRequest):
             supabase.table("users").update({"last_login": datetime.now().isoformat()}).eq("id", user_row.get("id")).execute()
         except Exception as e:
             print(f"[auth.google.login] warning: failed to update last_login: {e}")
+        user_row.pop('password_hash', None)
         return {
                 "success": True,
                 "message": "Login successful",
@@ -2034,6 +2037,7 @@ async def auth_google_register(data: GoogleRegisterRequest):
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
         user_row["session_token"] = token
+        user_row.pop('password_hash', None)
         print(f"[google.register] success user_id={user_row.get('id')}")
         return {
             "success": True,
@@ -2114,6 +2118,7 @@ async def auth_apple_login(payload: AppleIdTokenRequest):
             print(f"[apple.login] warning: failed to update last_login: {e}")
 
         print(f"[apple.login] success user_id={user_row.get('id')}")
+        user_row.pop('password_hash', None)
         return {
             "success": True,
             "message": "Login successful",
@@ -2262,6 +2267,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
             raise HTTPException(status_code=500, detail="Failed to create session")
 
         user_row["session_token"] = token
+        user_row.pop('password_hash', None)
         print(f"[apple.register] success user_id={user_row.get('id')}")
 
         return {
@@ -3583,14 +3589,17 @@ async def track_weight(weight_data: TrackWeightRequest, current_user=Depends(get
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to save weight data")
         
-        # Also update the user's current weight in profile
-        profile_update = supabase.table("users")\
-            .update({"weight_lbs": weight_data.weight_lbs})\
-            .eq("id", current_user["id"])\
-            .execute()
+        # Only update the user's profile weight if this entry is for today
+        # (prevents HealthKit historical sync from overwriting the current weight)
+        today_str = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        if weight_date == today_str:
+            profile_update = supabase.table("users")\
+                .update({"weight_lbs": weight_data.weight_lbs})\
+                .eq("id", current_user["id"])\
+                .execute()
         
-        # Recalculate BMR and TDEE with new weight
-        if all(key in current_user for key in ['age', 'height_feet', 'height_inches', 'gender', 'activity_level']):
+        # Recalculate BMR and TDEE only when profile weight was updated (today's entry)
+        if weight_date == today_str and all(key in current_user for key in ['age', 'height_feet', 'height_inches', 'gender', 'activity_level']):
             bmr_data = calculate_bmr_tdee(
                 current_user['age'],
                 current_user['height_feet'],
