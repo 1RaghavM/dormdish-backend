@@ -2574,12 +2574,22 @@ async def register_push_token(data: PushTokenRequest):
 
 
 @app.api_route('/api/send-daily-reminders', methods=['GET', 'POST'], summary='Send daily meal plan reminders (admin/cron only)')
-async def send_daily_reminders():
+async def send_daily_reminders(
+    request: Request,
+    secret: Optional[str] = Query(None),
+    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret")
+):
     """
     Send reminder notifications to all users who haven't created their meal plan today.
     This endpoint should be called by a cron job or scheduled task.
     Accepts both GET and POST for Vercel Cron compatibility.
     """
+    # Verify: either Vercel cron, or valid secret
+    is_vercel_cron = request.headers.get("x-vercel-cron") is not None
+    cron_secret = os.getenv("CRON_SECRET", "")
+    secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
+    if not is_vercel_cron and cron_secret and not secret_valid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         # Get all users with active push tokens
         response = supabase.table('push_tokens')\
