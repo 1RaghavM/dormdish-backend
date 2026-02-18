@@ -12,11 +12,11 @@ import os
 import random
 import uuid
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, ValidationError, PydanticDeprecatedSince20
+from pydantic import ValidationError, PydanticDeprecatedSince20
 from dotenv import load_dotenv
 
 from food_scan_prompts import build_system_prompt, build_user_prompt

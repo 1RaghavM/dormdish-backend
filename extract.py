@@ -1,5 +1,5 @@
 import requests
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 import json
 import re
 import sys
@@ -621,8 +621,6 @@ MAX_NUTRITION_WORKERS = 5  # Reduced to be gentler on Rutgers server
 NUTRITION_FETCH_TIMEOUT = 12.0  # Increased timeout for slow server responses
 BATCH_SIZE = 20  # Process URLs in smaller batches
 BATCH_DELAY = 0.5  # Delay between batches in seconds
-
-import time
 
 
 def fetch_nutrition_batch(urls: list[str]) -> dict[str, dict]:

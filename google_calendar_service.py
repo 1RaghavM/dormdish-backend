@@ -5,7 +5,7 @@ Handles OAuth, event reading, time slot detection, and meal plan exports
 
 import datetime
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request

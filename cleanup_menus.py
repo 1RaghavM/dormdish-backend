@@ -16,7 +16,6 @@ hi="hi"
 import os
 import argparse
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 try:
     from supabase import create_client

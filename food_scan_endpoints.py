@@ -37,7 +37,6 @@ They follow the same patterns as the barcode/lookup and food-log endpoints.
 import logging
 import re
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from fastapi import UploadFile, File, Form, HTTPException, Depends
 from typing import Optional
 
