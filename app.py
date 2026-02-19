@@ -3725,16 +3725,20 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             preferred_dining_hall=meal_plan_request.dining_hall,
             dietary_preference=authenticated_user.get('dietary_preference'),
         )
-        metrics = calculate_bmr_tdee(
+        metrics = calculate_extended_metrics(
             age=user.age,
             height_feet=user.height_feet,
             height_inches=user.height_inches,
             weight_lbs=user.weight_lbs,
             gender=authenticated_user.get('gender'),
             activity_level=user.activity_level,
+            goal=user.goal,
+            goal_weight_lbs=float(authenticated_user['goal_weight_lbs']) if authenticated_user.get('goal_weight_lbs') else None,
+            weight_change_speed=authenticated_user.get('weight_change_speed'),
         )
         user_bmr = float(metrics["bmr"])
         user_tdee = float(metrics["tdee"])
+        user_daily_calorie_target = int(metrics["daily_calorie_target"])
         user_act_breakdown = metrics.get("activity_breakdown", {})
 
         stored_bmr = authenticated_user.get("bmr")
@@ -3807,14 +3811,9 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
 
         
         goal_mode = user.goal.lower()
-        if goal_mode == 'cut':
-            calorie_target = int(round(user_tdee * 0.85))
-        elif goal_mode == 'bulk':
-            calorie_target = int(round(user_tdee * 1.10))
-        else:
-            calorie_target = int(round(user_tdee))
+        calorie_target = user_daily_calorie_target
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
-        
+
         # Calculate fat and carbs targets
         macro_targets = calculate_macro_targets(
             weight_lbs=user.weight_lbs,
@@ -4169,16 +4168,20 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             dietary_preference=authenticated_user.get('dietary_preference'),
         )
         
-        metrics = calculate_bmr_tdee(
+        metrics = calculate_extended_metrics(
             age=user.age,
             height_feet=user.height_feet,
             height_inches=user.height_inches,
             weight_lbs=user.weight_lbs,
             gender=authenticated_user.get('gender'),
             activity_level=user.activity_level,
+            goal=user.goal,
+            goal_weight_lbs=float(authenticated_user['goal_weight_lbs']) if authenticated_user.get('goal_weight_lbs') else None,
+            weight_change_speed=authenticated_user.get('weight_change_speed'),
         )
         user_bmr = float(metrics["bmr"])
         user_tdee = float(metrics["tdee"])
+        user_daily_calorie_target = int(metrics["daily_calorie_target"])
 
         # Get menu data
         menu_data = await get_dining_hall_menu(meal_plan_request.dining_hall, meal_plan_request.date)
@@ -4227,12 +4230,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
 
         # Calculate targets
         goal_mode = user.goal.lower()
-        if goal_mode == 'cut':
-            calorie_target = int(round(user_tdee * 0.85))
-        elif goal_mode == 'bulk':
-            calorie_target = int(round(user_tdee * 1.10))
-        else:
-            calorie_target = int(round(user_tdee))
+        calorie_target = user_daily_calorie_target
         protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
         
         # Calculate fat and carbs targets
