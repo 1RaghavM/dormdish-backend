@@ -2446,18 +2446,14 @@ async def cron_refresh_menus(
 
     Security: Allows Vercel cron calls, or manual calls with secret.
     """
-    # Check if this is a Vercel cron call (has special header)
-    is_vercel_cron = request.headers.get("x-vercel-cron") is not None
+    # Vercel cron sends Authorization: Bearer <CRON_SECRET> and User-Agent: vercel-cron/1.0
+    cron_secret = os.getenv("CRON_SECRET")
+    auth_header = request.headers.get("authorization") or ""
+    is_vercel_cron = auth_header == f"Bearer {cron_secret}" if cron_secret else False
+    is_manual_secret = (x_cron_secret == cron_secret) or (secret == cron_secret) if cron_secret else False
 
-    # Verify: either Vercel cron, or valid secret in header/query
-    if not is_vercel_cron:
-        cron_secret = os.getenv("CRON_SECRET")
-        if not cron_secret:
-            logger.error("CRON_SECRET env var not set - rejecting cron request")
-            raise HTTPException(status_code=500, detail="Server configuration error")
-        secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
-        if not secret_valid:
-            raise HTTPException(status_code=401, detail="Unauthorized - pass ?secret=YOUR_CRON_SECRET")
+    if not is_vercel_cron and not is_manual_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized - set CRON_SECRET or pass ?secret=YOUR_CRON_SECRET")
 
     print("🕐 [CRON] Starting daily menu refresh...")
     start_time = time.time()
@@ -2564,16 +2560,13 @@ async def send_daily_reminders(
     This endpoint should be called by a cron job or scheduled task.
     Accepts both GET and POST for Vercel Cron compatibility.
     """
-    # Verify: either Vercel cron, or valid secret
-    is_vercel_cron = request.headers.get("x-vercel-cron") is not None
-    if not is_vercel_cron:
-        cron_secret = os.getenv("CRON_SECRET")
-        if not cron_secret:
-            logger.error("CRON_SECRET env var not set - rejecting cron request")
-            raise HTTPException(status_code=500, detail="Server configuration error")
-        secret_valid = (x_cron_secret == cron_secret) or (secret == cron_secret)
-        if not secret_valid:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    cron_secret = os.getenv("CRON_SECRET")
+    auth_header = request.headers.get("authorization") or ""
+    is_vercel_cron = auth_header == f"Bearer {cron_secret}" if cron_secret else False
+    is_manual_secret = (x_cron_secret == cron_secret) or (secret == cron_secret) if cron_secret else False
+
+    if not is_vercel_cron and not is_manual_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         # Get all users with active push tokens
         response = supabase.table('push_tokens')\
