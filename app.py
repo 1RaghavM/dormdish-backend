@@ -2348,6 +2348,15 @@ class MealPlanRequest(BaseModel):
     dining_hall: str
     date: str
     exclude_meals: Optional[List[str]] = None
+    restaurant: Optional[str] = None  # For Atrium sub-restaurant filtering
+
+VALID_MEALS = {"breakfast", "lunch", "dinner"}
+
+class SingleMealRequest(BaseModel):
+    meal: str              # "breakfast", "lunch", or "dinner"
+    dining_hall: str
+    date: str
+    restaurant: Optional[str] = None  # For Atrium sub-restaurant
 
 class MealPlanFeedbackRequest(BaseModel):
     generation_id: str
@@ -2756,11 +2765,34 @@ ALL_DINING_HALLS = [
     ("rutgers", "busch-dining-hall", True),
     ("rutgers", "livingston-dining-commons", True),
     ("rutgers", "neilson-dining-hall", True),
+    ("rutgers", "the-atrium", True),
     # Hopkins - commented out until deployment
     # ("hopkins", "hopkins-cafe", False),
     # ("hopkins", "nolans-on-33rd", False),
     # ("hopkins", "peabody-institute", False),
 ]
+
+ATRIUM_CATEGORY_TO_RESTAURANT = {
+    "pi pizza": "PI Pizza",
+    "pi pizza toppings": "PI Pizza",
+    "mezze proteins": "Mezze",
+    "mezze bases": "Mezze",
+    "mezze toppings and sides": "Mezze",
+    "scarlet ginger": "Scarlet Ginger",
+    "scarlet ginger noodle bowl": "Scarlet Ginger",
+    "kings hawaiian": "Kings Hawaiian",
+    "three chilies": "Three Chilies",
+    "salad bar": "Salad Bar",
+    "soups": "Soups",
+    "grab and go": "Grab and Go",
+}
+
+ATRIUM_RESTAURANTS = [
+    "PI Pizza", "Mezze", "Scarlet Ginger", "Kings Hawaiian",
+    "Three Chilies", "Salad Bar", "Soups", "Grab and Go",
+]
+
+MEAL_PROPORTIONS = {"breakfast": 0.30, "lunch": 0.35, "dinner": 0.35}
 
 
 async def get_dining_hall_menu(dining_hall: str, date: str) -> dict:
@@ -2849,13 +2881,15 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         except Exception:
             return url
 
-    def _add_food_obj_from_new_schema(food: dict, items: List[dict]):
+    def _add_food_obj_from_new_schema(food: dict, items: List[dict], category: str = None):
         if not isinstance(food, dict):
             return
         name = food.get("name")
         if not name:
             return
         out_item: Dict[str, object] = {"name": title_case_name(name)}
+        if category:
+            out_item["category"] = category
         prot = food.get("g_protein")
         if prot is None:
             prot = food.get("protein_g")
@@ -2939,6 +2973,8 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                         out_item["carbs_g"] = it.get("carbs_g")
                     if it.get("serving_size"):
                         out_item["serving_size"] = it.get("serving_size")
+                    if it.get("category"):
+                        out_item["category"] = it["category"]
                     items.append(out_item)
             else:
                 if isinstance(parsed, dict):
@@ -2948,10 +2984,11 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                         for block in blocks:
                             if not isinstance(block, dict):
                                 continue
+                            block_category = block.get("category")
                             foods = block.get("foods") or []
                             if isinstance(foods, list):
                                 for food in foods:
-                                    _add_food_obj_from_new_schema(food, items)
+                                    _add_food_obj_from_new_schema(food, items, category=block_category)
 
             if items:
                 return (meal, items, None)
@@ -3009,15 +3046,22 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         warnings.append("No items parsed from FoodPro")
         raise RuntimeError("FoodPro returned zero items")
 
-    # DEBUG: Check unique_items has fat_g and carbs_g
-    print(f"🔍 UNIQUE_ITEMS COUNT: {len(unique_items)}")
-    if unique_items:
-        sample = unique_items[0]
-        print(f"🔍 UNIQUE_ITEMS SAMPLE: name={sample.get('name')}, fat_g={sample.get('fat_g', 'MISSING')}, carbs_g={sample.get('carbs_g', 'MISSING')}")
-
     meal_sources = attempt.get("meal_sources", [])
 
-    return {
+    # Map categories to restaurants for Atrium
+    present_restaurants: List[str] = []
+    if hall_slug == "the-atrium":
+        seen_restaurants: set = set()
+        for item in unique_items:
+            cat = (item.get("category") or "").strip().lower()
+            restaurant = ATRIUM_CATEGORY_TO_RESTAURANT.get(cat)
+            if restaurant:
+                item["restaurant"] = restaurant
+                if restaurant not in seen_restaurants:
+                    seen_restaurants.add(restaurant)
+                    present_restaurants.append(restaurant)
+
+    result = {
         "university": "Rutgers University",
         "hall": dining_hall,
         "hall_slug": hall_slug,
@@ -3028,6 +3072,10 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
         "error": None,
     }
+    if present_restaurants:
+        result["restaurants"] = present_restaurants
+        result["menu"]["restaurants"] = present_restaurants
+    return result
 
 
 async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: str, date: str) -> dict:
@@ -3662,6 +3710,66 @@ async def get_weight_history(
         raise HTTPException(status_code=500, detail=f"Failed to fetch weight history: {str(e)}")
 
 
+async def _get_existing_individual_meals(user_id: str, date: str) -> Dict[str, dict]:
+    """Query saved_meal_plans for individual meal entries for this user+date.
+    Returns dict like {"breakfast": {"calories": 600, "protein_g": 45, ...}}
+    """
+    def _fetch():
+        try:
+            response = supabase.table("saved_meal_plans")\
+                .select("meal_plan_data")\
+                .eq("user_id", user_id)\
+                .eq("date", date)\
+                .execute()
+            result = {}
+            for row in (response.data or []):
+                mpd = row.get("meal_plan_data") or {}
+                meal_name = mpd.get("meal")
+                if not meal_name:
+                    continue  # Skip full-day plans (no meal field)
+                totals = (mpd.get("meal_plan") or {}).get("totals") or {}
+                result[meal_name] = {
+                    "calories": float(totals.get("calories", 0)),
+                    "protein_g": float(totals.get("protein_g", 0)),
+                    "fat_g": float(totals.get("fat_g", 0)),
+                    "carbs_g": float(totals.get("carbs_g", 0)),
+                }
+            return result
+        except Exception as exc:
+            logger.warning("Failed to fetch existing individual meals: %s", exc)
+            return {}
+    return await asyncio.to_thread(_fetch)
+
+
+def _calculate_meal_targets(
+    daily_targets: Dict[str, int],
+    already_planned: Dict[str, dict],
+    requested_meal: str,
+) -> Dict[str, int]:
+    """Calculate nutrition targets for a single meal based on daily targets,
+    already-planned meals, and proportional allocation."""
+    remaining = {
+        "calories": daily_targets["calories"],
+        "protein_g": daily_targets["protein_g"],
+        "fat_g": daily_targets["fat_g"],
+        "carbs_g": daily_targets["carbs_g"],
+    }
+    for meal_totals in already_planned.values():
+        for key in remaining:
+            remaining[key] = max(0, remaining[key] - int(meal_totals.get(key, 0)))
+
+    unplanned_meals = [m for m in VALID_MEALS if m not in already_planned and m != requested_meal]
+    total_proportion = MEAL_PROPORTIONS[requested_meal] + sum(MEAL_PROPORTIONS[m] for m in unplanned_meals)
+    share = MEAL_PROPORTIONS[requested_meal] / total_proportion if total_proportion > 0 else 1.0
+
+    return {
+        "calories": max(100, int(remaining["calories"] * share)),
+        "protein_g": max(10, int(remaining["protein_g"] * share)),
+        "fat_g": max(5, int(remaining["fat_g"] * share)),
+        "carbs_g": max(10, int(remaining["carbs_g"] * share)),
+    }
+
+
 @app.post("/generate-meal-plan", summary="Generate Meal Plan")
 async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
     """Generate a meal plan for a user (authenticated) with model-provided macros and totals.
@@ -3766,11 +3874,18 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         if menu_data.get("error"):
             raise HTTPException(status_code=400, detail=menu_data.get("error"))
         items_list = menu_data.get("items", []) or []
+        if meal_plan_request.restaurant and items_list:
+            items_list = [
+                item for item in items_list
+                if (item.get("restaurant") or "").lower() == meal_plan_request.restaurant.lower()
+            ]
+            if not items_list:
+                raise HTTPException(status_code=404, detail=f"No items for restaurant '{meal_plan_request.restaurant}'")
         if not items_list:
             raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
         menu_fetch_end = time.time()
 
-        
+
         nutrition_lookup: Dict[str, dict] = {}
         allowed_for_prompt: List[dict] = []
         for raw in items_list:
@@ -3868,6 +3983,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "source_menu": menu_data,
             "allowed_items": allowed_for_prompt,
         }
+        if meal_plan_request.restaurant:
+            agent_menu_payload["restaurant"] = meal_plan_request.restaurant
         agent_nutrition_targets = {
             "calories": calorie_target,
             "protein_g": protein_target,
@@ -4189,6 +4306,13 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             raise HTTPException(status_code=400, detail=menu_data.get("error"))
         
         items_list = menu_data.get("items", []) or []
+        if meal_plan_request.restaurant and items_list:
+            items_list = [
+                item for item in items_list
+                if (item.get("restaurant") or "").lower() == meal_plan_request.restaurant.lower()
+            ]
+            if not items_list:
+                raise HTTPException(status_code=404, detail=f"No items for restaurant '{meal_plan_request.restaurant}'")
         if not items_list:
             raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
 
@@ -4278,6 +4402,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             "allowed_items": allowed_for_prompt,
             "source_menu": menu_data,
         }
+        if meal_plan_request.restaurant:
+            menu_payload["restaurant"] = meal_plan_request.restaurant
         
         nutrition_targets = {
             "calories": calorie_target,
@@ -4846,17 +4972,48 @@ async def get_supported_dining_halls():
 
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
-async def get_menu(dining_hall: str, date: str):
+async def get_menu(dining_hall: str, date: str, restaurant: Optional[str] = None):
     """Get menu for a specific dining hall and date (with Supabase caching)"""
     try:
         menu_data = await get_dining_hall_menu(dining_hall, date)
         if "error" in menu_data and menu_data["error"] is not None:
             raise HTTPException(status_code=500, detail=menu_data["error"])
+        if restaurant and menu_data.get("items"):
+            menu_data = dict(menu_data)
+            menu_data["items"] = [
+                item for item in menu_data.get("items", [])
+                if (item.get("restaurant") or "").lower() == restaurant.lower()
+            ]
         return menu_data
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch menu: {str(e)}")
+
+
+@app.get("/menu/{dining_hall}/{date}/restaurants", summary="List restaurants in a dining hall")
+async def get_menu_restaurants(dining_hall: str, date: str):
+    """Get list of restaurants available at a dining hall for a given date."""
+    try:
+        menu_data = await get_dining_hall_menu(dining_hall, date)
+        if "error" in menu_data and menu_data["error"] is not None:
+            raise HTTPException(status_code=500, detail=menu_data["error"])
+        # Use cached restaurants list if present
+        restaurants = menu_data.get("restaurants")
+        if restaurants is None:
+            # Derive from item restaurant fields as fallback
+            seen: set = set()
+            restaurants = []
+            for item in menu_data.get("items", []):
+                r = item.get("restaurant")
+                if r and r not in seen:
+                    seen.add(r)
+                    restaurants.append(r)
+        return {"restaurants": restaurants}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch restaurants: {str(e)}")
 
 
 # ==================== BARCODE LOOKUP ENDPOINT ====================
