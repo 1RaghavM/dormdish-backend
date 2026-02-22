@@ -4260,6 +4260,460 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         raise HTTPException(status_code=500, detail="Please try again.")
 
 
+@app.post("/generate-meal", summary="Generate Single Meal")
+async def generate_single_meal_route(req: SingleMealRequest, authorization: Optional[str] = Header(None)):
+    """Generate a meal plan for a single meal (breakfast, lunch, or dinner).
+
+    Rate limit: One generation per meal per day.  Already-planned meals are
+    taken into account so that the calorie / macro budget is proportional.
+    Auto-saves the result to saved_meal_plans with a ``meal`` key.
+    """
+    from meal_plan_agent import generate_meal_plan_with_agent
+    t_start = time.time()
+    menu_fetch_start = t_start
+    try:
+        # --- Validate meal name ---
+        meal_name = req.meal.lower().strip()
+        if meal_name not in VALID_MEALS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid meal '{req.meal}'. Must be one of: {', '.join(sorted(VALID_MEALS))}",
+            )
+
+        # --- Authenticate ---
+        authenticated_user = None
+        if authorization and authorization.startswith('Bearer '):
+            token = authorization.replace('Bearer ', '')
+            authenticated_user = await asyncio.to_thread(verify_session_token, token)
+        if not authenticated_user:
+            raise HTTPException(status_code=401, detail="Authentication required. Guest users not supported.")
+
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+        # --- Rate limit: check if this specific meal was already generated ---
+        already_planned = await _get_existing_individual_meals(str(authenticated_user["id"]), req.date)
+        if meal_name in already_planned:
+            raise HTTPException(
+                status_code=429,
+                detail=f"You already have a generated {meal_name} for {req.date}. Wait until tomorrow or delete the existing entry.",
+            )
+
+        # --- Build User model & calculate metrics ---
+        user = User(
+            age=authenticated_user['age'],
+            height_feet=authenticated_user['height_feet'],
+            height_inches=authenticated_user['height_inches'],
+            weight_lbs=float(authenticated_user['weight_lbs']),
+            activity_level=authenticated_user['activity_level'],
+            goal=authenticated_user['goal'],
+            preferred_dining_hall=req.dining_hall,
+            dietary_preference=authenticated_user.get('dietary_preference'),
+        )
+        metrics = calculate_extended_metrics(
+            age=user.age,
+            height_feet=user.height_feet,
+            height_inches=user.height_inches,
+            weight_lbs=user.weight_lbs,
+            gender=authenticated_user.get('gender'),
+            activity_level=user.activity_level,
+            goal=user.goal,
+            goal_weight_lbs=float(authenticated_user['goal_weight_lbs']) if authenticated_user.get('goal_weight_lbs') else None,
+            weight_change_speed=authenticated_user.get('weight_change_speed'),
+        )
+        user_bmr = float(metrics["bmr"])
+        user_tdee = float(metrics["tdee"])
+        user_daily_calorie_target = int(metrics["daily_calorie_target"])
+        user_act_breakdown = metrics.get("activity_breakdown", {})
+
+        # Persist refreshed BMR/TDEE if changed
+        stored_bmr = authenticated_user.get("bmr")
+        stored_tdee = authenticated_user.get("tdee")
+        try:
+            stored_bmr_val = float(stored_bmr) if stored_bmr is not None else None
+            stored_tdee_val = float(stored_tdee) if stored_tdee is not None else None
+        except (TypeError, ValueError):
+            stored_bmr_val, stored_tdee_val = None, None
+
+        if stored_bmr_val != user_bmr or stored_tdee_val != user_tdee:
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("users").update({
+                        "bmr": user_bmr,
+                        "tdee": user_tdee,
+                    }).eq("id", authenticated_user['id']).execute()
+                )
+                authenticated_user['bmr'] = user_bmr
+                authenticated_user['tdee'] = user_tdee
+            except Exception as update_exc:
+                print(f"⚠️ Failed to persist refreshed BMR/TDEE: {update_exc}")
+
+        # --- Daily macro targets ---
+        goal_mode = user.goal.lower()
+        calorie_target = user_daily_calorie_target
+        protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode,
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
+
+        # Subtract food log entries for the requested date
+        try:
+            food_log_result = supabase.table("food_log") \
+                .select("calories, protein_g, carbs_g, fat_g") \
+                .eq("user_id", str(authenticated_user["id"])) \
+                .eq("date", req.date) \
+                .execute()
+            if food_log_result.data:
+                logged_cal = sum(e.get("calories", 0) or 0 for e in food_log_result.data)
+                logged_pro = sum(e.get("protein_g", 0) or 0 for e in food_log_result.data)
+                logged_carb = sum(e.get("carbs_g", 0) or 0 for e in food_log_result.data)
+                logged_fat = sum(e.get("fat_g", 0) or 0 for e in food_log_result.data)
+                calorie_target = max(0, calorie_target - int(logged_cal))
+                protein_target = max(0, protein_target - int(logged_pro))
+                carbs_target = max(0, carbs_target - int(logged_carb))
+                fat_target = max(0, fat_target - int(logged_fat))
+                logger.info(f"Adjusted targets after food log: cal={calorie_target}, pro={protein_target}, carb={carbs_target}, fat={fat_target}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch food log for target adjustment: {e}")
+
+        daily_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
+        }
+
+        # --- Calculate proportional targets for this meal ---
+        meal_targets = _calculate_meal_targets(daily_targets, already_planned, meal_name)
+
+        # --- Fetch menu ---
+        menu_data = await get_dining_hall_menu(req.dining_hall, req.date)
+        if menu_data.get("error"):
+            raise HTTPException(status_code=400, detail=menu_data.get("error"))
+        items_list = menu_data.get("items", []) or []
+        if req.restaurant and items_list:
+            items_list = [
+                item for item in items_list
+                if (item.get("restaurant") or "").lower() == req.restaurant.lower()
+            ]
+            if not items_list:
+                raise HTTPException(status_code=404, detail=f"No items for restaurant '{req.restaurant}'")
+        if not items_list:
+            raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
+        menu_fetch_end = time.time()
+
+        # --- Build nutrition lookup ---
+        nutrition_lookup: Dict[str, dict] = {}
+        allowed_for_prompt: List[dict] = []
+        for raw in items_list:
+            name = (raw.get("name") or "").strip()
+            if not name:
+                continue
+            calories = raw.get("calories")
+            protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
+            calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
+            serving_size = raw.get("serving_size") or None
+            entry = {
+                "name": name,
+                "calories": float(calories),
+                "protein_g": float(protein),
+                "serving_size": serving_size,
+                "density": (protein / calories) if calories else 0.0,
+            }
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
+            key = name.upper()
+            if key not in nutrition_lookup:
+                nutrition_lookup[key] = entry
+                allowed_for_prompt.append(entry)
+
+        if len(nutrition_lookup) == 0:
+            raise HTTPException(status_code=500, detail="No usable menu items after processing")
+
+        # --- Prepare agent payloads (use meal-level targets) ---
+        selected_activity_metrics: Dict[str, Any] = {}
+        if isinstance(user_act_breakdown, dict):
+            selected_entry = user_act_breakdown.get(user.activity_level)
+            if isinstance(selected_entry, dict):
+                selected_activity_metrics = {user.activity_level: selected_entry}
+
+        agent_user_payload = {
+            "age": user.age,
+            "height_feet": user.height_feet,
+            "height_inches": user.height_inches,
+            "weight_lbs": user.weight_lbs,
+            "activity_level": user.activity_level,
+            "goal": goal_mode,
+            "dietary_preference": user.dietary_preference,
+            "bmr": user_bmr,
+            "tdee": user_tdee,
+            "activity_breakdown": selected_activity_metrics or None,
+        }
+        agent_menu_payload = {
+            "requested_dining_hall": req.dining_hall,
+            "requested_date": req.date,
+            "source_menu": menu_data,
+            "allowed_items": allowed_for_prompt,
+        }
+        if req.restaurant:
+            agent_menu_payload["restaurant"] = req.restaurant
+        agent_nutrition_targets = {
+            "calories": meal_targets["calories"],
+            "protein_g": meal_targets["protein_g"],
+            "fat_g": meal_targets["fat_g"],
+            "carbs_g": meal_targets["carbs_g"],
+            "bmr": user_bmr,
+            "tdee": user_tdee,
+            "goal": goal_mode,
+            "activity_breakdown": selected_activity_metrics or None,
+        }
+
+        # --- Retrieve user preferences ---
+        user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
+        try:
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager()
+            user_id = str(authenticated_user["id"])
+
+            favorites, dislikes, profile = await asyncio.gather(
+                preference_manager.get_favorites(user_id),
+                preference_manager.get_dislikes(user_id),
+                preference_manager.get_user_profile(user_id),
+            )
+            prefs = [profile] if profile else []
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
+        except Exception as mem_error:
+            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+            user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
+
+        # --- Call agent (exclude the other two meals) ---
+        exclude_meals = sorted(VALID_MEALS - {meal_name})
+
+        ai_start = time.time()
+        try:
+            agent_result, agent_raw_text = await generate_meal_plan_with_agent(
+                user_payload=agent_user_payload,
+                menu_payload=agent_menu_payload,
+                nutrition_targets=agent_nutrition_targets,
+                user_preferences_context=user_preferences_context,
+                exclude_meals=exclude_meals,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail="Please try again.")
+        ai_end = time.time()
+
+        plan_json = agent_result.model_dump()
+
+        # --- Post-process: fuzzy match items (only for the requested meal) ---
+        unknown_items: List[str] = []
+        used_names_global = set()
+        meal = plan_json.get("meals", {}).get(meal_name)
+        if isinstance(meal, dict):
+            new_items = []
+            for item in meal.get("items", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                nm = (item.get("name") or "").strip()
+                if not nm:
+                    continue
+                key_match = _fuzzy_lookup(nm, nutrition_lookup)
+                if not key_match:
+                    unknown_items.append(nm)
+                    continue
+                if key_match in used_names_global:
+                    continue
+                used_names_global.add(key_match)
+                servings = item.get("servings") or 1
+                try:
+                    servings = float(servings)
+                    if servings <= 0:
+                        servings = 1.0
+                except Exception:
+                    servings = 1.0
+
+                sanitized_item = {**item}
+                sanitized_item["name"] = nutrition_lookup[key_match]["name"]
+                sanitized_item["servings"] = round(servings, 2)
+                if not sanitized_item.get("serving_size"):
+                    sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
+
+                for macro_key in ("calories", "protein_g", "fat_g", "carbs_g"):
+                    value = sanitized_item.get(macro_key)
+                    if value is None:
+                        continue
+                    try:
+                        sanitized_item[macro_key] = float(value)
+                    except (TypeError, ValueError):
+                        sanitized_item[macro_key] = value
+
+                new_items.append(sanitized_item)
+            meal["items"] = new_items
+
+        dropped_items_meta = {}
+        if unknown_items:
+            dropped_items_meta['dropped_unknown'] = unknown_items
+
+        plan_json["preferences_snapshot"] = preferences_snapshot
+
+        plan_json.setdefault('goals', {})['calories'] = meal_targets["calories"]
+        plan_json['goals']['protein_g'] = meal_targets["protein_g"]
+        plan_json['goals']['fat_g'] = meal_targets["fat_g"]
+        plan_json['goals']['carbs_g'] = meal_targets["carbs_g"]
+        plan_json.setdefault('user_stats', {})['bmr'] = user_bmr
+        plan_json['user_stats']['tdee'] = user_tdee
+        plan_json['user_stats']['goal'] = goal_mode
+        plan_json['user_stats']['dietary_preference'] = user.dietary_preference or None
+        plan_json['user_stats']['activity_breakdown'] = selected_activity_metrics or None
+
+        # --- Sanitize totals ---
+        totals = plan_json.get('totals')
+        if not isinstance(totals, dict):
+            raise HTTPException(status_code=500, detail="Please try again.")
+        try:
+            final_cal = float(totals['calories'])
+            final_prot = float(totals['protein_g'])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=500, detail="Please try again.")
+        totals['calories'] = final_cal
+        totals['protein_g'] = final_prot
+
+        if 'fat_g' in totals and totals['fat_g'] is not None:
+            try:
+                totals['fat_g'] = float(totals['fat_g'])
+            except (TypeError, ValueError):
+                totals['fat_g'] = 0
+
+        if 'carbs_g' in totals and totals['carbs_g'] is not None:
+            try:
+                totals['carbs_g'] = float(totals['carbs_g'])
+            except (TypeError, ValueError):
+                totals['carbs_g'] = 0
+
+        cal_diff = final_cal - meal_targets["calories"]
+        prot_diff = final_prot - meal_targets["protein_g"]
+        cal_pct = (cal_diff / meal_targets["calories"] * 100) if meal_targets["calories"] else 0
+        prot_pct = (prot_diff / meal_targets["protein_g"] * 100) if meal_targets["protein_g"] else 0
+
+        print(f"📊 Single Meal ({meal_name}) Metrics:")
+        print(f"   Calories: {final_cal:.0f} / {meal_targets['calories']} ({cal_pct:+.1f}%)")
+        print(f"   Protein:  {final_prot:.0f}g / {meal_targets['protein_g']}g ({prot_pct:+.1f}%)")
+        if totals.get('fat_g'):
+            print(f"   Fat:      {totals['fat_g']:.0f}g")
+        if totals.get('carbs_g'):
+            print(f"   Carbs:    {totals['carbs_g']:.0f}g")
+
+        if not plan_json.get('explanation'):
+            plan_json['explanation'] = f"Balanced {meal_name} targeting protein and calories with available items."
+
+        t_end = time.time()
+        menu_fetch_time = menu_fetch_end - menu_fetch_start
+        ai_time = ai_end - ai_start
+        total_time = t_end - t_start
+
+        generation_id = str(uuid4())
+        meta_payload = {
+            'agent_raw_response': agent_raw_text,
+            **dropped_items_meta,
+        }
+
+        response_payload = {
+            "success": True,
+            "meal": meal_name,
+            "meal_plan": plan_json,
+            "nutrition_targets": {
+                "calories": meal_targets["calories"],
+                "protein_g": meal_targets["protein_g"],
+                "fat_g": meal_targets["fat_g"],
+                "carbs_g": meal_targets["carbs_g"],
+            },
+            "daily_targets": daily_targets,
+            "already_planned": already_planned,
+            "available_items": allowed_for_prompt,
+            "preferences_snapshot": preferences_snapshot,
+            "generation_id": generation_id,
+            "processing_info": {
+                "menu_fetch_time_seconds": round(menu_fetch_time, 3),
+                "ai_generation_time_seconds": round(ai_time, 3),
+                "total_time_seconds": round(total_time, 3),
+            },
+            "meta": meta_payload,
+        }
+
+        logger.info(
+            "single_meal_timing meal=%s menu=%.2fs ai=%.2fs total=%.2fs allowed_items=%d",
+            meal_name,
+            menu_fetch_time,
+            ai_time,
+            total_time,
+            len(allowed_for_prompt),
+        )
+
+        # --- Auto-save with "meal" key in meal_plan_data ---
+        try:
+            plan_id = str(uuid4())
+            save_data = {
+                "id": plan_id,
+                "user_id": authenticated_user["id"],
+                "dining_hall": req.dining_hall,
+                "date": today,
+                "meal_plan_data": {**response_payload, "meal": meal_name},
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            }
+
+            logger.info(f"[SingleMeal] Attempting to auto-save {meal_name} for user {authenticated_user['id']} on {today}")
+            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
+
+            if save_response.data:
+                response_payload["saved_plan_id"] = plan_id
+                response_payload["auto_saved"] = True
+                logger.info(f"[SingleMeal] Auto-saved {meal_name} plan {plan_id} for user {authenticated_user['id']}")
+            else:
+                error_msg = getattr(save_response, 'error', 'Unknown error')
+                logger.error(f"[SingleMeal] Failed to auto-save - no data returned. Error: {error_msg}")
+                response_payload["auto_saved"] = False
+        except Exception as save_error:
+            logger.error(f"[SingleMeal] Auto-save failed with exception: {save_error}", exc_info=True)
+            response_payload["auto_saved"] = False
+
+        return response_payload
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        err_msg = str(e)
+        print(f"❌ Single meal generation error: {err_msg}")
+        raise HTTPException(status_code=500, detail="Please try again.")
+
+
 @app.post("/generate-meal-plan-stream", summary="Generate Meal Plan with Streaming")
 async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, authorization: Optional[str] = Header(None)):
     """Generate a meal plan with streaming updates. Streams thinking and response generation in real-time."""
@@ -4535,6 +4989,386 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         raise
     except Exception as e:
         print(f"❌ Streaming meal plan generation error: {e}")
+        raise HTTPException(status_code=500, detail="Please try again.")
+
+
+@app.post("/generate-meal-stream", summary="Generate Single Meal with Streaming")
+async def generate_single_meal_stream_route(req: SingleMealRequest, authorization: Optional[str] = Header(None)):
+    """Generate a single meal (breakfast, lunch, or dinner) with streaming updates.
+
+    Same validation, auth, rate-limiting, and auto-save as the non-streaming
+    ``/generate-meal`` endpoint, but returns Server-Sent Events so the client
+    can show real-time progress.
+    """
+    try:
+        from meal_plan_agent import generate_meal_plan_with_streaming
+
+        # --- Validate meal name ---
+        meal_name = req.meal.lower().strip()
+        if meal_name not in VALID_MEALS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid meal '{req.meal}'. Must be one of: {', '.join(sorted(VALID_MEALS))}",
+            )
+
+        # --- Authenticate ---
+        authenticated_user = None
+        if authorization and authorization.startswith('Bearer '):
+            token = authorization.replace('Bearer ', '')
+            authenticated_user = await asyncio.to_thread(verify_session_token, token)
+        if not authenticated_user:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+        # --- Rate limit: check if this specific meal was already generated ---
+        already_planned = await _get_existing_individual_meals(str(authenticated_user["id"]), req.date)
+        if meal_name in already_planned:
+            raise HTTPException(
+                status_code=429,
+                detail=f"You already have a generated {meal_name} for {req.date}. Wait until tomorrow or delete the existing entry.",
+            )
+
+        # --- Build User model & calculate metrics ---
+        user = User(
+            age=authenticated_user['age'],
+            height_feet=authenticated_user['height_feet'],
+            height_inches=authenticated_user['height_inches'],
+            weight_lbs=float(authenticated_user['weight_lbs']),
+            activity_level=authenticated_user['activity_level'],
+            goal=authenticated_user['goal'],
+            preferred_dining_hall=req.dining_hall,
+            dietary_preference=authenticated_user.get('dietary_preference'),
+        )
+        metrics = calculate_extended_metrics(
+            age=user.age,
+            height_feet=user.height_feet,
+            height_inches=user.height_inches,
+            weight_lbs=user.weight_lbs,
+            gender=authenticated_user.get('gender'),
+            activity_level=user.activity_level,
+            goal=user.goal,
+            goal_weight_lbs=float(authenticated_user['goal_weight_lbs']) if authenticated_user.get('goal_weight_lbs') else None,
+            weight_change_speed=authenticated_user.get('weight_change_speed'),
+        )
+        user_bmr = float(metrics["bmr"])
+        user_tdee = float(metrics["tdee"])
+        user_daily_calorie_target = int(metrics["daily_calorie_target"])
+
+        # --- Daily macro targets ---
+        goal_mode = user.goal.lower()
+        calorie_target = user_daily_calorie_target
+        protein_target = int(round(min(max(user.weight_lbs * 0.95, 80), user.weight_lbs * 1.1)))
+
+        macro_targets = calculate_macro_targets(
+            weight_lbs=user.weight_lbs,
+            total_calories=calorie_target,
+            protein_g=protein_target,
+            goal=goal_mode,
+        )
+        fat_target = macro_targets['fat_g']
+        carbs_target = macro_targets['carbs_g']
+
+        # Subtract food log entries for the requested date
+        try:
+            food_log_result = supabase.table("food_log") \
+                .select("calories, protein_g, carbs_g, fat_g") \
+                .eq("user_id", str(authenticated_user["id"])) \
+                .eq("date", req.date) \
+                .execute()
+            if food_log_result.data:
+                logged_cal = sum(e.get("calories", 0) or 0 for e in food_log_result.data)
+                logged_pro = sum(e.get("protein_g", 0) or 0 for e in food_log_result.data)
+                logged_carb = sum(e.get("carbs_g", 0) or 0 for e in food_log_result.data)
+                logged_fat = sum(e.get("fat_g", 0) or 0 for e in food_log_result.data)
+                calorie_target = max(0, calorie_target - int(logged_cal))
+                protein_target = max(0, protein_target - int(logged_pro))
+                carbs_target = max(0, carbs_target - int(logged_carb))
+                fat_target = max(0, fat_target - int(logged_fat))
+                logger.info(f"Adjusted targets (meal-stream) after food log: cal={calorie_target}, pro={protein_target}, carb={carbs_target}, fat={fat_target}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch food log for target adjustment: {e}")
+
+        daily_targets = {
+            "calories": calorie_target,
+            "protein_g": protein_target,
+            "fat_g": fat_target,
+            "carbs_g": carbs_target,
+        }
+
+        # --- Calculate proportional targets for this meal ---
+        meal_targets = _calculate_meal_targets(daily_targets, already_planned, meal_name)
+
+        # --- Fetch menu ---
+        menu_data = await get_dining_hall_menu(req.dining_hall, req.date)
+        if menu_data.get("error"):
+            raise HTTPException(status_code=400, detail=menu_data.get("error"))
+        items_list = menu_data.get("items", []) or []
+        if req.restaurant and items_list:
+            items_list = [
+                item for item in items_list
+                if (item.get("restaurant") or "").lower() == req.restaurant.lower()
+            ]
+            if not items_list:
+                raise HTTPException(status_code=404, detail=f"No items for restaurant '{req.restaurant}'")
+        if not items_list:
+            raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
+
+        # --- Build nutrition lookup ---
+        nutrition_lookup: Dict[str, dict] = {}
+        allowed_for_prompt: List[dict] = []
+        for raw in items_list:
+            name = (raw.get("name") or "").strip()
+            if not name:
+                continue
+            calories = raw.get("calories")
+            protein = raw.get("protein_g") or raw.get("protein") or raw.get("g_protein")
+            calories, protein = _estimate_missing_macros(calories, protein)
+            fat = raw.get("fat_g") or raw.get("g_fat")
+            carbs = raw.get("carbs_g") or raw.get("g_carbs") or raw.get("carbohydrates")
+            serving_size = raw.get("serving_size") or None
+            entry = {
+                "name": name,
+                "calories": float(calories),
+                "protein_g": float(protein),
+                "serving_size": serving_size,
+                "density": (protein / calories) if calories else 0.0,
+            }
+            if fat is not None:
+                try:
+                    entry["fat_g"] = float(fat)
+                except (TypeError, ValueError):
+                    pass
+            if carbs is not None:
+                try:
+                    entry["carbs_g"] = float(carbs)
+                except (TypeError, ValueError):
+                    pass
+            key = name.upper()
+            if key not in nutrition_lookup:
+                nutrition_lookup[key] = entry
+                allowed_for_prompt.append(entry)
+
+        if len(nutrition_lookup) == 0:
+            raise HTTPException(status_code=500, detail="No usable menu items after processing")
+
+        # --- Prepare agent payloads (use meal-level targets) ---
+        user_payload = {
+            "age": user.age,
+            "weight_lbs": user.weight_lbs,
+            "activity_level": user.activity_level,
+            "goal": goal_mode,
+            "dietary_preference": user.dietary_preference,
+        }
+
+        menu_payload = {
+            "requested_dining_hall": req.dining_hall,
+            "requested_date": req.date,
+            "allowed_items": allowed_for_prompt,
+            "source_menu": menu_data,
+        }
+        if req.restaurant:
+            menu_payload["restaurant"] = req.restaurant
+
+        nutrition_targets = {
+            "calories": meal_targets["calories"],
+            "protein_g": meal_targets["protein_g"],
+            "fat_g": meal_targets["fat_g"],
+            "carbs_g": meal_targets["carbs_g"],
+        }
+
+        # --- Retrieve user preferences ---
+        user_preferences_context = None
+        preferences_snapshot: Dict[str, Any] = {
+            "favorites": [],
+            "dislikes": [],
+            "favorite_keys": [],
+            "dislike_keys": [],
+        }
+        try:
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager()
+            user_id = str(authenticated_user["id"])
+
+            print(f"[mem0] Meal Stream - User ID from auth: {user_id}")
+            print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+
+            favorites, dislikes, profile = await asyncio.gather(
+                preference_manager.get_favorites(user_id),
+                preference_manager.get_dislikes(user_id),
+                preference_manager.get_user_profile(user_id),
+            )
+            prefs = [profile] if profile else []
+
+            print(f"[mem0] Meal Stream: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
+            if favorites:
+                print(f"[mem0] Meal Stream Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+            if dislikes:
+                print(f"[mem0] Meal Stream Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+
+            user_preferences_context = build_preference_context(prefs, favorites, dislikes)
+
+            if user_preferences_context:
+                print(f"[mem0] Meal Stream: Built preference context ({len(user_preferences_context)} chars)")
+
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
+        except Exception as mem_error:
+            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+            user_preferences_context = None
+            preferences_snapshot = {
+                "favorites": [],
+                "dislikes": [],
+                "favorite_keys": [],
+                "dislike_keys": [],
+            }
+
+        # Exclude the other two meals so the agent only generates the requested one
+        exclude_meals = sorted(VALID_MEALS - {meal_name})
+
+        async def event_generator():
+            """Generator function for Server-Sent Events"""
+            try:
+                # Yield a meal-specific thinking message first
+                thinking_msg = {"type": "thinking", "content": f"Analyzing menu items for {meal_name}..."}
+                yield f"data: {json.dumps(thinking_msg)}\n\n"
+
+                async for chunk in generate_meal_plan_with_streaming(
+                    user_payload=user_payload,
+                    menu_payload=menu_payload,
+                    nutrition_targets=nutrition_targets,
+                    user_preferences_context=user_preferences_context,
+                    exclude_meals=exclude_meals,
+                ):
+                    if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                        # Make thinking messages meal-specific
+                        content = chunk.get("content", "")
+                        if "menu items" in content.lower() and meal_name not in content.lower():
+                            chunk["content"] = f"Processing {meal_name} menu items..."
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                        continue
+
+                    if isinstance(chunk, dict) and chunk.get("type") == "complete":
+                        # --- Post-process: fuzzy match items (only for the requested meal) ---
+                        plan_data = chunk.get("meal_plan") or {}
+                        if isinstance(plan_data, dict):
+                            unknown_items: List[str] = []
+                            used_names_global = set()
+                            meal_obj = plan_data.get("meals", {}).get(meal_name)
+                            if isinstance(meal_obj, dict):
+                                new_items = []
+                                for item in meal_obj.get("items", []) or []:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    nm = (item.get("name") or "").strip()
+                                    if not nm:
+                                        continue
+                                    key_match = _fuzzy_lookup(nm, nutrition_lookup)
+                                    if not key_match:
+                                        unknown_items.append(nm)
+                                        continue
+                                    if key_match in used_names_global:
+                                        continue
+                                    used_names_global.add(key_match)
+                                    servings = item.get("servings") or 1
+                                    try:
+                                        servings = float(servings)
+                                        if servings <= 0:
+                                            servings = 1.0
+                                    except Exception:
+                                        servings = 1.0
+
+                                    sanitized_item = {**item}
+                                    sanitized_item["name"] = nutrition_lookup[key_match]["name"]
+                                    sanitized_item["servings"] = round(servings, 2)
+                                    if not sanitized_item.get("serving_size"):
+                                        sanitized_item["serving_size"] = nutrition_lookup[key_match].get("serving_size") or "1 serving"
+
+                                    for macro_key in ("calories", "protein_g", "fat_g", "carbs_g"):
+                                        value = sanitized_item.get(macro_key)
+                                        if value is None:
+                                            continue
+                                        try:
+                                            sanitized_item[macro_key] = float(value)
+                                        except (TypeError, ValueError):
+                                            sanitized_item[macro_key] = value
+
+                                    new_items.append(sanitized_item)
+                                meal_obj["items"] = new_items
+
+                            if unknown_items:
+                                plan_data.setdefault("meta", {})["dropped_unknown"] = unknown_items
+
+                            # Set goals on the plan data
+                            plan_data.setdefault("goals", {})["calories"] = meal_targets["calories"]
+                            plan_data["goals"]["protein_g"] = meal_targets["protein_g"]
+                            plan_data["goals"]["fat_g"] = meal_targets["fat_g"]
+                            plan_data["goals"]["carbs_g"] = meal_targets["carbs_g"]
+
+                        chunk["meal"] = meal_name
+                        chunk["preferences_snapshot"] = preferences_snapshot
+                        chunk["nutrition_targets"] = nutrition_targets
+                        chunk["daily_targets"] = daily_targets
+                        chunk["already_planned"] = already_planned
+
+                        # --- Auto-save with "meal" key in meal_plan_data ---
+                        try:
+                            plan_id = str(uuid4())
+                            response_payload = {
+                                "success": True,
+                                "meal": meal_name,
+                                "meal_plan": chunk.get("meal_plan"),
+                                "nutrition_targets": nutrition_targets,
+                                "daily_targets": daily_targets,
+                                "dining_hall": req.dining_hall,
+                                "date": today,
+                            }
+                            save_data = {
+                                "id": plan_id,
+                                "user_id": authenticated_user["id"],
+                                "dining_hall": req.dining_hall,
+                                "date": today,
+                                "meal_plan_data": {**response_payload, "meal": meal_name},
+                                "created_at": datetime.now().isoformat(),
+                                "updated_at": datetime.now().isoformat(),
+                            }
+
+                            logger.info(f"[SingleMeal-Stream] Attempting to auto-save {meal_name} for user {authenticated_user['id']} on {today}")
+                            save_response = await asyncio.to_thread(
+                                lambda: supabase.table("saved_meal_plans").insert(save_data).execute()
+                            )
+
+                            if save_response.data:
+                                chunk["saved_plan_id"] = plan_id
+                                chunk["auto_saved"] = True
+                                logger.info(f"[SingleMeal-Stream] Auto-saved {meal_name} plan {plan_id} for user {authenticated_user['id']}")
+                            else:
+                                chunk["auto_saved"] = False
+                                logger.error(f"[SingleMeal-Stream] Failed to auto-save {meal_name} - no data returned")
+                        except Exception as save_error:
+                            chunk["auto_saved"] = False
+                            logger.error(f"[SingleMeal-Stream] Auto-save failed: {save_error}")
+
+                    # Format as SSE
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except Exception as e:
+                print(f"Streaming single meal generation error: {e}")
+                error_chunk = {"type": "error", "error": "Please try again."}
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable buffering for nginx
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Streaming single meal generation error: {e}")
         raise HTTPException(status_code=500, detail="Please try again.")
 
 
