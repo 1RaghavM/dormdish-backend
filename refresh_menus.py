@@ -40,6 +40,27 @@ ALL_DINING_HALLS = [
     ("rutgers", "busch-dining-hall", True),
     ("rutgers", "livingston-dining-commons", True),
     ("rutgers", "neilson-dining-hall", True),
+    ("rutgers", "the-atrium", True),
+]
+
+ATRIUM_CATEGORY_TO_RESTAURANT = {
+    "pi pizza": "PI Pizza",
+    "pi pizza toppings": "PI Pizza",
+    "mezze proteins": "Mezze",
+    "mezze bases": "Mezze",
+    "mezze toppings and sides": "Mezze",
+    "scarlet ginger": "Scarlet Ginger",
+    "scarlet ginger noodle bowl": "Scarlet Ginger",
+    "kings hawaiian": "Kings Hawaiian",
+    "three chilies": "Three Chilies",
+    "salad bar": "Salad Bar",
+    "soups": "Soups",
+    "grab and go": "Grab and Go",
+}
+
+ATRIUM_RESTAURANTS = [
+    "PI Pizza", "Mezze", "Scarlet Ginger", "Kings Hawaiian",
+    "Three Chilies", "Salad Bar", "Soups", "Grab and Go",
 ]
 
 LOCATION_MAP = {
@@ -115,13 +136,15 @@ def _set_meal_in_url(url: str, meal: str) -> str:
         return url
 
 
-def _add_food_obj_from_new_schema(food: dict, items: List[dict]) -> None:
+def _add_food_obj_from_new_schema(food: dict, items: List[dict], category: str = None) -> None:
     if not isinstance(food, dict):
         return
     name = food.get("name")
     if not name:
         return
     out_item: Dict[str, object] = {"name": title_case_name(name)}
+    if category:
+        out_item["category"] = category
     prot = food.get("g_protein") or food.get("protein_g")
     if prot is not None:
         out_item["protein_g"] = prot
@@ -196,6 +219,8 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
                     out_item["carbs_g"] = it["carbs_g"]
                 if it.get("serving_size"):
                     out_item["serving_size"] = it["serving_size"]
+                if it.get("category"):
+                    out_item["category"] = it["category"]
                 items.append(out_item)
         else:
             if isinstance(parsed, dict):
@@ -205,10 +230,11 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
                     for block in blocks:
                         if not isinstance(block, dict):
                             continue
+                        block_category = block.get("category")
                         foods = block.get("foods") or []
                         if isinstance(foods, list):
                             for food in foods:
-                                _add_food_obj_from_new_schema(food, items)
+                                _add_food_obj_from_new_schema(food, items, category=block_category)
 
         if items:
             return (meal, items, None)
@@ -240,7 +266,20 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
     if not unique_items:
         raise RuntimeError(f"FoodPro returned zero items for {hall_slug}")
 
-    return {
+    # Map categories to restaurants for Atrium
+    present_restaurants: List[str] = []
+    if hall_slug == "the-atrium":
+        seen_restaurants: set = set()
+        for item in unique_items:
+            cat = (item.get("category") or "").strip().lower()
+            restaurant = ATRIUM_CATEGORY_TO_RESTAURANT.get(cat)
+            if restaurant:
+                item["restaurant"] = restaurant
+                if restaurant not in seen_restaurants:
+                    seen_restaurants.add(restaurant)
+                    present_restaurants.append(restaurant)
+
+    result = {
         "university": "Rutgers University",
         "hall": hall_slug,
         "hall_slug": hall_slug,
@@ -251,6 +290,10 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
         "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
         "error": None,
     }
+    if present_restaurants:
+        result["restaurants"] = present_restaurants
+        result["menu"]["restaurants"] = present_restaurants
+    return result
 
 
 # --- Supabase persistence ---

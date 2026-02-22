@@ -19,6 +19,22 @@
           "id": "neilson",
           "name": "Neilson Dining Hall",
           "slug": "neilson-dining-hall"
+        },
+        {
+          "id": "the-atrium",
+          "name": "The Atrium",
+          "slug": "the-atrium",
+          "has_restaurants": true,
+          "restaurants": [
+            {"id": "pi-pizza", "name": "PI Pizza"},
+            {"id": "mezze", "name": "Mezze"},
+            {"id": "scarlet-ginger", "name": "Scarlet Ginger"},
+            {"id": "kings-hawaiian", "name": "Kings Hawaiian"},
+            {"id": "three-chilies", "name": "Three Chilies"},
+            {"id": "salad-bar", "name": "Salad Bar"},
+            {"id": "soups", "name": "Soups"},
+            {"id": "grab-and-go", "name": "Grab and Go"}
+          ]
         }
       ]
     },

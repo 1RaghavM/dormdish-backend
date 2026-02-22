@@ -369,6 +369,9 @@ def _build_agent_prompt(
     }
 
   dining_context = {"dining_hall": hall, "date": date}
+  restaurant = menu_payload.get("restaurant")
+  if restaurant:
+    dining_context["restaurant"] = restaurant
   if menu_meta:
     dining_context["meta"] = menu_meta
 
