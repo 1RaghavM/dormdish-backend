@@ -5537,27 +5537,47 @@ async def get_todays_meal_plan(current_user=Depends(get_current_user)):
             # Don't fail the request if cleanup fails
             print(f"⚠️ Auto-cleanup failed: {cleanup_error}")
         
-        # Query for today's meal plan
+        # Query for today's meal plans (may include full-day + individual meals)
         response = supabase.table("saved_meal_plans")\
             .select("*")\
             .eq("user_id", current_user["id"])\
             .eq("date", today)\
+            .order("created_at", desc=True)\
             .execute()
-        
+
         if not response.data or len(response.data) == 0:
             return {
                 "success": True,
                 "has_plan": False,
                 "meal_plan": None,
+                "individual_meal_plans": None,
                 "message": "No meal plan found for today"
             }
-        
-        meal_plan = response.data[0]
-        
+
+        # Separate full-day plans from individual meal plans
+        full_day_plans = []
+        individual_meals = []
+        for plan in response.data:
+            mpd = plan.get("meal_plan_data") or {}
+            if mpd.get("meal"):
+                individual_meals.append(plan)
+            else:
+                full_day_plans.append(plan)
+
+        # Deduplicate individual meals: keep only the latest per meal type
+        if individual_meals:
+            seen_meals = {}
+            for plan in individual_meals:
+                meal_key = (plan.get("meal_plan_data") or {}).get("meal")
+                if meal_key and meal_key not in seen_meals:
+                    seen_meals[meal_key] = plan  # First seen = most recent (ordered desc)
+            individual_meals = list(seen_meals.values())
+
         return {
             "success": True,
-            "has_plan": True,
-            "meal_plan": meal_plan,
+            "has_plan": bool(full_day_plans) or bool(individual_meals),
+            "meal_plan": full_day_plans[0] if full_day_plans else None,
+            "individual_meal_plans": individual_meals if individual_meals else None,
             "date": today
         }
     except Exception as e:
