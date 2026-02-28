@@ -143,7 +143,7 @@ async def analyze_food_photo(
     user_prompt = build_user_prompt(description=description)
 
     # ---- Model configuration ----
-    model_name = os.getenv("FOODSCAN_MODEL", "gemini-2.5-flash")
+    model_name = os.getenv("FOODSCAN_MODEL", "gemini-2.5-flash-lite")
     temperature = float(os.getenv("FOODSCAN_TEMPERATURE", "0.2"))
     max_tokens = int(os.getenv("FOODSCAN_MAX_TOKENS", "8000"))
     max_retries = int(os.getenv("FOODSCAN_RETRIES", "3"))
