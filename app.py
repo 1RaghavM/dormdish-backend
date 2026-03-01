@@ -5,9 +5,10 @@ import os
 import random
 import re
 import secrets
+import string
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
@@ -272,6 +273,9 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 
+REVENUECAT_SECRET_API_KEY = os.getenv("REVENUECAT_SECRET_API_KEY", "")
+REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")
+
 class _SupabaseNotConfigured:
     def table(self, *_args, **_kwargs):
         raise HTTPException(
@@ -364,6 +368,122 @@ async def get_user_push_token(user_id: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Error fetching push token for user {user_id}: {e}")
         return None
+
+
+# ===================================
+# RevenueCat Referral Helpers
+# ===================================
+
+async def grant_revenuecat_promo(user_id: str, duration: str = "weekly") -> Dict[str, Any]:
+    """
+    Grant a promotional entitlement via RevenueCat's server API.
+
+    Args:
+        user_id: The app_user_id in RevenueCat (same as our user UUID)
+        duration: "daily", "three_day", "weekly", "monthly", "two_month",
+                  "three_month", "six_month", "yearly", or "lifetime"
+
+    Returns:
+        Dictionary with success status and response data
+    """
+    if not REVENUECAT_SECRET_API_KEY:
+        logger.warning("REVENUECAT_SECRET_API_KEY not configured, skipping promo grant")
+        return {"success": False, "error": "RevenueCat not configured"}
+
+    url = f"https://api.revenuecat.com/v1/subscribers/{user_id}/entitlements/student_plan/promotional"
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT) as client:
+            response = await client.post(
+                url,
+                json={"duration": duration},
+                headers={
+                    "Authorization": f"Bearer {REVENUECAT_SECRET_API_KEY}",
+                    "Content-Type": "application/json",
+                }
+            )
+            if response.status_code in (200, 201):
+                logger.info(f"[revenuecat] promo granted user_id={user_id} duration={duration}")
+                return {"success": True, "data": response.json()}
+            else:
+                logger.error(f"[revenuecat] promo failed user_id={user_id} status={response.status_code} body={response.text}")
+                return {"success": False, "error": response.text}
+    except Exception as e:
+        logger.error(f"[revenuecat] promo exception user_id={user_id}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def check_and_fulfill_referral(user_id: str):
+    """
+    Check if a user has a pending referral event and fulfill it.
+    Called after a user's first meal plan generation or food log entry.
+    Grants 1 free week of premium to both referrer and referred user.
+    """
+    try:
+        # Find pending referral event for this user
+        event_res = supabase.table("referral_events")\
+            .select("*")\
+            .eq("referred_user_id", user_id)\
+            .eq("status", "pending")\
+            .execute()
+
+        if not event_res.data:
+            return  # No pending referral
+
+        event = event_res.data[0]
+        referrer_id = event["referrer_user_id"]
+
+        # Atomically transition from pending to rewarded (prevents double-grant)
+        update_res = supabase.table("referral_events").update({
+            "status": "rewarded",
+            "rewarded_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", event["id"]).eq("status", "pending").execute()
+
+        if not update_res.data:
+            return  # Another request already fulfilled this referral
+
+        # Grant 1 free week to both users via RevenueCat
+        referrer_result = await grant_revenuecat_promo(referrer_id, "weekly")
+        referred_result = await grant_revenuecat_promo(user_id, "weekly")
+
+        # Increment referrer's successful_referrals atomically
+        code_res = supabase.table("referral_codes").select("successful_referrals").eq("id", event["referral_code_id"]).execute()
+        if code_res.data:
+            new_count = code_res.data[0]["successful_referrals"] + 1
+            supabase.table("referral_codes").update({"successful_referrals": new_count}).eq("id", event["referral_code_id"]).execute()
+
+        # Insert reward audit records
+        for uid, rtype in [(referrer_id, "free_week"), (user_id, "free_week")]:
+            supabase.table("referral_rewards").insert({
+                "referral_event_id": event["id"],
+                "user_id": uid,
+                "reward_type": rtype,
+                "granted_via": "revenuecat_promo",
+                "duration_days": 7,
+            }).execute()
+
+        # Send push notifications
+        referrer_token = await get_user_push_token(referrer_id)
+        if referrer_token:
+            await send_push_notification(
+                referrer_token,
+                "Your friend joined DormDish!",
+                "You both earned a free week of premium",
+                data={"type": "referral_reward"},
+            )
+
+        referred_token = await get_user_push_token(user_id)
+        if referred_token:
+            await send_push_notification(
+                referred_token,
+                "Welcome to DormDish Premium!",
+                "Your free week of premium is now active",
+                data={"type": "referral_reward"},
+            )
+
+        logger.info(f"[referral] fulfilled referral: referrer={referrer_id} referred={user_id}")
+    except Exception as e:
+        logger.error(f"[referral] check_and_fulfill error for user {user_id}: {e}")
 
 
 async def check_user_has_meal_plan_today(user_id: str) -> bool:
@@ -1181,6 +1301,7 @@ class AppleIdTokenRequest(BaseModel):
     id_token: str
     # Apple may provide user info only on first authorization
     user_data: Optional[Dict[str, Any]] = None
+    real_user_status: Optional[int] = None  # 0=unsupported, 1=unknown, 2=likelyReal
 
 
 class AppleRegisterRequest(BaseModel):
@@ -1208,6 +1329,22 @@ class AppleRegisterRequest(BaseModel):
     attribution_source: Optional[str] = None
     apple_health_connected: Optional[bool] = None
     notifications_enabled: Optional[bool] = None
+    real_user_status: Optional[int] = None  # 0=unsupported, 1=unknown, 2=likelyReal
+    referral_code: Optional[str] = None
+
+
+# ── Referral Models ──
+
+class ApplyReferralCodeRequest(BaseModel):
+    code: str
+
+class ReferralCodeResponse(BaseModel):
+    success: bool
+    code: Optional[str] = None
+    has_code: bool = False
+    successful_referrals: int = 0
+    max_referrals: int = 12
+    message: Optional[str] = None
 
 
 # Password Reset Request Models
@@ -2082,6 +2219,16 @@ async def auth_apple_login(payload: AppleIdTokenRequest):
             except Exception as e:
                 print(f"[apple.login] warning: failed to link apple_sub: {e}")
 
+        # Store real_user_status if provided (only sent on first auth)
+        if payload.real_user_status is not None and not user_row.get("real_user_status"):
+            try:
+                real_status_map = {0: "unsupported", 1: "unknown", 2: "likelyReal"}
+                status_str = real_status_map.get(payload.real_user_status, "unknown")
+                supabase.table("users").update({"real_user_status": status_str}).eq("id", user_row.get("id")).execute()
+                user_row["real_user_status"] = status_str
+            except Exception as e:
+                print(f"[apple.login] warning: failed to store real_user_status: {e}")
+
         token = create_user_session(user_row.get("id"))
         if not token:
             raise HTTPException(status_code=500, detail="Failed to create session")
@@ -2189,6 +2336,8 @@ async def auth_apple_register(data: AppleRegisterRequest):
             "attribution_source": data.attribution_source,
             "apple_health_connected": data.apple_health_connected,
             "notifications_enabled": data.notifications_enabled,
+            "real_user_status": {0: "unsupported", 1: "unknown", 2: "likelyReal"}.get(data.real_user_status, "unknown") if data.real_user_status is not None else None,
+            "referred_by_code": data.referral_code,
             "auth_provider": "apple",
             # Extended computed metrics
             "height_cm": metrics.get("height_cm"),
@@ -2243,6 +2392,28 @@ async def auth_apple_register(data: AppleRegisterRequest):
         user_row["session_token"] = token
         user_row.pop('password_hash', None)
         print(f"[apple.register] success user_id={user_row.get('id')}")
+
+        # If a referral code was provided, create a pending referral event
+        if data.referral_code:
+            try:
+                code_res = supabase.table("referral_codes").select("*").eq("code", data.referral_code.upper()).eq("is_active", True).execute()
+                if code_res.data:
+                    code_row = code_res.data[0]
+                    referrer_id = code_row["user_id"]
+                    new_user_id = user_row["id"]
+                    # Don't allow self-referral
+                    if str(referrer_id) != str(new_user_id):
+                        # Check referrer hasn't hit cap
+                        if code_row["successful_referrals"] < code_row["max_referrals"]:
+                            supabase.table("referral_events").insert({
+                                "referral_code_id": code_row["id"],
+                                "referrer_user_id": referrer_id,
+                                "referred_user_id": new_user_id,
+                                "status": "pending",
+                            }).execute()
+                            print(f"[apple.register] referral event created for code={data.referral_code}")
+            except Exception as e:
+                print(f"[apple.register] warning: failed to process referral code: {e}")
 
         return {
             "success": True,
@@ -4248,7 +4419,13 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             # Don't fail the entire request if save fails
             logger.error(f"[MealPlan] ⚠️ Auto-save failed with exception: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
-        
+
+        # Check referral activation threshold
+        try:
+            await check_and_fulfill_referral(str(authenticated_user["id"]))
+        except Exception as e:
+            logger.error(f"[referral] activation check failed: {e}")
+
         return response_payload
 
     except HTTPException:
@@ -4704,6 +4881,12 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
             logger.error(f"[SingleMeal] Auto-save failed with exception: {save_error}", exc_info=True)
             response_payload["auto_saved"] = False
 
+        # Check referral activation threshold
+        try:
+            await check_and_fulfill_referral(str(authenticated_user["id"]))
+        except Exception as e:
+            logger.error(f"[referral] activation check failed: {e}")
+
         return response_payload
 
     except HTTPException:
@@ -4961,6 +5144,12 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                                 chunk["saved_plan_id"] = plan_id
                                 chunk["auto_saved"] = True
                                 logger.info(f"[MealPlan-Stream] ✅ Auto-saved meal plan {plan_id} for user {authenticated_user['id']}")
+
+                                # Check referral activation threshold
+                                try:
+                                    await check_and_fulfill_referral(str(authenticated_user["id"]))
+                                except Exception as ref_err:
+                                    logger.error(f"[referral] stream activation check failed: {ref_err}")
                             else:
                                 chunk["auto_saved"] = False
                                 logger.error(f"[MealPlan-Stream] ⚠️ Failed to auto-save meal plan - no data returned")
@@ -5341,6 +5530,12 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
                                 chunk["saved_plan_id"] = plan_id
                                 chunk["auto_saved"] = True
                                 logger.info(f"[SingleMeal-Stream] Auto-saved {meal_name} plan {plan_id} for user {authenticated_user['id']}")
+
+                                # Check referral activation threshold
+                                try:
+                                    await check_and_fulfill_referral(str(authenticated_user["id"]))
+                                except Exception as ref_err:
+                                    logger.error(f"[referral] stream activation check failed: {ref_err}")
                             else:
                                 chunk["auto_saved"] = False
                                 logger.error(f"[SingleMeal-Stream] Failed to auto-save {meal_name} - no data returned")
@@ -6028,6 +6223,12 @@ async def add_food_log_entry(
 
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to save food log entry")
+
+        # Check referral activation threshold
+        try:
+            await check_and_fulfill_referral(str(user["id"]))
+        except Exception as e:
+            logger.error(f"[referral] activation check failed: {e}")
 
         return {"success": True, "message": "Item logged", "entry": result.data[0]}
     except HTTPException:
@@ -7062,6 +7263,317 @@ async def export_meal_plan_to_calendar(
         # Return actual error message to help debugging
         error_detail = str(e) if str(e) else "Failed to export meal plan to calendar"
         raise HTTPException(status_code=500, detail="Calendar export failed")
+
+# ==================== REFERRAL ENDPOINTS ====================
+
+def _generate_referral_code() -> str:
+    """Generate a unique 6-character alphanumeric code."""
+    chars = string.ascii_uppercase + string.digits
+    # Remove ambiguous characters (0/O, 1/I/L)
+    chars = chars.replace("0", "").replace("O", "").replace("1", "").replace("I", "").replace("L", "")
+    return ''.join(secrets.choice(chars) for _ in range(6))
+
+
+@app.post("/referral/generate-code", summary="Generate or retrieve referral code")
+async def generate_referral_code(user: dict = Depends(get_current_user)):
+    """Generate a unique referral code for the authenticated user.
+    Idempotent -- returns existing code if one already exists.
+    Only users with real_user_status == 'likelyReal' can generate codes.
+    """
+    try:
+        user_id = str(user["id"])
+
+        # Check real_user_status
+        real_status = user.get("real_user_status")
+        if real_status and real_status != "likelyReal":
+            raise HTTPException(status_code=403, detail="Account not eligible for referral program")
+
+        # Check if user already has a code
+        existing = supabase.table("referral_codes").select("*").eq("user_id", user_id).execute()
+        if existing.data:
+            row = existing.data[0]
+            return {
+                "success": True,
+                "code": row["code"],
+                "has_code": True,
+                "successful_referrals": row["successful_referrals"],
+                "max_referrals": row["max_referrals"],
+            }
+
+        # Generate unique code with retry
+        for _ in range(10):
+            code = _generate_referral_code()
+            try:
+                result = supabase.table("referral_codes").insert({
+                    "user_id": user_id,
+                    "code": code,
+                }).execute()
+                if result.data:
+                    return {
+                        "success": True,
+                        "code": code,
+                        "has_code": True,
+                        "successful_referrals": 0,
+                        "max_referrals": 12,
+                    }
+            except Exception:
+                continue  # Code collision, retry
+
+        raise HTTPException(status_code=500, detail="Failed to generate referral code")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[referral.generate] error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate referral code")
+
+
+@app.get("/referral/my-code", summary="Get user's referral code and stats")
+async def get_my_referral_code(user: dict = Depends(get_current_user)):
+    """Get the authenticated user's referral code and referral stats."""
+    try:
+        user_id = str(user["id"])
+        existing = supabase.table("referral_codes").select("*").eq("user_id", user_id).execute()
+        if not existing.data:
+            return {
+                "success": True,
+                "has_code": False,
+                "code": None,
+                "successful_referrals": 0,
+                "max_referrals": 12,
+            }
+        row = existing.data[0]
+        return {
+            "success": True,
+            "has_code": True,
+            "code": row["code"],
+            "successful_referrals": row["successful_referrals"],
+            "max_referrals": row["max_referrals"],
+        }
+    except Exception as e:
+        logger.error(f"[referral.my-code] error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch referral code")
+
+
+@app.post("/referral/apply-code", summary="Apply a referral code")
+async def apply_referral_code(req: ApplyReferralCodeRequest, user: dict = Depends(get_current_user)):
+    """Apply a referral code to the authenticated user's account.
+    Creates a pending referral event. Rewards granted after activation threshold.
+    """
+    try:
+        user_id = str(user["id"])
+        code = req.code.upper().strip()
+
+        # Check user hasn't already used a referral code
+        if user.get("referred_by_code"):
+            raise HTTPException(status_code=400, detail="You've already used a referral code")
+
+        # Check real_user_status
+        real_status = user.get("real_user_status")
+        if real_status and real_status != "likelyReal":
+            raise HTTPException(status_code=403, detail="Account not eligible for referral program")
+
+        # Validate code exists and is active
+        code_res = supabase.table("referral_codes").select("*").eq("code", code).eq("is_active", True).execute()
+        if not code_res.data:
+            raise HTTPException(status_code=404, detail="Invalid referral code")
+
+        code_row = code_res.data[0]
+        referrer_id = code_row["user_id"]
+
+        # No self-referral
+        if str(referrer_id) == user_id:
+            raise HTTPException(status_code=400, detail="You cannot use your own referral code")
+
+        # Check referrer hasn't hit cap
+        if code_row["successful_referrals"] >= code_row["max_referrals"]:
+            raise HTTPException(status_code=400, detail="This referral code has reached its limit")
+
+        # Velocity check: max 3 referrals in last 24h for this referrer
+        twenty_four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        recent_res = supabase.table("referral_events")\
+            .select("id")\
+            .eq("referrer_user_id", referrer_id)\
+            .gte("referred_at", twenty_four_hours_ago)\
+            .execute()
+        if len(recent_res.data) >= 3:
+            # Flag the referrer's code
+            supabase.table("referral_codes").update({"is_active": False}).eq("id", code_row["id"]).execute()
+            raise HTTPException(status_code=429, detail="This referral code is temporarily unavailable")
+
+        # Check for existing referral event (idempotency)
+        existing_event = supabase.table("referral_events")\
+            .select("id")\
+            .eq("referred_user_id", user_id)\
+            .execute()
+        if existing_event.data:
+            raise HTTPException(status_code=400, detail="You've already used a referral code")
+
+        # Create pending referral event
+        supabase.table("referral_events").insert({
+            "referral_code_id": code_row["id"],
+            "referrer_user_id": referrer_id,
+            "referred_user_id": user_id,
+            "status": "pending",
+        }).execute()
+
+        # Update user's referred_by_code
+        supabase.table("users").update({"referred_by_code": code}).eq("id", user_id).execute()
+
+        return {
+            "success": True,
+            "message": "Referral code applied! Complete your first meal to unlock rewards for both of you.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[referral.apply] error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to apply referral code")
+
+
+@app.get("/referral/stats", summary="Get referral dashboard stats")
+async def get_referral_stats(user: dict = Depends(get_current_user)):
+    """Get detailed referral statistics for the authenticated user."""
+    try:
+        user_id = str(user["id"])
+
+        # Get user's referral code
+        code_res = supabase.table("referral_codes").select("*").eq("user_id", user_id).execute()
+        if not code_res.data:
+            return {
+                "success": True,
+                "has_code": False,
+                "code": None,
+                "successful_referrals": 0,
+                "max_referrals": 12,
+                "total_rewards_earned": {"free_weeks": 0, "free_months": 0},
+                "referrals": [],
+            }
+
+        code_row = code_res.data[0]
+
+        # Get referral events for this user as referrer
+        events_res = supabase.table("referral_events")\
+            .select("*")\
+            .eq("referrer_user_id", user_id)\
+            .order("referred_at", desc=True)\
+            .execute()
+
+        # Get rewards earned
+        rewards_res = supabase.table("referral_rewards")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+
+        free_weeks = sum(1 for r in rewards_res.data if r["reward_type"] == "free_week")
+        free_months = sum(1 for r in rewards_res.data if r["reward_type"] == "free_month")
+
+        # Build referral list with referred user names
+        referrals = []
+        for event in events_res.data:
+            referred_user_res = supabase.table("users")\
+                .select("username")\
+                .eq("id", event["referred_user_id"])\
+                .execute()
+            referred_name = referred_user_res.data[0]["username"] if referred_user_res.data else "Unknown"
+            referrals.append({
+                "referred_user": referred_name,
+                "status": event["status"],
+                "referred_at": event["referred_at"],
+                "bonus_granted": event["bonus_granted"],
+            })
+
+        return {
+            "success": True,
+            "has_code": True,
+            "code": code_row["code"],
+            "successful_referrals": code_row["successful_referrals"],
+            "max_referrals": code_row["max_referrals"],
+            "total_rewards_earned": {
+                "free_weeks": free_weeks,
+                "free_months": free_months,
+            },
+            "referrals": referrals,
+        }
+    except Exception as e:
+        logger.error(f"[referral.stats] error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch referral stats")
+
+
+@app.post("/referral/webhook/revenuecat", summary="RevenueCat webhook for referral bonus")
+async def revenuecat_webhook(request: Request):
+    """Handle RevenueCat webhook events.
+    Grants referrer a bonus free month when a referred user makes their first purchase.
+    """
+    try:
+        # Validate webhook authorization
+        auth_header = request.headers.get("Authorization")
+        if not REVENUECAT_WEBHOOK_AUTH_KEY:
+            logger.error("[referral.webhook] REVENUECAT_WEBHOOK_AUTH_KEY not configured")
+            raise HTTPException(status_code=503, detail="Webhook not configured")
+        if auth_header != f"Bearer {REVENUECAT_WEBHOOK_AUTH_KEY}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        body = await request.json()
+        event = body.get("event", {})
+        event_type = event.get("type")
+
+        # Only process initial purchases
+        if event_type != "INITIAL_PURCHASE":
+            return {"success": True, "message": f"Ignored event type: {event_type}"}
+
+        app_user_id = event.get("app_user_id")
+        if not app_user_id:
+            return {"success": True, "message": "No app_user_id in event"}
+
+        # Check if this user was referred and hasn't already triggered the bonus
+        event_res = supabase.table("referral_events")\
+            .select("*")\
+            .eq("referred_user_id", app_user_id)\
+            .eq("bonus_granted", False)\
+            .execute()
+
+        if not event_res.data:
+            return {"success": True, "message": "No pending referral bonus for this user"}
+
+        referral_event = event_res.data[0]
+        referrer_id = referral_event["referrer_user_id"]
+
+        # Grant referrer 1 free month
+        promo_result = await grant_revenuecat_promo(referrer_id, "monthly")
+
+        # Update referral event
+        supabase.table("referral_events").update({
+            "bonus_granted": True,
+            "bonus_granted_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", referral_event["id"]).execute()
+
+        # Audit record
+        supabase.table("referral_rewards").insert({
+            "referral_event_id": referral_event["id"],
+            "user_id": referrer_id,
+            "reward_type": "free_month",
+            "granted_via": "revenuecat_promo",
+            "duration_days": 30,
+        }).execute()
+
+        # Notify referrer
+        referrer_token = await get_user_push_token(referrer_id)
+        if referrer_token:
+            await send_push_notification(
+                referrer_token,
+                "You earned a free month!",
+                "Your referral subscribed to premium. Enjoy your free month!",
+                data={"type": "referral_bonus"},
+            )
+
+        logger.info(f"[referral.webhook] bonus granted to referrer={referrer_id} from referred={app_user_id}")
+        return {"success": True, "message": "Bonus granted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[referral.webhook] error: {e}")
+        return {"success": False, "error": str(e)}
+
 
 if __name__ == '__main__':
     import uvicorn
