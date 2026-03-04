@@ -2394,6 +2394,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
         print(f"[apple.register] success user_id={user_row.get('id')}")
 
         # If a referral code was provided, create a pending referral event
+        referral_reward_granted = False
         if data.referral_code:
             try:
                 code_res = supabase.table("referral_codes").select("*").eq("code", data.referral_code.upper()).eq("is_active", True).execute()
@@ -2412,6 +2413,9 @@ async def auth_apple_register(data: AppleRegisterRequest):
                                 "status": "pending",
                             }).execute()
                             print(f"[apple.register] referral event created for code={data.referral_code}")
+                            # Grant reward immediately instead of waiting for first meal plan
+                            await check_and_fulfill_referral(str(new_user_id))
+                            referral_reward_granted = True
             except Exception as e:
                 print(f"[apple.register] warning: failed to process referral code: {e}")
 
@@ -2420,6 +2424,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
             "message": "Registration successful",
             "user": user_row,
             "session_token": token,
+            "referral_reward_granted": referral_reward_granted,
         }
     except HTTPException as he:
         print(f"[apple.register] http_error status={he.status_code} detail={he.detail}")
@@ -7325,6 +7330,33 @@ async def generate_referral_code(user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"[referral.generate] error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate referral code")
+
+
+@app.get("/referral/validate-code/{code}", summary="Validate a referral code (public)")
+async def validate_referral_code(code: str):
+    """Public endpoint to check if a referral code is valid and active.
+    Used by onboarding screen before user is authenticated."""
+    try:
+        code_upper = code.strip().upper()
+        if len(code_upper) != 6:
+            return {"valid": False, "message": "Code must be 6 characters"}
+
+        code_res = supabase.table("referral_codes").select("id, is_active, successful_referrals, max_referrals").eq("code", code_upper).execute()
+
+        if not code_res.data:
+            return {"valid": False, "message": "Invalid referral code"}
+
+        row = code_res.data[0]
+        if not row["is_active"]:
+            return {"valid": False, "message": "This referral code is no longer active"}
+
+        if row["successful_referrals"] >= row["max_referrals"]:
+            return {"valid": False, "message": "This referral code has reached its limit"}
+
+        return {"valid": True, "message": "Valid referral code"}
+    except Exception as e:
+        logger.error(f"[referral.validate] error: {e}")
+        return {"valid": False, "message": "Unable to validate code"}
 
 
 @app.get("/referral/my-code", summary="Get user's referral code and stats")
