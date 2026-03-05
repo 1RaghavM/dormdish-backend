@@ -413,11 +413,12 @@ async def grant_revenuecat_promo(user_id: str, duration: str = "weekly") -> Dict
         return {"success": False, "error": str(e)}
 
 
-async def check_and_fulfill_referral(user_id: str):
+async def check_and_fulfill_referral(user_id: str) -> bool:
     """
     Check if a user has a pending referral event and fulfill it.
     Called after a user's first meal plan generation or food log entry.
     Grants 1 free week of premium to both referrer and referred user.
+    Returns True if the referred user's promo was successfully granted, False otherwise.
     """
     try:
         # Find pending referral event for this user
@@ -428,39 +429,53 @@ async def check_and_fulfill_referral(user_id: str):
             .execute()
 
         if not event_res.data:
-            return  # No pending referral
+            return False  # No pending referral
 
         event = event_res.data[0]
         referrer_id = event["referrer_user_id"]
 
-        # Atomically transition from pending to rewarded (prevents double-grant)
+        # Grant promo to the referred user FIRST — only proceed if it succeeds
+        referred_result = await grant_revenuecat_promo(user_id, "weekly")
+        if not referred_result.get("success"):
+            logger.error(f"[referral] promo failed for referred user {user_id}: {referred_result.get('error')}")
+            return False
+
+        # Referred user's promo succeeded — now mark event as rewarded
         update_res = supabase.table("referral_events").update({
             "status": "rewarded",
             "rewarded_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", event["id"]).eq("status", "pending").execute()
 
         if not update_res.data:
-            return  # Another request already fulfilled this referral
+            return True  # Another request already fulfilled this referral, but our promo call succeeded
 
-        # Grant 1 free week to both users via RevenueCat
+        # Insert audit record for the referred user
+        supabase.table("referral_rewards").insert({
+            "referral_event_id": event["id"],
+            "user_id": user_id,
+            "reward_type": "free_week",
+            "granted_via": "revenuecat_promo",
+            "duration_days": 7,
+        }).execute()
+
+        # Grant promo to the referrer (failure should not block the referred user's reward)
         referrer_result = await grant_revenuecat_promo(referrer_id, "weekly")
-        referred_result = await grant_revenuecat_promo(user_id, "weekly")
+        if referrer_result.get("success"):
+            supabase.table("referral_rewards").insert({
+                "referral_event_id": event["id"],
+                "user_id": referrer_id,
+                "reward_type": "free_week",
+                "granted_via": "revenuecat_promo",
+                "duration_days": 7,
+            }).execute()
+        else:
+            logger.error(f"[referral] promo failed for referrer {referrer_id}: {referrer_result.get('error')}")
 
-        # Increment referrer's successful_referrals atomically
+        # Increment referrer's successful_referrals
         code_res = supabase.table("referral_codes").select("successful_referrals").eq("id", event["referral_code_id"]).execute()
         if code_res.data:
             new_count = code_res.data[0]["successful_referrals"] + 1
             supabase.table("referral_codes").update({"successful_referrals": new_count}).eq("id", event["referral_code_id"]).execute()
-
-        # Insert reward audit records
-        for uid, rtype in [(referrer_id, "free_week"), (user_id, "free_week")]:
-            supabase.table("referral_rewards").insert({
-                "referral_event_id": event["id"],
-                "user_id": uid,
-                "reward_type": rtype,
-                "granted_via": "revenuecat_promo",
-                "duration_days": 7,
-            }).execute()
 
         # Send push notifications
         referrer_token = await get_user_push_token(referrer_id)
@@ -482,8 +497,10 @@ async def check_and_fulfill_referral(user_id: str):
             )
 
         logger.info(f"[referral] fulfilled referral: referrer={referrer_id} referred={user_id}")
+        return True
     except Exception as e:
         logger.error(f"[referral] check_and_fulfill error for user {user_id}: {e}")
+        return False
 
 
 async def check_user_has_meal_plan_today(user_id: str) -> bool:
@@ -2414,8 +2431,8 @@ async def auth_apple_register(data: AppleRegisterRequest):
                             }).execute()
                             print(f"[apple.register] referral event created for code={data.referral_code}")
                             # Grant reward immediately instead of waiting for first meal plan
-                            await check_and_fulfill_referral(str(new_user_id))
-                            referral_reward_granted = True
+                            reward_ok = await check_and_fulfill_referral(str(new_user_id))
+                            referral_reward_granted = reward_ok is True
             except Exception as e:
                 print(f"[apple.register] warning: failed to process referral code: {e}")
 
