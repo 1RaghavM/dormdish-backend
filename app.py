@@ -3181,6 +3181,8 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                 warnings.append(warning)
             if items:
                 meal_sources.append(meal)
+                for item in items:
+                    item["meal"] = meal
                 all_items.extend(items)
                 # DEBUG: Log first item with macros
                 if items:
@@ -6026,7 +6028,7 @@ async def get_supported_dining_halls():
 
 
 @app.get("/menu/{dining_hall}/{date}", summary="Get Dining Hall Menu")
-async def get_menu(dining_hall: str, date: str, restaurant: Optional[str] = None):
+async def get_menu(dining_hall: str, date: str, restaurant: Optional[str] = None, meal: Optional[str] = None):
     """Get menu for a specific dining hall and date (with Supabase caching)"""
     try:
         menu_data = await get_dining_hall_menu(dining_hall, date)
@@ -6038,6 +6040,14 @@ async def get_menu(dining_hall: str, date: str, restaurant: Optional[str] = None
                 item for item in menu_data.get("items", [])
                 if (item.get("restaurant") or "").lower() == restaurant.lower()
             ]
+        if meal and menu_data.get("items"):
+            items_with_meal = [item for item in menu_data["items"] if item.get("meal")]
+            if items_with_meal:
+                menu_data = dict(menu_data) if not isinstance(menu_data, dict) else menu_data
+                menu_data["items"] = [
+                    item for item in menu_data["items"]
+                    if (item.get("meal") or "").lower() == meal.lower()
+                ]
         return menu_data
     except HTTPException:
         raise
