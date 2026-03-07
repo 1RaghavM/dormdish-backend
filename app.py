@@ -390,17 +390,22 @@ async def grant_revenuecat_promo(user_id: str, duration: str = "weekly") -> Dict
         logger.warning("REVENUECAT_SECRET_API_KEY not configured, skipping promo grant")
         return {"success": False, "error": "RevenueCat not configured"}
 
-    url = f"https://api.revenuecat.com/v1/subscribers/{user_id}/entitlements/student_plan/promotional"
+    headers = {
+        "Authorization": f"Bearer {REVENUECAT_SECRET_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    subscriber_url = f"https://api.revenuecat.com/v1/subscribers/{user_id}"
+    promo_url = f"{subscriber_url}/entitlements/student_plan/promotional"
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT) as client:
+            # Ensure subscriber exists in RevenueCat (GET auto-creates if missing)
+            await client.get(subscriber_url, headers=headers)
+
             response = await client.post(
-                url,
+                promo_url,
                 json={"duration": duration},
-                headers={
-                    "Authorization": f"Bearer {REVENUECAT_SECRET_API_KEY}",
-                    "Content-Type": "application/json",
-                }
+                headers=headers,
             )
             if response.status_code in (200, 201):
                 logger.info(f"[revenuecat] promo granted user_id={user_id} duration={duration}")
