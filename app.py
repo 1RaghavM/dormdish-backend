@@ -19,7 +19,7 @@ import httpx
 import traceback
 from difflib import get_close_matches
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, Query, UploadFile, status
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
@@ -7639,6 +7639,131 @@ async def revenuecat_webhook(request: Request):
     except Exception as e:
         logger.error(f"[referral.webhook] error: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ==================== ANNOUNCEMENT ENDPOINTS ====================
+
+def _parse_version_tuple(version_str: str):
+    """Parse a version string like '1.2.3' into a comparable tuple."""
+    try:
+        return tuple(int(x) for x in version_str.split("."))
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
+
+@app.get("/api/announcements")
+async def get_announcements(
+    platform: str = Query("ios"),
+    app_version: str = Query("1.0.0"),
+    university_id: str = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Fetch active announcements filtered by targeting rules."""
+    now = datetime.utcnow().isoformat()
+
+    query = supabase.table("announcements") \
+        .select("*") \
+        .eq("is_active", True) \
+        .lte("start_date", now)
+
+    result = query.execute()
+
+    filtered = []
+    for ann in result.data:
+        # Filter expired
+        if ann.get("end_date") and ann["end_date"] < now:
+            continue
+
+        # Filter by platform
+        platforms = ann.get("target_platforms") or ["ios"]
+        if platform not in platforms:
+            continue
+
+        # Filter by min app version
+        min_version = ann.get("target_min_app_version")
+        if min_version:
+            if _parse_version_tuple(app_version) < _parse_version_tuple(min_version):
+                continue
+
+        # Filter by university
+        target_unis = ann.get("target_university_ids")
+        if target_unis and university_id and university_id not in target_unis:
+            continue
+
+        # Map to response format
+        filtered.append({
+            "id": ann["id"],
+            "type": ann["type"],
+            "title": ann["title"],
+            "body": ann.get("body"),
+            "icon_name": ann.get("icon_name"),
+            "image_url": ann.get("image_url"),
+            "cta_text": ann.get("cta_text"),
+            "cta_deeplink": ann.get("cta_deeplink"),
+            "bg_color": ann.get("bg_color"),
+            "priority": ann.get("priority", 80),
+            "source": "server",
+            "max_impressions": ann.get("max_impressions_per_user", 1),
+            "auto_dismiss_seconds": ann.get("auto_dismiss_seconds"),
+            "start_date": ann.get("start_date"),
+            "end_date": ann.get("end_date"),
+            "screen": ann.get("screen", "home"),
+        })
+
+    filtered.sort(key=lambda x: x["priority"], reverse=True)
+    return {"announcements": filtered}
+
+
+@app.post("/api/announcements")
+async def create_announcement(
+    payload: dict = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    """Create a new announcement (admin only)."""
+    result = supabase.table("announcements").insert(payload).execute()
+    return {"success": True, "announcement": result.data[0] if result.data else None}
+
+
+@app.put("/api/announcements/{announcement_id}")
+async def update_announcement(
+    announcement_id: str,
+    payload: dict = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    """Update an existing announcement (admin only)."""
+    payload["updated_at"] = datetime.utcnow().isoformat()
+    result = supabase.table("announcements").update(payload).eq("id", announcement_id).execute()
+    return {"success": True, "announcement": result.data[0] if result.data else None}
+
+
+@app.delete("/api/announcements/{announcement_id}")
+async def delete_announcement(
+    announcement_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Delete an announcement (admin only)."""
+    supabase.table("announcements").delete().eq("id", announcement_id).execute()
+    return {"success": True, "message": "Announcement deleted"}
+
+
+@app.post("/api/announcements/{announcement_id}/interact")
+async def track_announcement_interaction(
+    announcement_id: str,
+    payload: dict = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    """Track an announcement interaction (impression, tap, dismiss)."""
+    interaction_type = payload.get("interaction_type")
+    if interaction_type not in ("impression", "tap", "dismiss"):
+        raise HTTPException(status_code=400, detail="Invalid interaction type")
+
+    supabase.table("announcement_interactions").insert({
+        "announcement_id": announcement_id,
+        "user_id": user["id"],
+        "interaction_type": interaction_type,
+    }).execute()
+
+    return {"success": True}
 
 
 if __name__ == '__main__':
