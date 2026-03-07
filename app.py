@@ -2612,6 +2612,8 @@ async def health_check():
         return {
             "status": "healthy",
             "database": "connected",
+            "revenuecat_configured": bool(REVENUECAT_SECRET_API_KEY),
+            "revenuecat_webhook_configured": bool(REVENUECAT_WEBHOOK_AUTH_KEY),
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
