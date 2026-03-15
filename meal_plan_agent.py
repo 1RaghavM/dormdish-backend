@@ -770,6 +770,7 @@ async def generate_meal_plan_with_streaming(
   extra_system_messages: Optional[Sequence[str]] = None,
   user_preferences_context: Optional[str] = None,
   exclude_meals: Optional[List[str]] = None,
+  cached_content: Optional[str] = None,
 ):
   """Generate a meal plan using Gemini with streaming updates.
 
@@ -783,6 +784,7 @@ async def generate_meal_plan_with_streaming(
     extra_system_messages: Optional additional instructions (not used with Gemini)
     user_preferences_context: Optional user preferences from mem0
     exclude_meals: Optional list of meal names to exclude (e.g. ["breakfast"])
+    cached_content: Optional Gemini cache handle for context caching
 
   Yields:
     Dict with 'type' field:
@@ -794,22 +796,6 @@ async def generate_meal_plan_with_streaming(
 
   # Yield initial thinking state
   yield {"type": "thinking", "content": "Analyzing menu items and nutritional requirements..."}
-
-  prompt = _build_agent_prompt(
-    user_payload,
-    menu_payload,
-    nutrition_targets,
-    user_preferences_context=user_preferences_context,
-  )
-  prompt_chars = len(prompt)
-  allowed_items_count = len(menu_payload.get("allowed_items") or [])
-
-  print(
-    f"[meal_plan_agent] Streaming: Gemini 2.5 Flash prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
-  )
-
-  yield {"type": "thinking", "content": f"Processing {allowed_items_count} menu items..."}
 
   # Build system instructions with targets
   cal_target = nutrition_targets['calories']
@@ -839,34 +825,54 @@ async def generate_meal_plan_with_streaming(
     output_schema = '{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{{meals_schema}}},"explanation":"<str>"}}'.format(
       meals_schema=",".join(meal_schema_parts)
     )
-
-    instructions = PARTIAL_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-      cal_min=cal_min,
-      cal_max=cal_max,
-      cal_target=cal_target,
-      prot_min=prot_min,
-      prot_max=prot_max,
-      prot_target=prot_target,
-      meal_list=meal_list,
-      meal_count=meal_count,
-      output_schema=output_schema,
-    )
     response_schema = build_partial_meals_schema(include_meals)
   else:
-    instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-      cal_min=cal_min,
-      cal_max=cal_max,
-      cal_target=cal_target,
-      prot_min=prot_min,
-      prot_max=prot_max,
-      prot_target=prot_target,
-    )
+    output_schema = None
     response_schema = DormdishMealPlannerSchema
+
+  prompt = _build_agent_prompt(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+    user_preferences_context=user_preferences_context,
+    cal_min=cal_min,
+    cal_max=cal_max,
+    prot_min=prot_min,
+    prot_max=prot_max,
+    include_meals=include_meals if exclude_meals else None,
+    output_schema_hint=output_schema if (exclude_meals and len(include_meals) < 3) else None,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  print(
+    f"[meal_plan_agent] Streaming: Gemini 2.5 Flash prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
+  )
+
+  yield {"type": "thinking", "content": f"Processing {allowed_items_count} menu items..."}
+
+  # Build static system instruction (menu + rules) — only needed when no cached_content
+  static_instructions = None
+  if not cached_content:
+    allowed_items = menu_payload.get("allowed_items") or []
+    max_items_limit = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "175"))
+    menu_items_text = _render_allowed_items(allowed_items, limit=max_items_limit)
+
+    if exclude_meals and len(include_meals) < 3:
+      base_instructions = STATIC_PARTIAL_MEAL_PLAN_INSTRUCTIONS
+    else:
+      base_instructions = STATIC_MEAL_PLAN_INSTRUCTIONS
+
+    static_instructions = (
+      base_instructions
+      + "\n\nMENU (name|cal|prot|fat|carb|serving)\n"
+      + menu_items_text
+    )
 
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
-  thinking_budget = int(os.getenv("MEALPLAN_THINKING_BUDGET", "2048"))
 
   yield {"type": "thinking", "content": f"Generating meal plan targeting {cal_target} calories and {prot_target}g protein..."}
 
@@ -875,22 +881,34 @@ async def generate_meal_plan_with_streaming(
 
   for attempt in (1, 2):
     attempt_temperature = temperature if attempt == 1 else 0.1
-    attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
 
     if attempt > 1:
       yield {"type": "thinking", "content": "Refining meal plan generation..."}
 
-    # Use streaming API
+    # Build user prompt and config (same pattern as non-streaming, minus thinking_config)
+    attempt_prompt = prompt
+    config_kwargs = dict(
+      temperature=attempt_temperature,
+      max_output_tokens=max_tokens,
+      response_mime_type="application/json",
+      response_schema=response_schema,
+    )
+    # Note: streaming does NOT use thinking_config
+    if cached_content:
+      config_kwargs["cached_content"] = cached_content
+      if attempt > 1:
+        attempt_prompt = f"{prompt}\n\n{_REPAIR_INSTRUCTIONS}"
+    else:
+      attempt_system = static_instructions
+      if attempt > 1:
+        attempt_system = f"{static_instructions}\n\n{_REPAIR_INSTRUCTIONS}"
+      config_kwargs["system_instruction"] = attempt_system
+
     def call_gemini_stream():
       return _get_client().models.generate_content_stream(
         model=chosen_model,
-        contents=f"{attempt_instructions}\n\n{prompt}",
-        config=types.GenerateContentConfig(
-          temperature=attempt_temperature,
-          max_output_tokens=max_tokens,
-          response_mime_type="application/json",
-          response_schema=response_schema,
-        )
+        contents=attempt_prompt,
+        config=types.GenerateContentConfig(**config_kwargs),
       )
 
     # Retry overloaded/503 responses with backoff
@@ -1055,6 +1073,7 @@ async def generate_meal_plan_with_streaming(
       extra_system_messages=extra_system_messages,
       user_preferences_context=user_preferences_context,
       exclude_meals=exclude_meals,
+      cached_content=cached_content,
     )
     meal_plan_dict = result.model_dump()
     yield {"type": "thinking", "content": "Finalizing your meal plan..."}
