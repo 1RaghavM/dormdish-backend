@@ -534,6 +534,7 @@ async def generate_meal_plan_with_agent(
   extra_system_messages: Optional[Sequence[str]] = None,
   user_preferences_context: Optional[str] = None,
   exclude_meals: Optional[List[str]] = None,
+  cached_content: Optional[str] = None,
 ) -> Tuple[DormdishMealPlannerSchema, str]:
   """Generate a meal plan using Gemini 2.5 Flash with optional user preferences from mem0.
 
@@ -546,6 +547,7 @@ async def generate_meal_plan_with_agent(
     extra_system_messages: Optional additional instructions (not used with Gemini)
     user_preferences_context: Optional user preferences from mem0
     exclude_meals: Optional list of meal names to exclude (e.g. ["breakfast"])
+    cached_content: Optional Gemini cache handle for context caching
 
   Returns:
     Tuple of (validated meal plan schema, raw JSON string)
@@ -553,22 +555,6 @@ async def generate_meal_plan_with_agent(
   Raises:
     ValueError: If model fails to return valid JSON
   """
-
-  prompt = _build_agent_prompt(
-    user_payload,
-    menu_payload,
-    nutrition_targets,
-    user_preferences_context=user_preferences_context,
-  )
-  prompt_chars = len(prompt)
-  allowed_items_count = len(menu_payload.get("allowed_items") or [])
-
-
-  print(
-    f"[meal_plan_agent] Gemini 2.5 Flash prompt_size chars={prompt_chars} "
-    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
-  )
-
 
   cal_target = nutrition_targets['calories']
   prot_target = nutrition_targets['protein_g']
@@ -597,55 +583,85 @@ async def generate_meal_plan_with_agent(
     output_schema = '{{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{{meals_schema}}},"explanation":"<str>"}}'.format(
       meals_schema=",".join(meal_schema_parts)
     )
-
-    instructions = PARTIAL_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-      cal_min=cal_min,
-      cal_max=cal_max,
-      cal_target=cal_target,
-      prot_min=prot_min,
-      prot_max=prot_max,
-      prot_target=prot_target,
-      meal_list=meal_list,
-      meal_count=meal_count,
-      output_schema=output_schema,
-    )
     response_schema = build_partial_meals_schema(include_meals)
   else:
-    instructions = BASE_SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-      cal_min=cal_min,
-      cal_max=cal_max,
-      cal_target=cal_target,
-      prot_min=prot_min,
-      prot_max=prot_max,
-      prot_target=prot_target,
-    )
+    output_schema = None
     response_schema = DormdishMealPlannerSchema
 
+  prompt = _build_agent_prompt(
+    user_payload,
+    menu_payload,
+    nutrition_targets,
+    user_preferences_context=user_preferences_context,
+    cal_min=cal_min,
+    cal_max=cal_max,
+    prot_min=prot_min,
+    prot_max=prot_max,
+    include_meals=include_meals if exclude_meals else None,
+    output_schema_hint=output_schema if (exclude_meals and len(include_meals) < 3) else None,
+  )
+  prompt_chars = len(prompt)
+  allowed_items_count = len(menu_payload.get("allowed_items") or [])
+
+  print(
+    f"[meal_plan_agent] Gemini 2.5 Flash prompt_size chars={prompt_chars} "
+    f"approx_tokens={prompt_chars // 4} allowed_items={allowed_items_count}"
+  )
+
+  # Build static system instruction (menu + rules) — only needed when no cached_content
+  static_instructions = None
+  if not cached_content:
+    allowed_items = menu_payload.get("allowed_items") or []
+    max_items_limit = int(os.getenv("MEALPLAN_ALLOWED_ITEMS_MAX", "175"))
+    menu_items_text = _render_allowed_items(allowed_items, limit=max_items_limit)
+
+    if exclude_meals and len(include_meals) < 3:
+      base_instructions = STATIC_PARTIAL_MEAL_PLAN_INSTRUCTIONS
+    else:
+      base_instructions = STATIC_MEAL_PLAN_INSTRUCTIONS
+
+    static_instructions = (
+      base_instructions
+      + "\n\nMENU (name|cal|prot|fat|carb|serving)\n"
+      + menu_items_text
+    )
 
   chosen_model = os.getenv("MEALPLAN_MODEL", "gemini-2.5-flash")
   temperature = float(os.getenv("MEALPLAN_TEMPERATURE", "0.4"))
-  # Keep outputs bounded. Larger values encourage verbose/non-essential output and
-  # can increase failure rates. Override via env if needed.
   max_tokens = int(os.getenv("MEALPLAN_MAX_TOKENS", "15000"))
   thinking_budget = int(os.getenv("MEALPLAN_THINKING_BUDGET", "2048"))
-
 
   last_error: Optional[Exception] = None
   for attempt in (1, 2):
     attempt_temperature = temperature if attempt == 1 else 0.1
-    attempt_instructions = instructions if attempt == 1 else f"{instructions}\n\n{_REPAIR_INSTRUCTIONS}"
+
+    # Build user prompt and config.
+    # On retry: append repair instructions to contents when using cached_content
+    # (since system_instruction can't be modified), or to system_instruction
+    # when not using cached_content (matching current production behavior).
+    attempt_prompt = prompt
+    config_kwargs = dict(
+      temperature=attempt_temperature,
+      max_output_tokens=max_tokens,
+      response_mime_type="application/json",
+      response_schema=response_schema,
+      thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+    )
+    if cached_content:
+      config_kwargs["cached_content"] = cached_content
+      if attempt > 1:
+        attempt_prompt = f"{prompt}\n\n{_REPAIR_INSTRUCTIONS}"
+    else:
+      attempt_system = static_instructions
+      if attempt > 1:
+        attempt_system = f"{static_instructions}\n\n{_REPAIR_INSTRUCTIONS}"
+      config_kwargs["system_instruction"] = attempt_system
 
     def call_gemini():
       return _get_client().models.generate_content(
         model=chosen_model,
-        contents=f"{attempt_instructions}\n\n{prompt}",
-        config=types.GenerateContentConfig(
-          temperature=attempt_temperature,
-          max_output_tokens=max_tokens,
-          response_mime_type="application/json",
-          response_schema=response_schema,
-          thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-        )
+        contents=attempt_prompt,
+        config=types.GenerateContentConfig(**config_kwargs),
       )
 
     # Retry overloaded/503 responses a couple times with backoff.
@@ -671,6 +687,14 @@ async def generate_meal_plan_with_agent(
       last_error = overloaded_error or ValueError("Model did not return a response")
       continue
     raw_response = response.text or ""
+
+    # Log caching info
+    if hasattr(response, 'usage_metadata'):
+      usage = response.usage_metadata
+      cached_tokens = getattr(usage, 'cached_content_token_count', 0)
+      if cached_tokens:
+        print(f"[meal_plan_agent] Cache hit: {cached_tokens} tokens served from cache")
+
     if not raw_response.strip():
       last_error = ValueError("Model returned empty response")
       print(f"[meal_plan_agent] WARNING: Empty response (attempt={attempt})")
