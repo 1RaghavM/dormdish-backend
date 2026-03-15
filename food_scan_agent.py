@@ -108,6 +108,7 @@ async def analyze_food_photo(
     dining_hall: str,
     date: str,
     description: str | None = None,
+    cached_content: str | None = None,
 ) -> dict:
     """
     Send a food photo + dining hall menu to Gemini 2.5 Flash for analysis.
@@ -162,6 +163,19 @@ async def analyze_food_photo(
                 "No markdown, no comments, no extra text."
             )
 
+        # Build config — system_instruction and cached_content are mutually exclusive
+        config_kwargs = dict(
+            response_mime_type="application/json",
+            response_schema=FoodScanGeminiSchema,
+            temperature=attempt_temperature,
+            max_output_tokens=max_tokens,
+        )
+        if cached_content and attempt == 1:
+            # Use cached content on first attempt; fall back to system_instruction on retry
+            config_kwargs["cached_content"] = cached_content
+        else:
+            config_kwargs["system_instruction"] = attempt_system
+
         def _call_gemini():
             return client.models.generate_content(
                 model=model_name,
@@ -176,13 +190,7 @@ async def analyze_food_photo(
                         ],
                     )
                 ],
-                config=types.GenerateContentConfig(
-                    system_instruction=attempt_system,
-                    response_mime_type="application/json",
-                    response_schema=FoodScanGeminiSchema,
-                    temperature=attempt_temperature,
-                    max_output_tokens=max_tokens,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
 
         # Overload retry loop (inner)
@@ -230,6 +238,14 @@ async def analyze_food_photo(
             continue
 
         raw_text = response.text or ""
+
+        # Log caching info
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            cached_tokens = getattr(usage, 'cached_content_token_count', 0)
+            if cached_tokens:
+                logger.info("Food scan %s: %d tokens served from cache", scan_id, cached_tokens)
+
         if not raw_text.strip():
             last_error = ValueError("Model returned empty response")
             logger.warning(
