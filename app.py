@@ -4283,6 +4283,23 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "dislike_keys": [],
             }
 
+        # Look up Gemini cache handle
+        cache_name = None
+        try:
+            from menu_cache import get_cache_name
+            _mp_hall = (meal_plan_request.dining_hall or "").strip().lower()
+            _mapping = DINING_HALL_MAPPING.get(_mp_hall)
+            if _mapping:
+                _mp_univ, _mp_slug = _mapping
+                cache_name = await get_cache_name(
+                    dining_hall=_mp_slug,
+                    university=_mp_univ,
+                    date=meal_plan_request.date or today,
+                    use_case="meal_plan",
+                )
+        except Exception as e:
+            logger.debug(f"Meal plan cache lookup skipped: {e}")
+
         ai_start = time.time()
         try:
             agent_result, agent_raw_text = await generate_meal_plan_with_agent(
@@ -4291,6 +4308,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 nutrition_targets=agent_nutrition_targets,
                 user_preferences_context=user_preferences_context,
                 exclude_meals=meal_plan_request.exclude_meals,
+                cached_content=cache_name,
             )
         except ValueError as e:
             raise HTTPException(status_code=500, detail="Please try again.")
@@ -4766,6 +4784,23 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
         # --- Call agent (exclude the other two meals) ---
         exclude_meals = sorted(VALID_MEALS - {meal_name})
 
+        # Look up Gemini cache handle
+        cache_name = None
+        try:
+            from menu_cache import get_cache_name
+            _mp_hall = (req.dining_hall or "").strip().lower()
+            _mapping = DINING_HALL_MAPPING.get(_mp_hall)
+            if _mapping:
+                _mp_univ, _mp_slug = _mapping
+                cache_name = await get_cache_name(
+                    dining_hall=_mp_slug,
+                    university=_mp_univ,
+                    date=req.date or today,
+                    use_case="meal_plan",
+                )
+        except Exception as e:
+            logger.debug(f"Meal plan cache lookup skipped: {e}")
+
         ai_start = time.time()
         try:
             agent_result, agent_raw_text = await generate_meal_plan_with_agent(
@@ -4774,6 +4809,7 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
                 nutrition_targets=agent_nutrition_targets,
                 user_preferences_context=user_preferences_context,
                 exclude_meals=exclude_meals,
+                cached_content=cache_name,
             )
         except ValueError as e:
             raise HTTPException(status_code=500, detail="Please try again.")
@@ -5178,6 +5214,23 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         # Get today's date for auto-save (same timezone as other endpoints)
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 
+        # Look up Gemini cache handle
+        cache_name = None
+        try:
+            from menu_cache import get_cache_name
+            _mp_hall = (meal_plan_request.dining_hall or "").strip().lower()
+            _mapping = DINING_HALL_MAPPING.get(_mp_hall)
+            if _mapping:
+                _mp_univ, _mp_slug = _mapping
+                cache_name = await get_cache_name(
+                    dining_hall=_mp_slug,
+                    university=_mp_univ,
+                    date=meal_plan_request.date or today,
+                    use_case="meal_plan",
+                )
+        except Exception as e:
+            logger.debug(f"Meal plan cache lookup skipped: {e}")
+
         async def event_generator():
             """Generator function for Server-Sent Events"""
             try:
@@ -5187,6 +5240,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                     nutrition_targets=nutrition_targets,
                     user_preferences_context=user_preferences_context,
                     exclude_meals=meal_plan_request.exclude_meals,
+                    cached_content=cache_name,
                 ):
                     if isinstance(chunk, dict) and chunk.get("type") == "complete":
                         chunk["preferences_snapshot"] = preferences_snapshot
@@ -5496,6 +5550,23 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
         # Exclude the other two meals so the agent only generates the requested one
         exclude_meals = sorted(VALID_MEALS - {meal_name})
 
+        # Look up Gemini cache handle
+        cache_name = None
+        try:
+            from menu_cache import get_cache_name
+            _mp_hall = (req.dining_hall or "").strip().lower()
+            _mapping = DINING_HALL_MAPPING.get(_mp_hall)
+            if _mapping:
+                _mp_univ, _mp_slug = _mapping
+                cache_name = await get_cache_name(
+                    dining_hall=_mp_slug,
+                    university=_mp_univ,
+                    date=req.date or today,
+                    use_case="meal_plan",
+                )
+        except Exception as e:
+            logger.debug(f"Meal plan cache lookup skipped: {e}")
+
         async def event_generator():
             """Generator function for Server-Sent Events"""
             try:
@@ -5509,6 +5580,7 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
                     nutrition_targets=nutrition_targets,
                     user_preferences_context=user_preferences_context,
                     exclude_meals=exclude_meals,
+                    cached_content=cache_name,
                 ):
                     if isinstance(chunk, dict) and chunk.get("type") == "thinking":
                         # Make thinking messages meal-specific
