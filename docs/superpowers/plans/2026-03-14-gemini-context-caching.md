@@ -1,7 +1,5 @@
 # Gemini Context Caching Implementation Plan
 
-> **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Reduce Gemini input token costs by 50-75% by caching static menu data + system instructions using Gemini's explicit context caching API, with implicit caching as fallback.
 
 **Architecture:** A new `menu_cache.py` module manages Gemini cache lifecycle (create, lookup, cleanup). The daily cron creates caches after menu refresh. Food scan and meal plan agents accept an optional `cached_content` handle and conditionally omit `system_instruction` when using it. The meal plan agent is restructured to separate static system instructions from per-user content.
