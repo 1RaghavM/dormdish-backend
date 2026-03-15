@@ -1365,7 +1365,7 @@ class ReferralCodeResponse(BaseModel):
     code: Optional[str] = None
     has_code: bool = False
     successful_referrals: int = 0
-    max_referrals: int = 12
+    max_referrals: int = 4
     message: Optional[str] = None
 
 
@@ -2706,11 +2706,27 @@ async def cron_refresh_menus(
     elapsed = time.time() - start_time
     print(f"✅ [CRON] Menu refresh complete: {success_count} success, {fail_count} failed in {elapsed:.1f}s")
 
+    # Create Gemini context caches for refreshed halls
+    cache_summary = {"created": 0, "failed": 0, "cleaned_up": 0}
+    try:
+        from menu_cache import create_caches_for_date
+        refreshed_halls = [
+            (university, hall_slug)
+            for idx, (university, hall_slug, _is_foodpro) in enumerate(ALL_DINING_HALLS)
+            if idx < len(results) and results[idx].get("success")
+        ]
+        if refreshed_halls:
+            cache_summary = await create_caches_for_date(rutgers_date, refreshed_halls)
+            print(f"[CRON] Gemini caches: {cache_summary['created']} created, {cache_summary['failed']} failed, {cache_summary['cleaned_up']} stale cleaned")
+    except Exception as e:
+        print(f"[CRON] Gemini cache creation failed (non-fatal): {e}")
+
     return {
         "success": True,
         "message": f"Refreshed {success_count}/{len(ALL_DINING_HALLS)} menus",
         "elapsed_seconds": round(elapsed, 2),
-        "results": results
+        "results": results,
+        "cache_summary": cache_summary,
     }
 
 
@@ -7388,7 +7404,7 @@ async def generate_referral_code(user: dict = Depends(get_current_user)):
                         "code": code,
                         "has_code": True,
                         "successful_referrals": 0,
-                        "max_referrals": 12,
+                        "max_referrals": 4,
                     }
             except Exception:
                 continue  # Code collision, retry
@@ -7440,7 +7456,7 @@ async def get_my_referral_code(user: dict = Depends(get_current_user)):
                 "has_code": False,
                 "code": None,
                 "successful_referrals": 0,
-                "max_referrals": 12,
+                "max_referrals": 4,
             }
         row = existing.data[0]
         return {
@@ -7545,7 +7561,7 @@ async def get_referral_stats(user: dict = Depends(get_current_user)):
                 "has_code": False,
                 "code": None,
                 "successful_referrals": 0,
-                "max_referrals": 12,
+                "max_referrals": 4,
                 "total_rewards_earned": {"free_weeks": 0, "free_months": 0},
                 "referrals": [],
             }
