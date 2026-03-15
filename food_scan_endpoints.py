@@ -109,6 +109,21 @@ async def handle_food_scan_analyze(
         logger.error(f"Failed to fetch menu for food scan: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch dining hall menu")
 
+    # ── 4b. Look up Gemini cache handle (optional optimization) ──
+    cache_name = None
+    try:
+        from menu_cache import get_cache_name
+        from food_scan_menu import resolve_dining_hall
+        university, hall_slug = resolve_dining_hall(dining_hall)
+        cache_name = await get_cache_name(
+            dining_hall=hall_slug,
+            university=university,
+            date=date,
+            use_case="food_scan",
+        )
+    except Exception as e:
+        logger.debug(f"Cache lookup skipped: {e}")
+
     # ── 5. Analyze with Gemini ──
     from food_scan_agent import analyze_food_photo
     try:
@@ -118,6 +133,7 @@ async def handle_food_scan_analyze(
             dining_hall=dining_hall,
             date=date,
             description=description,
+            cached_content=cache_name,
         )
     except Exception as e:
         logger.error(f"Food scan analysis failed: {e}")
