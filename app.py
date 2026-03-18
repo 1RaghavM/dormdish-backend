@@ -1365,7 +1365,7 @@ class ReferralCodeResponse(BaseModel):
     code: Optional[str] = None
     has_code: bool = False
     successful_referrals: int = 0
-    max_referrals: int = 4
+    max_referrals: int = 7
     message: Optional[str] = None
 
 
@@ -7476,7 +7476,7 @@ async def generate_referral_code(user: dict = Depends(get_current_user)):
                         "code": code,
                         "has_code": True,
                         "successful_referrals": 0,
-                        "max_referrals": 4,
+                        "max_referrals": 7,
                     }
             except Exception:
                 continue  # Code collision, retry
@@ -7528,7 +7528,7 @@ async def get_my_referral_code(user: dict = Depends(get_current_user)):
                 "has_code": False,
                 "code": None,
                 "successful_referrals": 0,
-                "max_referrals": 4,
+                "max_referrals": 7,
             }
         row = existing.data[0]
         return {
@@ -7633,7 +7633,7 @@ async def get_referral_stats(user: dict = Depends(get_current_user)):
                 "has_code": False,
                 "code": None,
                 "successful_referrals": 0,
-                "max_referrals": 4,
+                "max_referrals": 7,
                 "total_rewards_earned": {"free_weeks": 0, "free_months": 0},
                 "referrals": [],
             }
