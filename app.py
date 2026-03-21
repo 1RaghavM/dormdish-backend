@@ -2883,12 +2883,12 @@ async def get_menu_from_supabase(university: str, dining_hall: str, date: str) -
     return await asyncio.to_thread(_fetch)
 
 
-async def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_data: dict) -> bool:
+async def save_menu_to_supabase(university: str, dining_hall: str, date: str, menu_data: dict, meal: str = None) -> bool:
     """Persist menu data to Supabase without blocking the event loop."""
 
     def _save() -> bool:
         try:
-            menu_id = f"{university}_{dining_hall}_{date}"
+            menu_id = f"{university}_{dining_hall}_{date}_{meal}" if meal else f"{university}_{dining_hall}_{date}"
             hall_slug = menu_data.get("hall_slug", dining_hall)
             fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
             items_count = 0
@@ -2926,6 +2926,8 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
                 "menu_data": stored_menu_data,
                 "created_at": datetime.now().isoformat(),
             }
+            if meal:
+                data_to_insert["meal"] = meal
             response = supabase.table("menus").upsert(data_to_insert).execute()
             print(f"✅ Saved menu to Supabase: {menu_id}")
             print(f"✅ Supabase response data length: {len(response.data) if response.data else 0}")
@@ -3075,6 +3077,22 @@ async def fetch_and_cache_menu(university: str, hall_slug: str, date: str, is_fo
         save_result = await save_menu_to_supabase(university, hall_slug, date, menu_data)
         item_count = len(menu_data.get("items", []))
         print(f"✅ [CRON] Cached {item_count} items for {hall_slug}")
+
+        # Save per-meal rows
+        meal_sources = (menu_data.get("menu") or {}).get("meal_sources", [])
+        all_items = menu_data.get("items", [])
+        for meal_name in meal_sources:
+            meal_items = [item for item in all_items if item.get("meal") == meal_name]
+            if not meal_items:
+                continue
+            meal_menu_data = {
+                **menu_data,
+                "items": meal_items,
+                "menu": {"items": meal_items, "meal_sources": [meal_name]},
+            }
+            await save_menu_to_supabase(university, hall_slug, date, meal_menu_data, meal=meal_name)
+            print(f"✅ [CRON] Cached {len(meal_items)} items for {hall_slug}/{meal_name}")
+
         return {"success": True, "hall": hall_slug, "items": item_count}
     except Exception as e:
         print(f"❌ [CRON] Failed to fetch {hall_slug}: {e}")
@@ -3294,6 +3312,10 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                     seen_restaurants.add(restaurant)
                     present_restaurants.append(restaurant)
 
+    # Strip category from items — only used for Atrium mapping above
+    for item in unique_items:
+        item.pop("category", None)
+
     result = {
         "university": "Rutgers University",
         "hall": dining_hall,
@@ -3360,12 +3382,14 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         try:
             items = await fetch_meal_items(api_base, hall_slug, meal_slug, date)
             if items:
-                all_items.extend(items)
                 meal_name = meal_slug.split("-")[-1] if "-" in meal_slug else meal_slug
                 if meal_name == "dinner-2":
                     meal_name = "lunch"
                 elif meal_name == "lunch-test":
                     meal_name = "lunch"
+                for item in items:
+                    item["meal"] = meal_name
+                all_items.extend(items)
                 if meal_name not in meal_sources:
                     meal_sources.append(meal_name)
             else:
@@ -4665,6 +4689,10 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
             ]
             if not items_list:
                 raise HTTPException(status_code=404, detail=f"No items for restaurant '{req.restaurant}'")
+        # Filter to only this meal's items (fall back to full menu if no tagged items)
+        meal_filtered = [item for item in items_list if item.get("meal") == meal_name]
+        if meal_filtered:
+            items_list = meal_filtered
         if not items_list:
             raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
         menu_fetch_end = time.time()
@@ -5431,6 +5459,10 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
             ]
             if not items_list:
                 raise HTTPException(status_code=404, detail=f"No items for restaurant '{req.restaurant}'")
+        # Filter to only this meal's items (fall back to full menu if no tagged items)
+        meal_filtered = [item for item in items_list if item.get("meal") == meal_name]
+        if meal_filtered:
+            items_list = meal_filtered
         if not items_list:
             raise HTTPException(status_code=404, detail="Menu has no items for given hall/date")
 
