@@ -778,15 +778,15 @@ async def generate_meal_plan_with_streaming(
     if attempt > 1:
       yield {"type": "thinking", "content": "Refining meal plan generation..."}
 
-    # Build user prompt and config (same pattern as non-streaming, minus thinking_config)
     attempt_prompt = prompt
+    thinking_budget = int(os.getenv("MEALPLAN_THINKING_BUDGET", "2048"))
     config_kwargs = dict(
       temperature=attempt_temperature,
       max_output_tokens=max_tokens,
       response_mime_type="application/json",
       response_schema=response_schema,
+      thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
     )
-    # Note: streaming does NOT use thinking_config
     if cached_content:
       config_kwargs["cached_content"] = cached_content
       if attempt > 1:
