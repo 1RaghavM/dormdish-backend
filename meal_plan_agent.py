@@ -28,6 +28,7 @@ def _get_client():
     return _client
 
 
+
 STATIC_MEAL_PLAN_INSTRUCTIONS = """You are a university dining hall nutritionist. Your task is to create ONE daily meal plan with breakfast, lunch, and dinner using ONLY the provided menu items.
 
 The user's prompt below specifies CRITICAL REQUIREMENTS including exact calorie and protein ranges. These are HARD CONSTRAINTS — the plan will be rejected if outside those ranges.
