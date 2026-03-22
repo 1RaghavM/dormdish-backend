@@ -2596,16 +2596,6 @@ class DislikeRequest(BaseModel):
     meal_type: str
     reason: Optional[str] = None
 
-class StoreBMRRequest(BaseModel):
-    bmr: float
-    dietary_restrictions: List[str]
-    goals: str
-
-class UpdateBMRRequest(BaseModel):
-    bmr: Optional[float] = None
-    dietary_restrictions: Optional[List[str]] = None
-    goals: Optional[str] = None
-
 class TokenData(BaseModel):
     user_id: str
 
@@ -6502,7 +6492,7 @@ async def food_scan_feedback(
 
 
 # ==================== PREFERENCE MANAGEMENT ENDPOINTS ====================
-# These endpoints use mem0 to store and retrieve user preferences, favorites, likes, and dislikes
+# These endpoints use Supabase to store and retrieve user preferences, favorites, and dislikes
 
 @app.post("/preferences/favorite", summary="Add item to favorites")
 async def add_favorite(
@@ -6512,34 +6502,27 @@ async def add_favorite(
     """Add a meal plan or food item to user's favorites"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
         print(f"[API] /preferences/favorite - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
         print(f"[API] Item: {favorite_data.item_name}, Type: {favorite_data.item_type}")
-        
+
         if favorite_data.item_type == "meal_plan":
-            result = await preference_manager.add_favorite_meal_plan(
+            result = preference_manager.add_favorite_meal_plan(
                 user_id=user_id,
                 meal_plan_id=favorite_data.meal_plan_id or "",
                 meal_plan_name=favorite_data.item_name,
                 meal_type=favorite_data.meal_type
             )
         else:
-            result = await preference_manager.add_favorite_food_item(
+            result = preference_manager.add_favorite_food_item(
                 user_id=user_id,
                 food_item_name=favorite_data.item_name,
                 meal_type=favorite_data.meal_type
             )
-        
-        # Log the result to debug what mem0 is returning
-        print(f"[API] mem0 add() returned: {result}")
-        print(f"[API] Result type: {type(result)}")
-        if isinstance(result, dict):
-            print(f"[API] Result keys: {result.keys()}")
-        
+
         # Only return essential info, not all memories
-        # mem0.add() should return just the new memory ID
         return {
             "status": "success",
             "message": f"Added {favorite_data.item_name} to favorites",
@@ -6560,21 +6543,18 @@ async def dislike_item(
     """Record that user dislikes a meal plan or food item"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        
-        result = await preference_manager.add_dislike(
+
+        result = preference_manager.add_dislike(
             user_id=user_id,
             item_name=dislike_data.item_name,
             item_type=dislike_data.item_type,
             meal_type=dislike_data.meal_type,
             reason=dislike_data.reason
         )
-        
-        # Log the result to debug what mem0 is returning
-        print(f"[API] mem0 add_dislike() returned: {result}")
-        
+
         # Only return essential info, not all memories
         return {
             "status": "success",
@@ -6596,14 +6576,12 @@ async def get_favorites(
     """Get all favorited items for a user"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        print(f"[API] /preferences/favorites - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
-        print(f"[API] Meal type filter: {meal_type}")
-        
-        favorites = await preference_manager.get_favorites(user_id, meal_type)
-        
+
+        favorites = preference_manager.get_favorites(user_id, meal_type)
+
         return {
             "status": "success",
             "count": len(favorites),
@@ -6614,22 +6592,52 @@ async def get_favorites(
         raise HTTPException(status_code=500, detail=f"Failed to retrieve favorites: {str(e)}")
 
 
+@app.get("/preferences/dislikes", summary="Get user's dislikes")
+async def get_dislikes_endpoint(
+    meal_type: Optional[str] = None,
+    current_user=Depends(require_premium)
+):
+    """Get all disliked items for a user"""
+    try:
+        from memory.preference_manager import PreferenceManager
+        preference_manager = PreferenceManager(supabase)
+
+        user_id = str(current_user["id"])
+
+        dislikes = preference_manager.get_dislikes(user_id, meal_type)
+
+        return {
+            "status": "success",
+            "count": len(dislikes),
+            "dislikes": dislikes
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve dislikes: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve dislikes: {str(e)}")
+
+
 @app.get("/preferences/all", summary="Get all user preferences")
 async def get_all_preferences(
     current_user=Depends(require_premium)
 ):
-    """Get all preferences (favorites, likes, dislikes, profile) for a user"""
+    """Get all preferences (favorites, dislikes, profile) for a user"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        
-        # Retrieve all preference categories (only favorites and dislikes)
-        favorites = await preference_manager.get_favorites(user_id)
-        dislikes = await preference_manager.get_dislikes(user_id)
-        profile = await preference_manager.get_user_profile(user_id)
-        
+
+        favorites = preference_manager.get_favorites(user_id)
+        dislikes = preference_manager.get_dislikes(user_id)
+
+        # Profile data from users table (already in current_user)
+        profile = {
+            "bmr": current_user.get("bmr"),
+            "dietary_preference": current_user.get("dietary_preference"),
+            "dietary_restrictions": current_user.get("dietary_restrictions"),
+            "goal": current_user.get("goal"),
+        }
+
         return {
             "status": "success",
             "user_id": user_id,
@@ -6646,89 +6654,30 @@ async def get_all_preferences(
         raise HTTPException(status_code=500, detail=f"Failed to retrieve preferences: {str(e)}")
 
 
-@app.get("/preferences/debug", summary="Debug: Get ALL raw memories from mem0")
-async def debug_all_memories(
+@app.get("/preferences/debug", summary="Debug: Get ALL raw preferences")
+async def debug_all_preferences(
     current_user=Depends(require_premium)
 ):
-    """Get ALL raw memories for debugging (shows everything stored in mem0)"""
+    """Get ALL raw preferences for debugging"""
     if os.getenv("DEBUG", "false").lower() != "true":
         raise HTTPException(status_code=404, detail="Not found")
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        
-        # Get all memories without filtering
-        all_memories = await preference_manager.get_all_memories(user_id)
-        
+
+        all_prefs = preference_manager.get_all_preferences(user_id)
+
         return {
             "status": "success",
             "user_id": user_id,
-            "total_memories": len(all_memories),
-            "memories": all_memories
+            "total_preferences": len(all_prefs),
+            "preferences": all_prefs
         }
     except Exception as e:
-        logger.error(f"Failed to retrieve debug memories: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve debug memories: {str(e)}")
-
-
-@app.post("/preferences/bmr", summary="Store user BMR and dietary info")
-async def store_user_bmr(
-    bmr_data: StoreBMRRequest,
-    current_user=Depends(require_premium)
-):
-    """Store or update user's BMR, dietary restrictions, and goals"""
-    try:
-        from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
-        user_id = str(current_user["id"])
-        
-        result = await preference_manager.store_user_bmr(
-            user_id=user_id,
-            bmr=bmr_data.bmr,
-            dietary_restrictions=bmr_data.dietary_restrictions,
-            goals=bmr_data.goals
-        )
-        
-        return {
-            "status": "success",
-            "message": "Stored BMR and dietary information",
-            "memory_result": result
-        }
-    except Exception as e:
-        logger.error(f"Failed to store BMR: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to store BMR: {str(e)}")
-
-
-@app.put("/preferences/bmr", summary="Update user BMR and dietary info")
-async def update_user_bmr_endpoint(
-    bmr_data: UpdateBMRRequest,
-    current_user=Depends(require_premium)
-):
-    """Update user's BMR, dietary restrictions, and/or goals"""
-    try:
-        from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
-        user_id = str(current_user["id"])
-        
-        result = await preference_manager.update_user_bmr(
-            user_id=user_id,
-            bmr=bmr_data.bmr,
-            dietary_restrictions=bmr_data.dietary_restrictions,
-            goals=bmr_data.goals
-        )
-        
-        return {
-            "status": "success",
-            "message": "Updated BMR and dietary information",
-            "memory_result": result
-        }
-    except Exception as e:
-        logger.error(f"Failed to update BMR: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update BMR: {str(e)}")
+        logger.error(f"Failed to retrieve debug preferences: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve debug preferences: {str(e)}")
 
 
 @app.delete("/preferences/favorite/{item_name}", summary="Remove from favorites")
@@ -6739,12 +6688,12 @@ async def remove_favorite(
     """Remove an item from user's favorites"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        
-        result = await preference_manager.remove_favorite(user_id, item_name)
-        
+
+        result = preference_manager.remove_favorite(user_id, item_name)
+
         # Return success even if not found (idempotent operation)
         # This handles cases where item was already removed or never existed
         if result.get("status") == "not_found":
@@ -6753,7 +6702,7 @@ async def remove_favorite(
                 "message": f"{item_name} not found in favorites (may have been already removed)",
                 "was_found": False
             }
-        
+
         return {
             "status": "success",
             "message": f"Removed {item_name} from favorites",
@@ -6772,12 +6721,12 @@ async def remove_dislike(
     """Remove an item from user's dislikes"""
     try:
         from memory.preference_manager import PreferenceManager
-        preference_manager = PreferenceManager()
-        
+        preference_manager = PreferenceManager(supabase)
+
         user_id = str(current_user["id"])
-        
-        result = await preference_manager.remove_dislike(user_id, item_name)
-        
+
+        result = preference_manager.remove_dislike(user_id, item_name)
+
         # Return success even if not found (idempotent operation)
         # This handles cases where item was already removed or never existed
         if result.get("status") == "not_found":
@@ -6786,7 +6735,7 @@ async def remove_dislike(
                 "message": f"{item_name} not found in dislikes (may have been already removed)",
                 "was_found": False
             }
-        
+
         return {
             "status": "success",
             "message": f"Removed {item_name} from dislikes",
