@@ -7309,14 +7309,14 @@ def _generate_referral_code() -> str:
 async def generate_referral_code(user: dict = Depends(get_current_user)):
     """Generate a unique referral code for the authenticated user.
     Idempotent -- returns existing code if one already exists.
-    Only users with real_user_status == 'likelyReal' can generate codes.
+    Users with real_user_status of likelyReal or unknown can generate codes.
     """
     try:
         user_id = str(user["id"])
 
         # Check real_user_status
         real_status = user.get("real_user_status")
-        if real_status and real_status != "likelyReal":
+        if real_status and real_status not in {"likelyReal", "unknown"}:
             raise HTTPException(status_code=403, detail="Account not eligible for referral program")
 
         # Check if user already has a code
@@ -7427,7 +7427,7 @@ async def apply_referral_code(req: ApplyReferralCodeRequest, user: dict = Depend
 
         # Check real_user_status
         real_status = user.get("real_user_status")
-        if real_status and real_status != "likelyReal":
+        if real_status and real_status not in {"likelyReal", "unknown"}:
             raise HTTPException(status_code=403, detail="Account not eligible for referral program")
 
         # Validate code exists and is active
