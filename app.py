@@ -6547,7 +6547,7 @@ async def dislike_item(
 
         user_id = str(current_user["id"])
 
-        result = preference_manager.add_dislike(
+        preference_manager.add_dislike(
             user_id=user_id,
             item_name=dislike_data.item_name,
             item_type=dislike_data.item_type,
