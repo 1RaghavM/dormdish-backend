@@ -1860,21 +1860,6 @@ async def delete_account(current_user=Depends(get_current_user)):
         except Exception as e:
             print(f"  ⚠️ Failed to delete meal plan generations: {e}")
 
-        # Delete mem0 memories (preferences, favorites, dislikes)
-        try:
-            from memory.mem0_client import get_memory_client
-            memory = get_memory_client()
-            # Get all memories for this user
-            all_memories = memory.get_all(str(user_id))
-            memories_list = all_memories.get("results", []) if isinstance(all_memories, dict) else all_memories
-            # Delete each memory
-            for mem in memories_list:
-                if isinstance(mem, dict) and mem.get("id"):
-                    memory.delete(mem["id"])
-            print(f"  ✓ Deleted {len(memories_list)} mem0 memories")
-        except Exception as e:
-            print(f"  ⚠️ Failed to delete mem0 memories: {e}")
-
         # Finally, delete the user record
         try:
             supabase.table("users").delete().eq("id", user_id).execute()
@@ -4243,7 +4228,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             "activity_breakdown": selected_activity_metrics or None,
         }
 
-        # Retrieve user preferences from mem0 (if available, premium only)
+        # Retrieve user preferences (if available, premium only)
         user_preferences_context = None
         preferences_snapshot: Dict[str, Any] = {
             "favorites": [],
@@ -4257,38 +4242,18 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             is_premium = await check_subscription_status(user_id)
             if is_premium:
                 from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager()
+                preference_manager = PreferenceManager(supabase)
 
-                print(f"[mem0] Meal Plan Generation - User ID from auth: {user_id}")
-                print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+                favorites = preference_manager.get_favorites(user_id)
+                dislikes = preference_manager.get_dislikes(user_id)
 
-                # Retrieve all preference types in parallel
-                favorites, dislikes, profile = await asyncio.gather(
-                    preference_manager.get_favorites(user_id),
-                    preference_manager.get_dislikes(user_id),
-                    preference_manager.get_user_profile(user_id),
-                )
-                prefs = [profile] if profile else []
-
-                # DEBUG: Log what was retrieved
-                print(f"[mem0] Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
-                if favorites:
-                    print(f"[mem0] Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
-                if dislikes:
-                    print(f"[mem0] Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
-
-                # Build context string for LLM
-                user_preferences_context = build_preference_context(prefs, favorites, dislikes)
-
-                if user_preferences_context:
-                    print(f"[mem0] Built preference context ({len(user_preferences_context)} chars)")
+                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
                 preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
             else:
-                print(f"[mem0] Skipping preferences for non-premium user {user_id}")
-        except Exception as mem_error:
-            # Don't fail meal plan generation if mem0 is unavailable
-            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+                print(f"Skipping preferences for non-premium user {user_id}")
+        except Exception as pref_error:
+            print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
             preferences_snapshot = {
                 "favorites": [],
@@ -4777,20 +4742,18 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
             is_premium = await check_subscription_status(user_id)
             if is_premium:
                 from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager()
+                preference_manager = PreferenceManager(supabase)
 
-                favorites, dislikes, profile = await asyncio.gather(
-                    preference_manager.get_favorites(user_id),
-                    preference_manager.get_dislikes(user_id),
-                    preference_manager.get_user_profile(user_id),
-                )
-                prefs = [profile] if profile else []
-                user_preferences_context = build_preference_context(prefs, favorites, dislikes)
+                favorites = preference_manager.get_favorites(user_id)
+                dislikes = preference_manager.get_dislikes(user_id)
+
+                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
+
                 preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
             else:
-                print(f"[mem0] Skipping preferences for non-premium user {user_id}")
-        except Exception as mem_error:
-            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+                print(f"Skipping preferences for non-premium user {user_id}")
+        except Exception as pref_error:
+            print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
             preferences_snapshot = {
                 "favorites": [],
@@ -5175,7 +5138,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             "carbs_g": carbs_target,
         }
 
-        # Retrieve user preferences from mem0 (if available, premium only)
+        # Retrieve user preferences (if available, premium only)
         user_preferences_context = None
         preferences_snapshot: Dict[str, Any] = {
             "favorites": [],
@@ -5189,38 +5152,18 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
             is_premium = await check_subscription_status(user_id)
             if is_premium:
                 from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager()
+                preference_manager = PreferenceManager(supabase)
 
-                print(f"[mem0] Streaming Generation - User ID from auth: {user_id}")
-                print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+                favorites = preference_manager.get_favorites(user_id)
+                dislikes = preference_manager.get_dislikes(user_id)
 
-                # Retrieve all preference types in parallel
-                favorites, dislikes, profile = await asyncio.gather(
-                    preference_manager.get_favorites(user_id),
-                    preference_manager.get_dislikes(user_id),
-                    preference_manager.get_user_profile(user_id),
-                )
-                prefs = [profile] if profile else []
-
-                # DEBUG: Log what was retrieved
-                print(f"[mem0] Streaming: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
-                if favorites:
-                    print(f"[mem0] Streaming Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
-                if dislikes:
-                    print(f"[mem0] Streaming Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
-
-                # Build context string for LLM
-                user_preferences_context = build_preference_context(prefs, favorites, dislikes)
-
-                if user_preferences_context:
-                    print(f"[mem0] Streaming: Built preference context ({len(user_preferences_context)} chars)")
+                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
                 preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
             else:
-                print(f"[mem0] Skipping preferences for non-premium user {user_id}")
-        except Exception as mem_error:
-            # Don't fail meal plan generation if mem0 is unavailable
-            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+                print(f"Skipping preferences for non-premium user {user_id}")
+        except Exception as pref_error:
+            print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
             preferences_snapshot = {
                 "favorites": [],
@@ -5533,34 +5476,18 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
             is_premium = await check_subscription_status(user_id)
             if is_premium:
                 from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager()
+                preference_manager = PreferenceManager(supabase)
 
-                print(f"[mem0] Meal Stream - User ID from auth: {user_id}")
-                print(f"[mem0] User email: {authenticated_user.get('email', 'N/A')}")
+                favorites = preference_manager.get_favorites(user_id)
+                dislikes = preference_manager.get_dislikes(user_id)
 
-                favorites, dislikes, profile = await asyncio.gather(
-                    preference_manager.get_favorites(user_id),
-                    preference_manager.get_dislikes(user_id),
-                    preference_manager.get_user_profile(user_id),
-                )
-                prefs = [profile] if profile else []
-
-                print(f"[mem0] Meal Stream: Retrieved {len(favorites)} favorites, {len(dislikes)} dislikes for user {user_id}")
-                if favorites:
-                    print(f"[mem0] Meal Stream Favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
-                if dislikes:
-                    print(f"[mem0] Meal Stream Dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
-
-                user_preferences_context = build_preference_context(prefs, favorites, dislikes)
-
-                if user_preferences_context:
-                    print(f"[mem0] Meal Stream: Built preference context ({len(user_preferences_context)} chars)")
+                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
                 preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
             else:
-                print(f"[mem0] Skipping preferences for non-premium user {user_id}")
-        except Exception as mem_error:
-            print(f"[mem0] Warning: Failed to retrieve preferences: {mem_error}")
+                print(f"Skipping preferences for non-premium user {user_id}")
+        except Exception as pref_error:
+            print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
             preferences_snapshot = {
                 "favorites": [],
@@ -7248,45 +7175,6 @@ async def find_meal_time_slots(
             date_obj,
             timezone="America/New_York"
         )
-        
-        # TODO: MEM0 INTEGRATION - Save meal slots to memory
-        # ====================================================
-        # Uncomment and implement the following once mem0 integration is ready:
-        #
-        # from memory.mem0_client import get_mem0_client
-        # 
-        # try:
-        #     mem0 = get_mem0_client()
-        #     day_of_week = date_obj.strftime("%A")
-        #     
-        #     # Create context for the AI
-        #     context = f"On {day_of_week}, {date_obj.isoformat()}, "
-        #     context += f"user has {len(events)} scheduled events. "
-        #     
-        #     if events:
-        #         event_summaries = [e['summary'] for e in events[:5]]  # First 5 events
-        #         context += f"Events include: {', '.join(event_summaries)}. "
-        #     
-        #     context += f"Optimal meal times found: "
-        #     for meal_type, slot in meal_slots.items():
-        #         start_time = datetime.fromisoformat(slot['start']).strftime("%I:%M %p")
-        #         context += f"{meal_type.capitalize()} at {start_time}, "
-        #     
-        #     # Save to mem0
-        #     mem0.add(
-        #         messages=[{"role": "user", "content": context}],
-        #         user_id=current_user['id'],
-        #         metadata={
-        #             "type": "meal_schedule",
-        #             "date": str(date_obj),
-        #             "day_of_week": day_of_week
-        #         }
-        #     )
-        #     logger.info(f"Saved meal slots to mem0 for user {current_user['id']}")
-        # except Exception as mem_err:
-        #     logger.warning(f"Failed to save to mem0: {mem_err}")
-        #     # Don't fail the request if mem0 fails
-        # ====================================================
         
         return {
             "success": True,
