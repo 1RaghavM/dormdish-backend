@@ -195,7 +195,7 @@ class PreferenceManager:
             .delete()
             .eq("user_id", user_id)
             .eq("category", "favorite")
-            .ilike("item_name", item_name)
+            .eq("item_name", item_name)
             .execute()
         )
         if result.data:
@@ -208,7 +208,7 @@ class PreferenceManager:
             .delete()
             .eq("user_id", user_id)
             .eq("category", "dislike")
-            .ilike("item_name", item_name)
+            .eq("item_name", item_name)
             .execute()
         )
         if result.data:
@@ -295,7 +295,9 @@ def build_preference_context(
                     )
         context_parts.append("")
 
-    if len(context_parts) <= 5:  # Only has header
+    # Only return empty if we have no user data at all
+    has_profile = any([bmr is not None, dietary_preference, dietary_restrictions, goal])
+    if not favorites and not dislikes and not has_profile:
         return ""
 
     return "\n".join(context_parts)
