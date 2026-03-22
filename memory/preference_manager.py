@@ -1,801 +1,269 @@
 """
-Preference Manager for DormDish - handles all user preference storage using mem0.
+Preference Manager for DormDish — stores user preferences in Supabase.
 
-This module provides a comprehensive interface for storing and retrieving:
-- Favorites (meal plans and food items)
-- Likes and dislikes
-- BMR and dietary preferences
-- User goals and restrictions
-
-Uses entity-based memory with user_id for proper retrieval.
+Handles favorites, dislikes, and preference context building for meal plan personalization.
 """
 
-import asyncio
 from typing import Dict, List, Optional
-from memory.mem0_client import get_memory_client
+from supabase import Client
+
+
+TABLE = "user_preferences"
+
+
+def _row_to_memory_format(row: dict) -> dict:
+    """Transform a Supabase row into the dict shape the frontend expects."""
+    category = row["category"]
+    item_name = row["item_name"]
+    meal_type = row["meal_type"]
+    item_type = row["item_type"]
+
+    if category == "favorite":
+        memory_text = f"FAVORITE: {item_name} is my favorite {meal_type} {item_type}."
+    else:
+        memory_text = f"DISLIKE: I do not like {item_name}."
+        if row.get("reason"):
+            memory_text += f" Reason: {row['reason']}"
+
+    return {
+        "id": str(row["id"]),
+        "memory": memory_text,
+        "metadata": {
+            "category": category,
+            "item_type": item_type,
+            "preference_type": item_type,
+            "meal_type": meal_type,
+            "item_name": item_name,
+            "meal_plan_id": row.get("meal_plan_id"),
+            "sentiment": "negative" if category == "dislike" else None,
+        },
+    }
 
 
 class PreferenceManager:
-    """Manages user preferences, favorites, and dietary information using mem0."""
-    
-    def __init__(self):
-        """Initialize the preference manager with mem0 client."""
-        self.memory = get_memory_client()
-    
-    def _run_sync(self, coro):
-        """
-        Run an async coroutine synchronously.
-        Handles event loop detection for compatibility.
-        """
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're in an async context, create a new task
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result()
-            else:
-                # No running loop, safe to use run
-                return loop.run_until_complete(coro)
-        except RuntimeError:
-            # No event loop exists, create one
-            return asyncio.run(coro)
-    
+    """Manages user preferences using Supabase."""
+
+    def __init__(self, supabase: Client):
+        self.supabase = supabase
+
     # ========== FAVORITES ==========
-    
-    async def add_favorite_meal_plan(
+
+    def add_favorite_meal_plan(
         self,
         user_id: str,
         meal_plan_id: str,
         meal_plan_name: str,
-        meal_type: str
+        meal_type: str,
     ) -> Dict:
-        """
-        Store a favorited meal plan using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            meal_plan_id: ID of the meal plan
-            meal_plan_name: Name/description of the meal plan
-            meal_type: Type of meal (breakfast, lunch, dinner)
-        
-        Returns:
-            Dict with memory ID and status
-        """
-        # Be VERY explicit that this is a favorite
-        messages = [
-            {
-                "role": "user",
-                "content": f"FAVORITE: {meal_plan_name} is my favorite {meal_type} meal plan. This is one of my favorite meal plans."
-            }
-        ]
-        
-        print(f"[mem0] Adding favorite meal plan for user_id: {user_id}")
-        print(f"[mem0] Item: {meal_plan_name}, Type: {meal_type}")
-        
-        # Mem0 Platform API: pass messages and user_id directly
-        # The client.add() method may be sync, so we call it in a thread
-        def _add():
-            return self.memory.add(
-                messages=messages,
-                user_id=user_id,
-                metadata={
-                    "category": "favorites",  # CRITICAL: Mark as favorite
-                    "type": "meal_plan",
-                    "meal_type": meal_type,
-                    "meal_plan_id": meal_plan_id,
-                    "item_name": meal_plan_name
-                }
+        try:
+            result = (
+                self.supabase.table(TABLE)
+                .insert(
+                    {
+                        "user_id": user_id,
+                        "category": "favorite",
+                        "item_name": meal_plan_name,
+                        "item_type": "meal_plan",
+                        "meal_type": meal_type,
+                        "meal_plan_id": meal_plan_id,
+                    }
+                )
+                .execute()
             )
-        
-        result = await asyncio.to_thread(_add)
-        print(f"[mem0] ✓ Added favorite: {result}")
-        return result
-    
-    async def add_favorite_food_item(
+            return {"status": "success", "data": result.data}
+        except Exception as e:
+            # Unique constraint violation = already favorited, treat as success
+            if "23505" in str(e) or "duplicate" in str(e).lower():
+                return {"status": "already_exists"}
+            raise
+
+    def add_favorite_food_item(
         self,
         user_id: str,
         food_item_name: str,
-        meal_type: str
+        meal_type: str,
     ) -> Dict:
-        """
-        Store a favorited individual food item using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            food_item_name: Name of the food item
-            meal_type: Type of meal (breakfast, lunch, dinner)
-        
-        Returns:
-            Dict with memory ID and status
-        """
-        # Be VERY explicit that this is a favorite
-        messages = [
-            {
-                "role": "user",
-                "content": f"FAVORITE: {food_item_name} is my favorite {meal_type} food item. This is one of my favorite food items."
-            }
-        ]
-        
-        print(f"[mem0] Adding favorite food item for user_id: {user_id}")
-        print(f"[mem0] Item: {food_item_name}, Type: {meal_type}")
-        
-        def _add():
-            return self.memory.add(
-                messages=messages,
-                user_id=user_id,
-                metadata={
-                    "category": "favorites",  # CRITICAL: Mark as favorite
-                    "type": "food_item",
-                    "meal_type": meal_type,
-                    "item_name": food_item_name
-                }
+        try:
+            result = (
+                self.supabase.table(TABLE)
+                .insert(
+                    {
+                        "user_id": user_id,
+                        "category": "favorite",
+                        "item_name": food_item_name,
+                        "item_type": "food_item",
+                        "meal_type": meal_type,
+                    }
+                )
+                .execute()
             )
-        
-        result = await asyncio.to_thread(_add)
-        print(f"[mem0] ✓ Added favorite: {result}")
-        return result
-    
+            return {"status": "success", "data": result.data}
+        except Exception as e:
+            if "23505" in str(e) or "duplicate" in str(e).lower():
+                return {"status": "already_exists"}
+            raise
+
     # ========== DISLIKES ==========
-    
-    async def add_dislike(
+
+    def add_dislike(
         self,
         user_id: str,
         item_name: str,
         item_type: str,
         meal_type: str,
-        reason: Optional[str] = None
+        reason: Optional[str] = None,
     ) -> Dict:
-        """
-        Store a dislike for a meal plan or food item using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            item_name: Name of the item disliked
-            item_type: Type of item ("meal_plan" or "food_item")
-            meal_type: Type of meal (breakfast, lunch, dinner)
-            reason: Optional reason for the dislike
-        
-        Returns:
-            Dict with memory ID and status
-        """
-        # Be VERY explicit that this is a dislike
-        content = f"DISLIKE: I do not like {item_name}. This is something I dislike."
-        if reason:
-            content += f" Reason: {reason}"
-        
-        messages = [{"role": "user", "content": content}]
-        
-        print(f"[mem0] Adding dislike for user_id: {user_id}")
-        print(f"[mem0] Item: {item_name}, Type: {item_type}, Meal: {meal_type}")
-        
-        def _add():
-            return self.memory.add(
-                messages=messages,
-                user_id=user_id,
-                metadata={
-                    "category": "dislikes",  # CRITICAL: Mark as dislike
-                    "type": item_type,
-                    "meal_type": meal_type,
-                    "item_name": item_name,
-                    "sentiment": "negative"
-                }
+        try:
+            result = (
+                self.supabase.table(TABLE)
+                .insert(
+                    {
+                        "user_id": user_id,
+                        "category": "dislike",
+                        "item_name": item_name,
+                        "item_type": item_type,
+                        "meal_type": meal_type,
+                        "reason": reason,
+                    }
+                )
+                .execute()
             )
-        
-        result = await asyncio.to_thread(_add)
-        print(f"[mem0] ✓ Added dislike: {result}")
-        return result
-    
-    # ========== BMR & DIETARY PREFERENCES ==========
-    
-    async def store_user_bmr(
-        self,
-        user_id: str,
-        bmr: float,
-        dietary_restrictions: List[str],
-        goals: str
-    ) -> Dict:
-        """
-        Store user's BMR and dietary information using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            bmr: Basal Metabolic Rate in calories
-            dietary_restrictions: List of dietary restrictions (e.g., ["vegan", "gluten-free"])
-            goals: User's fitness/health goals
-        
-        Returns:
-            Dict with memory ID and status
-        """
-        restrictions_text = ", ".join(dietary_restrictions) if dietary_restrictions else "none"
-        
-        # Be explicit about user profile
-        messages = [
-            {
-                "role": "user",
-                "content": f"USER PROFILE: My BMR is {bmr} calories per day. My dietary restrictions are: {restrictions_text}. My fitness goal is: {goals}"
-            }
-        ]
-        
-        print(f"[mem0] Storing BMR for user_id: {user_id}")
-        
-        def _add():
-            return self.memory.add(
-                messages=messages,
-                user_id=user_id,
-                metadata={
-                    "category": "user_profile",  # CRITICAL: Mark as profile
-                    "bmr": bmr,
-                    "dietary_restrictions": dietary_restrictions,
-                    "goals": goals
-                }
-            )
-        
-        result = await asyncio.to_thread(_add)
-        print(f"[mem0] ✓ Stored user profile: {result}")
-        return result
-    
-    async def update_user_bmr(
-        self,
-        user_id: str,
-        bmr: Optional[float] = None,
-        dietary_restrictions: Optional[List[str]] = None,
-        goals: Optional[str] = None
-    ) -> Dict:
-        """
-        Update user's BMR and dietary information using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            bmr: New BMR value (optional)
-            dietary_restrictions: New dietary restrictions (optional)
-            goals: New goals (optional)
-        
-        Returns:
-            Dict with update status
-        """
-        # First, search for existing user profile
-        existing = await self.get_user_profile(user_id)
-        
-        if not existing:
-            # If no profile exists, create one
-            return await self.store_user_bmr(
-                user_id,
-                bmr or 2000.0,  # Default BMR
-                dietary_restrictions or [],
-                goals or "Maintain health"
-            )
-        
-        # Build update message
-        updates = []
-        metadata = {"category": "user_profile"}  # For filtering
-        
-        if bmr is not None:
-            updates.append(f"My updated BMR is {bmr} calories")
-            metadata["bmr"] = bmr
-        
-        if dietary_restrictions is not None:
-            restrictions_text = ", ".join(dietary_restrictions) if dietary_restrictions else "none"
-            updates.append(f"My updated dietary restrictions are: {restrictions_text}")
-            metadata["dietary_restrictions"] = dietary_restrictions
-        
-        if goals is not None:
-            updates.append(f"My updated fitness goal is: {goals}")
-            metadata["goals"] = goals
-        
-        if not updates:
-            return {"status": "no_changes"}
-        
-        messages = [{"role": "user", "content": ". ".join(updates)}]
-        
-        print(f"[mem0] Updating BMR for user_id: {user_id}")
-        
-        def _add():
-            return self.memory.add(
-                messages=messages,
-                user_id=user_id,
-                metadata=metadata
-            )
-        
-        result = await asyncio.to_thread(_add)
-        print(f"[mem0] ✓ Updated user profile: {result}")
-        return result
-    
+            return {"status": "success", "data": result.data}
+        except Exception as e:
+            if "23505" in str(e) or "duplicate" in str(e).lower():
+                return {"status": "already_exists"}
+            raise
+
     # ========== RETRIEVAL ==========
-    
-    def _extract_results(self, results) -> List[Dict]:
-        """
-        Extract results from mem0 response (Platform API format).
-        
-        Args:
-            results: Response from mem0 search
-        
-        Returns:
-            List of memory dictionaries
-        """
-        if isinstance(results, dict):
-            # Platform API returns {'results': [...], ...}
-            extracted = results.get('results', [])
-            print(f"[mem0] ✓ Retrieved {len(extracted)} memories")
-            return extracted
-        elif isinstance(results, list):
-            # Sometimes may return list directly
-            print(f"[mem0] ✓ Retrieved {len(results)} memories (list format)")
-            return results
-        else:
-            print(f"[mem0] ⚠️ Unexpected results type: {type(results)}")
-            return []
-    
-    async def get_user_preferences(
-        self,
-        user_id: str,
-        categories: Optional[List[str]] = None
+
+    def get_favorites(
+        self, user_id: str, meal_type: Optional[str] = None
     ) -> List[Dict]:
-        """
-        Retrieve all preferences for personalization using entity-based memory.
-        
-        Args:
-            user_id: Unique user identifier
-            categories: Optional list of categories to filter by
-        
-        Returns:
-            List of memory dictionaries
-        """
-        query = "preferences favorites dislikes"
-        
-        print(f"[mem0] Searching preferences for user {user_id}")
-        
-        try:
-            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
-            def _search():
-                return self.memory.search(
-                    query=query,
-                    user_id=user_id,
-                    filters={},  # Additional metadata filters can go here
-                    limit=100  # Get more results for general preferences
-                )
-            
-            results = await asyncio.to_thread(_search)
-            print(f"[mem0] Raw preferences results: {type(results)}")
-            
-            # Extract results from Platform format
-            results = self._extract_results(results)
-            
-            # Filter by categories if specified
-            if categories and results:
-                results = [
-                    r for r in results 
-                    if isinstance(r, dict) and r.get("metadata", {}).get("category") in categories
-                ]
-                print(f"[mem0] ✓ Found {len(results)} preferences in categories {categories}")
-            
-            return results if results else []
-        except Exception as e:
-            print(f"[mem0] ⚠️ Error retrieving user preferences: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    async def get_favorites(
-        self,
-        user_id: str,
-        meal_type: Optional[str] = None
-    ) -> List[Dict]:
-        """
-        Get user's favorited items using entity-based memory retrieval.
-        
-        Args:
-            user_id: Unique user identifier
-            meal_type: Optional meal type filter (breakfast, lunch, dinner)
-        
-        Returns:
-            List of favorite items
-        """
-        query = "favorites"
+        query = (
+            self.supabase.table(TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("category", "favorite")
+        )
         if meal_type:
-            query = f"{meal_type} favorites"
-        
-        print(f"[mem0] Searching favorites for user {user_id} with query '{query}'")
-        
-        try:
-            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
-            def _search():
-                return self.memory.search(
-                    query=query,
-                    user_id=user_id,
-                    filters={},  # Additional metadata filters can go here
-                    limit=50  # Get more results for favorites
-                )
-            
-            results = await asyncio.to_thread(_search)
-            print(f"[mem0] Raw search results: {type(results)}")
-            
-            # Extract results from Platform format
-            results = self._extract_results(results)
-            
-            # DEBUG: Print what we actually got
-            if results:
-                print(f"[mem0] DEBUG: Total memories returned from search: {len(results)}")
-                for i, r in enumerate(results[:5]):  # Show first 5
-                    print(f"[mem0] DEBUG Memory {i}: text='{r.get('memory', 'N/A')[:80]}...' category={r.get('metadata', {}).get('category')}")
-            
-            # Filter by checking if the memory text contains "favorite" or by metadata
-            if results:
-                # Try multiple filtering strategies
-                filtered = []
-                rejected = []
-                for r in results:
-                    if not isinstance(r, dict):
-                        continue
-                    
-                    category = r.get("metadata", {}).get("category")
-                    memory_text = r.get("memory", "").lower()
-                    item_name = r.get("metadata", {}).get("item_name", "unknown")
-                    
-                    # Strategy 1: Check metadata category
-                    if category == "favorites":
-                        filtered.append(r)
-                        continue
-                    
-                    # Strategy 2: Check memory text for "favorite" keyword
-                    if "favorite" in memory_text or "favorited" in memory_text:
-                        # BUT EXCLUDE if it's actually a dislike that mentions favorites
-                        if "dislike" not in memory_text and "do not like" not in memory_text:
-                            filtered.append(r)
-                            continue
-                    
-                    # Track rejected memories for debugging
-                    rejected.append(f"{item_name} (category={category})")
-                
-                if rejected:
-                    print(f"[mem0] ⚠️ Rejected {len(rejected)} non-favorite memories: {rejected[:5]}")
-                
-                results = filtered
-                print(f"[mem0] ✓ Found {len(results)} favorites after filtering")
-            
-            # Further filter by meal_type if specified
-            if meal_type and results:
-                results = [
-                    r for r in results 
-                    if r.get("metadata", {}).get("meal_type") == meal_type
-                ]
-                print(f"[mem0] ✓ Found {len(results)} {meal_type} favorites")
-            
-            # Normalize metadata field names for frontend compatibility
-            if results:
-                for result in results:
-                    metadata = result.get("metadata", {})
-                    # Map "type" to "item_type" and "preference_type" for frontend compatibility
-                    if "type" in metadata and "item_type" not in metadata:
-                        metadata["item_type"] = metadata["type"]
-                    if "type" in metadata and "preference_type" not in metadata:
-                        metadata["preference_type"] = metadata["type"]
-                    # Metadata normalized for frontend compatibility
-            
-            return results if results else []
-        except Exception as e:
-            print(f"[mem0] ⚠️ Error retrieving favorites: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    async def get_dislikes(
-        self,
-        user_id: str,
-        meal_type: Optional[str] = None
+            query = query.eq("meal_type", meal_type)
+        result = query.order("created_at", desc=True).execute()
+        return [_row_to_memory_format(row) for row in (result.data or [])]
+
+    def get_dislikes(
+        self, user_id: str, meal_type: Optional[str] = None
     ) -> List[Dict]:
-        """
-        Get items user dislikes using entity-based memory retrieval.
-        Critical for filtering meal recommendations.
-        
-        Args:
-            user_id: Unique user identifier
-            meal_type: Optional meal type filter
-        
-        Returns:
-            List of disliked items
-        """
-        query = "dislikes"
+        query = (
+            self.supabase.table(TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("category", "dislike")
+        )
         if meal_type:
-            query = f"{meal_type} dislikes"
-        
-        print(f"[mem0] Searching dislikes for user {user_id} with query '{query}'")
-        
-        try:
-            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
-            def _search():
-                return self.memory.search(
-                    query=query,
-                    user_id=user_id,
-                    filters={},  # Additional metadata filters can go here
-                    limit=50  # Get more results for dislikes
-                )
-            
-            results = await asyncio.to_thread(_search)
-            print(f"[mem0] Raw search results: {type(results)}")
-            
-            # Extract results from Platform format
-            results = self._extract_results(results)
-            
-            # Filter by checking if the memory text contains "dislike" or by metadata
-            if results:
-                print(f"[mem0] DEBUG: Total memories returned from dislike search: {len(results)}")
-                for i, r in enumerate(results[:5]):  # Show first 5
-                    print(f"[mem0] DEBUG Dislike {i}: text='{r.get('memory', 'N/A')[:80]}...' category={r.get('metadata', {}).get('category')}")
-                
-                # Try multiple filtering strategies
-                filtered = []
-                rejected = []
-                for r in results:
-                    if not isinstance(r, dict):
-                        continue
-                    
-                    category = r.get("metadata", {}).get("category")
-                    memory_text = r.get("memory", "").lower()
-                    item_name = r.get("metadata", {}).get("item_name", "unknown")
-                    
-                    # Strategy 1: Check metadata category
-                    if category == "dislikes":
-                        filtered.append(r)
-                        continue
-                    
-                    # Strategy 2: Check memory text for "dislike" keyword
-                    if "dislike" in memory_text or "do not like" in memory_text:
-                        # BUT EXCLUDE if it's actually a favorite that mentions dislikes
-                        if "favorite" not in memory_text:
-                            filtered.append(r)
-                            continue
-                    
-                    # Track rejected memories for debugging
-                    rejected.append(f"{item_name} (category={category})")
-                
-                if rejected:
-                    print(f"[mem0] ⚠️ Rejected {len(rejected)} non-dislike memories: {rejected[:5]}")
-                
-                results = filtered
-                print(f"[mem0] ✓ Found {len(results)} dislikes after filtering")
-            
-            # Further filter by meal_type if specified
-            if meal_type and results:
-                results = [
-                    r for r in results 
-                    if r.get("metadata", {}).get("meal_type") == meal_type
-                ]
-                print(f"[mem0] ✓ Found {len(results)} {meal_type} dislikes")
-            
-            # Normalize metadata field names for frontend compatibility
-            if results:
-                for result in results:
-                    metadata = result.get("metadata", {})
-                    # Map "type" to "item_type" and "preference_type" for frontend compatibility
-                    if "type" in metadata and "item_type" not in metadata:
-                        metadata["item_type"] = metadata["type"]
-                    if "type" in metadata and "preference_type" not in metadata:
-                        metadata["preference_type"] = metadata["type"]
-                    # Metadata normalized for frontend compatibility
-            
-            return results if results else []
-        except Exception as e:
-            print(f"[mem0] ⚠️ Error retrieving dislikes: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    async def get_user_profile(
-        self,
-        user_id: str
-    ) -> Optional[Dict]:
-        """
-        Get user's profile information using entity-based memory retrieval.
-        Retrieves BMR, dietary restrictions, and goals.
-        
-        Args:
-            user_id: Unique user identifier
-        
-        Returns:
-            User profile dictionary or None
-        """
-        query = "BMR profile dietary restrictions fitness goals"
-        
-        print(f"[mem0] Searching user profile for user {user_id}")
-        
-        try:
-            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
-            def _search():
-                return self.memory.search(
-                    query=query,
-                    user_id=user_id,
-                    filters={},  # Additional metadata filters can go here
-                    limit=10  # Get recent profile memories
-                )
-            
-            results = await asyncio.to_thread(_search)
-            print(f"[mem0] Raw profile results: {type(results)}")
-            
-            # Extract results from Platform format
-            results = self._extract_results(results)
-            
-            # Filter by category=user_profile in metadata
-            if results:
-                results = [
-                    r for r in results 
-                    if isinstance(r, dict) and r.get("metadata", {}).get("category") == "user_profile"
-                ]
-                print(f"[mem0] ✓ Found {len(results)} profile memories")
-            
-            # Return first result if available (most recent)
-            if results and len(results) > 0:
-                return results[0]
-            return None
-        except Exception as e:
-            print(f"[mem0] ⚠️ Error retrieving user profile: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
+            query = query.eq("meal_type", meal_type)
+        result = query.order("created_at", desc=True).execute()
+        return [_row_to_memory_format(row) for row in (result.data or [])]
+
+    def get_user_preferences(
+        self, user_id: str, categories: Optional[List[str]] = None
+    ) -> List[Dict]:
+        query = (
+            self.supabase.table(TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+        )
+        if categories:
+            query = query.in_("category", categories)
+        result = query.order("created_at", desc=True).execute()
+        return [_row_to_memory_format(row) for row in (result.data or [])]
+
+    def get_all_preferences(self, user_id: str) -> List[Dict]:
+        result = (
+            self.supabase.table(TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return [_row_to_memory_format(row) for row in (result.data or [])]
+
     # ========== DELETION ==========
-    
-    async def remove_favorite(
-        self,
-        user_id: str,
-        item_name: str
-    ) -> Dict:
-        """
-        Remove a favorite item using entity-based memory deletion.
-        Uses case-insensitive matching to handle name variations.
-        
-        Args:
-            user_id: Unique user identifier
-            item_name: Name of the item to unfavorite
-        
-        Returns:
-            Dict with deletion status
-        """
-        # Search for the favorite
-        favorites = await self.get_favorites(user_id)
-        
-        # Normalize the search term for case-insensitive comparison
-        item_name_lower = item_name.strip().lower()
-        
-        for fav in favorites:
-            metadata = fav.get("metadata", {})
-            stored_name = metadata.get("item_name", "")
-            
-            # Case-insensitive comparison
-            if stored_name.strip().lower() == item_name_lower:
-                memory_id = fav.get("id")
-                if memory_id:
-                    def _delete():
-                        return self.memory.delete(memory_id)
-                    
-                    await asyncio.to_thread(_delete)
-                    print(f"[mem0] ✓ Deleted favorite: {item_name} (matched: {stored_name})")
-                    return {"status": "deleted", "memory_id": memory_id}
-        
-        print(f"[mem0] ⚠️ Favorite not found: {item_name}")
-        print(f"[mem0] Available favorites: {[f.get('metadata', {}).get('item_name') for f in favorites]}")
+
+    def remove_favorite(self, user_id: str, item_name: str) -> Dict:
+        result = (
+            self.supabase.table(TABLE)
+            .delete()
+            .eq("user_id", user_id)
+            .eq("category", "favorite")
+            .ilike("item_name", item_name)
+            .execute()
+        )
+        if result.data:
+            return {"status": "deleted"}
         return {"status": "not_found"}
-    
-    async def remove_dislike(
-        self,
-        user_id: str,
-        item_name: str
-    ) -> Dict:
-        """
-        Remove a dislike item using entity-based memory deletion.
-        Uses case-insensitive matching to handle name variations.
-        
-        Args:
-            user_id: Unique user identifier
-            item_name: Name of the item to remove from dislikes
-        
-        Returns:
-            Dict with deletion status
-        """
-        # Search for the dislike
-        dislikes = await self.get_dislikes(user_id)
-        
-        # Normalize the search term for case-insensitive comparison
-        item_name_lower = item_name.strip().lower()
-        
-        for dislike in dislikes:
-            metadata = dislike.get("metadata", {})
-            stored_name = metadata.get("item_name", "")
-            
-            # Case-insensitive comparison
-            if stored_name.strip().lower() == item_name_lower:
-                memory_id = dislike.get("id")
-                if memory_id:
-                    def _delete():
-                        return self.memory.delete(memory_id)
-                    
-                    await asyncio.to_thread(_delete)
-                    print(f"[mem0] ✓ Deleted dislike: {item_name} (matched: {stored_name})")
-                    return {"status": "deleted", "memory_id": memory_id}
-        
-        print(f"[mem0] ⚠️ Dislike not found: {item_name}")
-        print(f"[mem0] Available dislikes: {[d.get('metadata', {}).get('item_name') for d in dislikes]}")
+
+    def remove_dislike(self, user_id: str, item_name: str) -> Dict:
+        result = (
+            self.supabase.table(TABLE)
+            .delete()
+            .eq("user_id", user_id)
+            .eq("category", "dislike")
+            .ilike("item_name", item_name)
+            .execute()
+        )
+        if result.data:
+            return {"status": "deleted"}
         return {"status": "not_found"}
-    
-    async def get_all_memories(
-        self,
-        user_id: str
-    ) -> List[Dict]:
-        """
-        Get all memories for a user using entity-based memory retrieval.
-        Useful for debugging.
-        
-        Args:
-            user_id: Unique user identifier
-        
-        Returns:
-            List of all memories
-        """
-        print(f"[mem0] Getting all memories for user {user_id}")
-        
-        try:
-            # Mem0 Platform API v2: user_id must be passed as separate parameter (required)
-            # Broad query to get all memories for this user
-            def _search():
-                return self.memory.search(
-                    query="preferences favorites dislikes profile",  # Broad query
-                    user_id=user_id,
-                    filters={},  # Additional metadata filters can go here
-                    limit=100  # Get many results for debugging
-                )
-            
-            results = await asyncio.to_thread(_search)
-            print(f"[mem0] All memories raw results: {type(results)}")
-            
-            extracted = self._extract_results(results)
-            print(f"[mem0] ✓ Found {len(extracted)} total memories")
-            
-            return extracted
-        except Exception as e:
-            print(f"[mem0] ⚠️ Error retrieving all memories: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
 
 
 def build_preference_context(
-    prefs: List[Dict],
+    authenticated_user: dict,
     favorites: List[Dict],
-    dislikes: List[Dict]
+    dislikes: List[Dict],
 ) -> str:
-    """
-    Format mem0 memories into LLM context string.
-    
-    Args:
-        prefs: General user preferences
-        favorites: Favorite items (from heart button)
-        dislikes: Disliked items (from broken heart button - critical for filtering)
-    
-    Returns:
-        Formatted context string for LLM
-    """
+    """Format preferences into LLM context string for meal plan generation."""
     context_parts = []
-    
+
     context_parts.append("=== USER PREFERENCES (Learn from Past Choices) ===")
-    context_parts.append("IMPORTANT: Use these as inspiration for SIMILAR items available in today's menu.")
-    context_parts.append("Do NOT copy these exact items unless they are available in the current menu.")
-    context_parts.append("Instead, find similar foods with comparable nutritional profiles and flavors.")
+    context_parts.append(
+        "IMPORTANT: Use these as inspiration for SIMILAR items available in today's menu."
+    )
+    context_parts.append(
+        "Do NOT copy these exact items unless they are available in the current menu."
+    )
+    context_parts.append(
+        "Instead, find similar foods with comparable nutritional profiles and flavors."
+    )
     context_parts.append("")
-    
-    # User Profile
-    if prefs:
+
+    # User Profile — from authenticated_user (users table)
+    bmr = authenticated_user.get("bmr")
+    dietary_preference = authenticated_user.get("dietary_preference")
+    dietary_restrictions = authenticated_user.get("dietary_restrictions")
+    goal = authenticated_user.get("goal")
+
+    if any([bmr is not None, dietary_preference, dietary_restrictions, goal]):
         context_parts.append("USER PROFILE:")
-        for pref in prefs:
-            memory_text = pref.get("memory", "")
-            if memory_text:
-                context_parts.append(f"• {memory_text}")
+        if bmr is not None:
+            context_parts.append(f"• My BMR is {bmr} calories per day.")
+        if dietary_preference:
+            context_parts.append(
+                f"• My dietary preference is: {dietary_preference}"
+            )
+        if dietary_restrictions:
+            restrictions_text = ", ".join(dietary_restrictions)
+            context_parts.append(
+                f"• My dietary restrictions are: {restrictions_text}"
+            )
+        if goal:
+            context_parts.append(f"• My fitness goal is: {goal}")
         context_parts.append("")
-    
-    # Favorites - user's positive preferences from heart button
+
+    # Favorites
     if favorites:
-        context_parts.append("FAVORITES (Find similar items with these characteristics):")
+        context_parts.append(
+            "FAVORITES (Find similar items with these characteristics):"
+        )
         for item in favorites:
             memory_text = item.get("memory", "")
             metadata = item.get("metadata", {})
@@ -805,12 +273,16 @@ def build_preference_context(
                 meal_label = f"[{meal_type.upper()}] " if meal_type else ""
                 context_parts.append(f"• {meal_label}{memory_text}")
                 if item_name:
-                    context_parts.append(f"  → Look for items similar to: {item_name}")
+                    context_parts.append(
+                        f"  → Look for items similar to: {item_name}"
+                    )
         context_parts.append("")
-    
-    # Dislikes (CRITICAL - must avoid)
+
+    # Dislikes (CRITICAL — must avoid)
     if dislikes:
-        context_parts.append("DISLIKES (NEVER include these or similar items):")
+        context_parts.append(
+            "DISLIKES (NEVER include these or similar items):"
+        )
         for dislike in dislikes:
             memory_text = dislike.get("memory", "")
             metadata = dislike.get("metadata", {})
@@ -818,11 +290,12 @@ def build_preference_context(
             if memory_text:
                 context_parts.append(f"• ❌ {memory_text}")
                 if item_name:
-                    context_parts.append(f"  → Avoid: {item_name} and similar items")
+                    context_parts.append(
+                        f"  → Avoid: {item_name} and similar items"
+                    )
         context_parts.append("")
-    
+
     if len(context_parts) <= 5:  # Only has header
         return ""
-    
-    return "\n".join(context_parts)
 
+    return "\n".join(context_parts)

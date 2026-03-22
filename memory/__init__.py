@@ -1,2 +1,1 @@
-"""Memory layer for DormDish using mem0"""
-
+"""Preference storage layer for DormDish using Supabase"""
