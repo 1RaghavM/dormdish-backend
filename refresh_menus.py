@@ -221,6 +221,7 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
                     out_item["serving_size"] = it["serving_size"]
                 if it.get("category"):
                     out_item["category"] = it["category"]
+                out_item["meal"] = meal
                 items.append(out_item)
         else:
             if isinstance(parsed, dict):
@@ -235,6 +236,8 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
                         if isinstance(foods, list):
                             for food in foods:
                                 _add_food_obj_from_new_schema(food, items, category=block_category)
+                for it in items:
+                    it["meal"] = meal
 
         if items:
             return (meal, items, None)
@@ -245,6 +248,7 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
 
     all_items: List[dict] = []
     meal_sources: List[str] = []
+    meals_dict: Dict[str, List[dict]] = {}
     warnings: List[str] = []
 
     for meal, items, warning in results:
@@ -252,6 +256,7 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
             warnings.append(warning)
         if items:
             meal_sources.append(meal)
+            meals_dict[meal] = items
             all_items.extend(items)
 
     # Deduplicate by name
@@ -286,7 +291,9 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
         "date": date,
         "fetched_at": datetime.now().isoformat(),
         "items": unique_items,
-        "menu": {"items": unique_items, "meal_sources": meal_sources or ["foodpro"]},
+        "meals": meals_dict,
+        "meal_sources": meal_sources,
+        "menu": {"items": unique_items, "meals": meals_dict, "meal_sources": meal_sources or ["foodpro"]},
         "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
         "error": None,
     }
@@ -298,9 +305,11 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
 
 # --- Supabase persistence ---
 
-def save_menu_to_supabase(supabase_client, university: str, dining_hall: str, date: str, menu_data: dict) -> bool:
+def save_menu_to_supabase(supabase_client, university: str, dining_hall: str, date: str, menu_data: dict, meal: str = None) -> bool:
     try:
         menu_id = f"{university}_{dining_hall}_{date}"
+        if meal:
+            menu_id = f"{menu_id}_{meal}"
         hall_slug = menu_data.get("hall_slug", dining_hall)
         fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
 
@@ -325,6 +334,8 @@ def save_menu_to_supabase(supabase_client, university: str, dining_hall: str, da
             "menu_data": stored_menu_data,
             "created_at": datetime.now().isoformat(),
         }
+        if meal:
+            data_to_insert["meal"] = meal
         supabase_client.table("menus").upsert(data_to_insert).execute()
         print(f"  💾 Saved {items_count} items to Supabase: {menu_id}")
         return True
@@ -349,6 +360,18 @@ async def fetch_and_cache_menu(client: httpx.AsyncClient, supabase_client, unive
             return {"success": False, "hall": hall_slug, "error": "No items returned"}
 
         save_menu_to_supabase(supabase_client, university, hall_slug, date, menu_data)
+
+        # Save per-meal rows
+        for meal_name in menu_data.get("meal_sources", []):
+            meal_items = [it for it in menu_data.get("items", []) if it.get("meal") == meal_name]
+            if meal_items:
+                meal_menu_data = {
+                    **menu_data,
+                    "items": meal_items,
+                    "menu": {"items": meal_items, "meal_sources": [meal_name]},
+                }
+                save_menu_to_supabase(supabase_client, university, hall_slug, date, meal_menu_data, meal=meal_name)
+
         item_count = len(menu_data.get("items", []))
         print(f"  ✅ Cached {item_count} items for {hall_slug}")
         return {"success": True, "hall": hall_slug, "items": item_count}
