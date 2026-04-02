@@ -1576,17 +1576,8 @@ def get_current_user(authorization: Optional[str] = Header(None)):
 
 
 async def require_premium(current_user=Depends(get_current_user)):
-    """Dependency that requires an active premium (student_plan) subscription."""
-    from subscription import check_subscription_status
-    is_premium = await check_subscription_status(str(current_user["id"]))
-    if not is_premium:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "premium_required",
-                "message": "This feature requires a DormDish Premium subscription.",
-            },
-        )
+    """Dependency that previously required premium subscription.
+    Premium gating is disabled while the app is free — all authenticated users pass through."""
     return current_user
 
 
@@ -4238,20 +4229,15 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         }
         try:
             user_id = str(authenticated_user["id"])
-            from subscription import check_subscription_status
-            is_premium = await check_subscription_status(user_id)
-            if is_premium:
-                from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager(supabase)
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager(supabase)
 
-                favorites = preference_manager.get_favorites(user_id)
-                dislikes = preference_manager.get_dislikes(user_id)
+            favorites = preference_manager.get_favorites(user_id)
+            dislikes = preference_manager.get_dislikes(user_id)
 
-                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
+            user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
-                preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
-            else:
-                print(f"Skipping preferences for non-premium user {user_id}")
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as pref_error:
             print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
@@ -4738,20 +4724,15 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
         }
         try:
             user_id = str(authenticated_user["id"])
-            from subscription import check_subscription_status
-            is_premium = await check_subscription_status(user_id)
-            if is_premium:
-                from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager(supabase)
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager(supabase)
 
-                favorites = preference_manager.get_favorites(user_id)
-                dislikes = preference_manager.get_dislikes(user_id)
+            favorites = preference_manager.get_favorites(user_id)
+            dislikes = preference_manager.get_dislikes(user_id)
 
-                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
+            user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
-                preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
-            else:
-                print(f"Skipping preferences for non-premium user {user_id}")
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as pref_error:
             print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
@@ -5148,20 +5129,15 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         }
         try:
             user_id = str(authenticated_user["id"])
-            from subscription import check_subscription_status
-            is_premium = await check_subscription_status(user_id)
-            if is_premium:
-                from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager(supabase)
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager(supabase)
 
-                favorites = preference_manager.get_favorites(user_id)
-                dislikes = preference_manager.get_dislikes(user_id)
+            favorites = preference_manager.get_favorites(user_id)
+            dislikes = preference_manager.get_dislikes(user_id)
 
-                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
+            user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
-                preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
-            else:
-                print(f"Skipping preferences for non-premium user {user_id}")
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as pref_error:
             print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
@@ -5472,20 +5448,15 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
         }
         try:
             user_id = str(authenticated_user["id"])
-            from subscription import check_subscription_status
-            is_premium = await check_subscription_status(user_id)
-            if is_premium:
-                from memory.preference_manager import PreferenceManager, build_preference_context
-                preference_manager = PreferenceManager(supabase)
+            from memory.preference_manager import PreferenceManager, build_preference_context
+            preference_manager = PreferenceManager(supabase)
 
-                favorites = preference_manager.get_favorites(user_id)
-                dislikes = preference_manager.get_dislikes(user_id)
+            favorites = preference_manager.get_favorites(user_id)
+            dislikes = preference_manager.get_dislikes(user_id)
 
-                user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
+            user_preferences_context = build_preference_context(authenticated_user, favorites, dislikes)
 
-                preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
-            else:
-                print(f"Skipping preferences for non-premium user {user_id}")
+            preferences_snapshot = _build_preferences_snapshot(favorites, dislikes)
         except Exception as pref_error:
             print(f"Warning: Failed to retrieve preferences: {pref_error}")
             user_preferences_context = None
