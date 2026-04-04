@@ -1642,7 +1642,7 @@ def auth_register(data: RegisterRequest):
             "goal": data.goal,
             "university": data.university,
 
-            "dietary_preference": (data.dietary_preference.strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
+            "dietary_preference": (re.sub(r'(?<=[a-z])(?=[A-Z])', '_', data.dietary_preference).strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
@@ -2122,7 +2122,7 @@ async def auth_google_register(data: GoogleRegisterRequest):
             "activity_level": data.activity_level,
             "goal": data.goal,
             "university": data.university,
-            "dietary_preference": (data.dietary_preference.strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
+            "dietary_preference": (re.sub(r'(?<=[a-z])(?=[A-Z])', '_', data.dietary_preference).strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
@@ -2358,7 +2358,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
             "activity_level": data.activity_level,
             "goal": data.goal,
             "university": data.university,
-            "dietary_preference": (data.dietary_preference.strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
+            "dietary_preference": (re.sub(r'(?<=[a-z])(?=[A-Z])', '_', data.dietary_preference).strip().lower().replace(' ', '_').replace('-', '_') if data.dietary_preference else None),
             "bmr": metrics.get("bmr"),
             "tdee": metrics.get("tdee"),
             "created_at": datetime.now().isoformat(),
@@ -3770,6 +3770,8 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                 if field == 'goal' and value not in ['cut', 'maintain', 'bulk', 'lose', 'gain']:
                     raise HTTPException(status_code=400, detail="Invalid goal. Must be 'cut', 'maintain', 'bulk', 'lose', or 'gain'")
                 if field == 'dietary_preference':
+                    # Normalize: camelCase, spaces, hyphens → snake_case
+                    value = re.sub(r'(?<=[a-z])(?=[A-Z])', '_', value)
                     value = value.strip().lower().replace(' ', '_').replace('-', '_')
                     if value not in ['vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', 'dairy_free']:
                         raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', or 'dairy_free'")
