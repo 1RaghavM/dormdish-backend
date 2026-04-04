@@ -1781,7 +1781,32 @@ def auth_login(data: LoginRequest):
 
 @app.get('/auth/profile')
 def auth_profile(current_user=Depends(get_current_user)):
-    return {"success": True, "user": current_user}
+    user = dict(current_user)
+
+    # Compute recommended (calculated) nutrition values so the client
+    # can display "Recommended: X" even when custom overrides are set.
+    try:
+        weight_lbs = float(user.get('weight_lbs') or 0)
+        goal = user.get('goal') or 'maintain'
+        daily_cal = user.get('daily_calorie_target')
+
+        if weight_lbs > 0 and daily_cal:
+            daily_cal = int(daily_cal)
+            calc_protein = int(round(min(max(weight_lbs * 0.95, 80), weight_lbs * 1.1)))
+            macros = calculate_macro_targets(
+                weight_lbs=weight_lbs,
+                total_calories=daily_cal,
+                protein_g=calc_protein,
+                goal=goal,
+            )
+            user['calculated_calories'] = daily_cal
+            user['calculated_protein_g'] = calc_protein
+            user['calculated_fat_g'] = macros['fat_g']
+            user['calculated_carbs_g'] = macros['carbs_g']
+    except Exception:
+        pass  # Non-critical — client has its own fallbacks
+
+    return {"success": True, "user": user}
 
 
 @app.post('/auth/logout')
@@ -2528,6 +2553,12 @@ class UpdateProfileRequest(BaseModel):
     attribution_source: Optional[str] = None
     apple_health_connected: Optional[bool] = None
     notifications_enabled: Optional[bool] = None
+
+    # Custom nutrition goal overrides (null = use calculated values)
+    custom_calories: Optional[int] = None
+    custom_protein_g: Optional[int] = None
+    custom_fat_g: Optional[int] = None
+    custom_carbs_g: Optional[int] = None
 
 class TrackWeightRequest(BaseModel):
     weight_lbs: float
@@ -3724,6 +3755,11 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                 update_data[field] = None
                 continue
 
+            # Allow clearing custom nutrition goals by explicitly setting to null/None
+            if field in ('custom_calories', 'custom_protein_g', 'custom_fat_g', 'custom_carbs_g') and value is None:
+                update_data[field] = None
+                continue
+
             if value is not None:
                 if field == 'username':
                     value = value.strip()
@@ -3737,6 +3773,11 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
                     raise HTTPException(status_code=400, detail="Invalid dietary_preference. Must be 'vegan', 'vegetarian', 'pescetarian', 'keto', 'gluten_free', or 'dairy_free'")
                 if field == 'weight_change_speed' and value not in ['slow', 'recommended', 'fast']:
                     raise HTTPException(status_code=400, detail="Invalid weight_change_speed. Must be 'slow', 'recommended', or 'fast'")
+                if field in ('custom_calories', 'custom_protein_g', 'custom_fat_g', 'custom_carbs_g'):
+                    if not isinstance(value, int) or value <= 0:
+                        raise HTTPException(status_code=400, detail=f"Invalid {field}. Must be a positive integer.")
+                    update_data[field] = value
+                    continue
                 update_data[field] = value
 
         # Recalculate extended metrics if any relevant field changed
@@ -4161,6 +4202,16 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         )
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
+
+        # Apply custom nutrition overrides if set
+        if authenticated_user.get('custom_calories'):
+            calorie_target = int(authenticated_user['custom_calories'])
+        if authenticated_user.get('custom_protein_g'):
+            protein_target = int(authenticated_user['custom_protein_g'])
+        if authenticated_user.get('custom_fat_g'):
+            fat_target = int(authenticated_user['custom_fat_g'])
+        if authenticated_user.get('custom_carbs_g'):
+            carbs_target = int(authenticated_user['custom_carbs_g'])
 
         # Subtract any food log entries for today from targets
         try:
@@ -4587,6 +4638,16 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
         )
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
+
+        # Apply custom nutrition overrides if set
+        if authenticated_user.get('custom_calories'):
+            calorie_target = int(authenticated_user['custom_calories'])
+        if authenticated_user.get('custom_protein_g'):
+            protein_target = int(authenticated_user['custom_protein_g'])
+        if authenticated_user.get('custom_fat_g'):
+            fat_target = int(authenticated_user['custom_fat_g'])
+        if authenticated_user.get('custom_carbs_g'):
+            carbs_target = int(authenticated_user['custom_carbs_g'])
 
         # Subtract food log entries for the requested date
         try:
@@ -5074,6 +5135,16 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
 
+        # Apply custom nutrition overrides if set
+        if authenticated_user.get('custom_calories'):
+            calorie_target = int(authenticated_user['custom_calories'])
+        if authenticated_user.get('custom_protein_g'):
+            protein_target = int(authenticated_user['custom_protein_g'])
+        if authenticated_user.get('custom_fat_g'):
+            fat_target = int(authenticated_user['custom_fat_g'])
+        if authenticated_user.get('custom_carbs_g'):
+            carbs_target = int(authenticated_user['custom_carbs_g'])
+
         # Subtract any food log entries for today from targets
         try:
             food_log_result = supabase.table("food_log") \
@@ -5325,6 +5396,16 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
         )
         fat_target = macro_targets['fat_g']
         carbs_target = macro_targets['carbs_g']
+
+        # Apply custom nutrition overrides if set
+        if authenticated_user.get('custom_calories'):
+            calorie_target = int(authenticated_user['custom_calories'])
+        if authenticated_user.get('custom_protein_g'):
+            protein_target = int(authenticated_user['custom_protein_g'])
+        if authenticated_user.get('custom_fat_g'):
+            fat_target = int(authenticated_user['custom_fat_g'])
+        if authenticated_user.get('custom_carbs_g'):
+            carbs_target = int(authenticated_user['custom_carbs_g'])
 
         # Subtract food log entries for the requested date
         try:
