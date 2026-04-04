@@ -63,6 +63,12 @@ OPTIMIZATION STRATEGY:
 
 DIETARY PREFERENCES:
 • Respect the user's dietary preference specified in the prompt
+• vegan: no animal products at all
+• vegetarian: no meat or fish, eggs and dairy OK
+• pescetarian: no meat, fish and seafood OK
+• keto: very low carb, high fat
+• gluten_free: NO wheat, barley, rye, bread, pasta, flour tortillas, breaded/battered items, couscous, regular soy sauce. Choose naturally gluten-free grains (rice, quinoa, corn, oats if labeled GF).
+• dairy_free: NO milk, cheese, butter, cream, yogurt, whey, ice cream, cream-based sauces/soups. Choose dairy-free alternatives when available.
 
 OUTPUT FORMAT (STRICT JSON, NO MARKDOWN):
 {{"totals":{{"calories":<int>,"protein_g":<int>,"fat_g":<int>,"carbs_g":<int>}},"meals":{{"breakfast":{{"description":"<str>","items":[{{"name":"<exact_name>","servings":<float>,"calories":<float>,"protein_g":<float>,"fat_g":<float>,"carbs_g":<float>,"serving_size":"<str>"}}]}},"lunch":{{"description":"<str>","items":[...]}},"dinner":{{"description":"<str>","items":[...]}}}},"explanation":"<str>"}}
@@ -117,6 +123,11 @@ OPTIMIZATION STRATEGY:
 
 DIETARY PREFERENCES:
 • Respect the user's dietary preference specified in the prompt
+• vegan: no animal products at all
+• vegetarian: no meat or fish, eggs and dairy OK
+• pescetarian: no meat, fish and seafood OK
+• gluten_free: NO wheat, barley, rye, bread, pasta, flour tortillas, breaded/battered items, couscous, regular soy sauce. Choose naturally gluten-free grains (rice, quinoa, corn, oats if labeled GF).
+• dairy_free: NO milk, cheese, butter, cream, yogurt, whey, ice cream, cream-based sauces/soups. Choose dairy-free alternatives when available.
 
 EXPLANATION:
 • Write 1-3 sentences explaining how the plan meets the calorie/protein targets

@@ -3600,7 +3600,7 @@ def build_meal_plan_system_prompt(allowed_items_with_macros: List[dict]) -> str:
         "",
         "If pairing item missing from list, proceed without fabrication (note in explanation).",
         "",
-        "Respect dietary prefs (vegan/vegetarian).",
+        "Respect dietary prefs (vegan/vegetarian/pescetarian/keto/gluten_free/dairy_free). For gluten_free: exclude items containing wheat, barley, rye, bread, pasta, flour tortillas, breaded items. For dairy_free: exclude items containing milk, cheese, butter, cream, yogurt, whey.",
         "",
         "Serving sizes can be fractional (0.5 increments).",
         "",
