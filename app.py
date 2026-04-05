@@ -3850,7 +3850,9 @@ async def update_profile(profile_data: UpdateProfileRequest, current_user=Depend
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to update profile")
+        print(f"[update_profile] ERROR: {type(e).__name__}: {e}")
+        detail = f"Failed to update profile: {e}"
+        raise HTTPException(status_code=500, detail=detail)
 
 
 @app.post("/auth/weight", summary="Track user weight")
