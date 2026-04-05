@@ -46,7 +46,7 @@ def title_case_name(name: str | None) -> str:
     name = _clean(name)
     if not name:
         return ""
-    
+            
     # If already mostly lowercase or mixed case, just capitalize first letter of each word
     # If all caps, use title() but handle special cases
     if name.isupper():
