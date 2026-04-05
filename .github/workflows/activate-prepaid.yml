@@ -1,0 +1,32 @@
+name: Activate prepaid subscriptions
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # every day at 07:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Trigger activation
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          ACTIVATION_SECRET: ${{ secrets.ACTIVATION_SECRET }}
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "${BACKEND_URL}/admin/activate-prepaid" \
+            -H "Authorization: Bearer ${ACTIVATION_SECRET}" \
+            -H "Content-Type: application/json")
+
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | head -n -1)
+
+          echo "Status: $http_code"
+          echo "Response: $body"
+
+          if [ "$http_code" -ne 200 ]; then
+            echo "::error::Activation failed with status $http_code"
+            exit 1
+          fi

@@ -27,6 +27,7 @@ from pydantic import BaseModel, EmailStr
 from supabase import Client, create_client
 
 import secrets as _secrets_for_google
+import stripe
 
 # extract module loaded lazily inside fetch_foodpro_menu_rutgers() - only needed for cron
 fp_build_menu_url = None
@@ -275,6 +276,14 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 
 REVENUECAT_SECRET_API_KEY = os.getenv("REVENUECAT_SECRET_API_KEY", "")
 REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")
+
+# Stripe configuration
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_MONTHLY_PRICE_ID = os.getenv("STRIPE_MONTHLY_PRICE_ID", "")
+STRIPE_YEARLY_PRICE_ID = os.getenv("STRIPE_YEARLY_PRICE_ID", "")
+ACTIVATION_SECRET = os.getenv("ACTIVATION_SECRET", "")
+ACTIVATION_DATE = "2025-08-25"  # Semester start date for deferred activation
 
 class _SupabaseNotConfigured:
     def table(self, *_args, **_kwargs):
@@ -1357,6 +1366,9 @@ class AppleRegisterRequest(BaseModel):
 
 # ── Referral Models ──
 
+class CreateCheckoutSessionRequest(BaseModel):
+    plan_type: str  # "monthly" or "yearly"
+
 class ApplyReferralCodeRequest(BaseModel):
     code: str
 
@@ -1482,10 +1494,15 @@ async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
 
     APPLE_ISSUER = "https://appleid.apple.com"
 
-    # Get the expected audience (your app's bundle ID or service ID)
+    # Accept both iOS app bundle ID and web Service ID as valid audiences
     apple_client_id = os.getenv("APPLE_CLIENT_ID")
+    apple_web_service_id = os.getenv("APPLE_WEB_SERVICE_ID")
     if not apple_client_id:
         raise HTTPException(status_code=500, detail="APPLE_CLIENT_ID not configured")
+
+    apple_audiences = [apple_client_id]
+    if apple_web_service_id:
+        apple_audiences.append(apple_web_service_id)
 
     try:
         # Use cached JWKS client to avoid fetching keys on every request
@@ -1498,7 +1515,7 @@ async def _verify_apple_id_token(id_token: str) -> Dict[str, Any]:
                 id_token,
                 signing_key.key,
                 algorithms=["RS256"],
-                audience=apple_client_id,
+                audience=apple_audiences,
                 issuer=APPLE_ISSUER,
             )
             return decoded
@@ -7823,6 +7840,121 @@ async def track_announcement_interaction(
     }).execute()
 
     return {"success": True}
+
+
+@app.post('/checkout/create-session')
+async def create_checkout_session(payload: CreateCheckoutSessionRequest, user=Depends(get_current_user)):
+    """Create a Stripe Checkout Session for a pre-order purchase."""
+    if payload.plan_type not in ("monthly", "yearly"):
+        raise HTTPException(status_code=400, detail="plan_type must be 'monthly' or 'yearly'")
+
+    price_id = STRIPE_MONTHLY_PRICE_ID if payload.plan_type == "monthly" else STRIPE_YEARLY_PRICE_ID
+    if not price_id:
+        raise HTTPException(status_code=500, detail="Stripe price not configured")
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[{"price": price_id, "quantity": 1}],
+            metadata={"user_id": user["id"], "plan_type": payload.plan_type},
+            success_url="https://dormdish.ai/checkout/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://dormdish.ai",
+        )
+        return {"success": True, "checkout_url": session.url}
+    except stripe.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+
+@app.post('/webhook/stripe')
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events for completed checkout sessions."""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        metadata = session.get("metadata", {})
+        user_id = metadata.get("user_id")
+        plan_type = metadata.get("plan_type")
+
+        if not user_id or not plan_type:
+            print(f"[stripe webhook] missing metadata: user_id={user_id} plan_type={plan_type}")
+            return {"received": True}
+
+        amount_map = {"monthly": 199, "yearly": 1299}
+        amount_cents = amount_map.get(plan_type, 0)
+
+        try:
+            supabase.table("prepaid_subscriptions").insert({
+                "user_id": user_id,
+                "stripe_session_id": session["id"],
+                "stripe_payment_intent_id": session.get("payment_intent"),
+                "plan_type": plan_type,
+                "amount_cents": amount_cents,
+                "revenuecat_duration": plan_type,
+                "activation_date": ACTIVATION_DATE,
+                "status": "pending",
+            }).execute()
+            print(f"[stripe webhook] prepaid subscription created for user_id={user_id} plan={plan_type}")
+        except Exception as e:
+            # Unique constraint on stripe_session_id handles duplicate webhooks
+            print(f"[stripe webhook] insert error (likely duplicate): {e}")
+
+    return {"received": True}
+
+
+@app.post('/admin/activate-prepaid')
+async def activate_prepaid(authorization: Optional[str] = Header(None)):
+    """Activate all pending prepaid subscriptions whose activation date has arrived.
+
+    Protected by ACTIVATION_SECRET — called by GitHub Actions cron.
+    """
+    token = get_bearer_token(authorization)
+    if not token or token != ACTIVATION_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid activation secret")
+
+    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+
+    res = supabase.table("prepaid_subscriptions")\
+        .select("*")\
+        .eq("status", "pending")\
+        .lte("activation_date", today)\
+        .execute()
+
+    if not res.data:
+        return {"success": True, "activated_count": 0, "message": "No pending subscriptions to activate"}
+
+    activated = 0
+    errors = []
+    for row in res.data:
+        result = await grant_revenuecat_promo(row["user_id"], row["revenuecat_duration"])
+        if result.get("success"):
+            supabase.table("prepaid_subscriptions")\
+                .update({"status": "activated", "activated_at": datetime.now(ZoneInfo("UTC")).isoformat()})\
+                .eq("id", row["id"])\
+                .execute()
+            activated += 1
+            print(f"[activate-prepaid] activated user_id={row['user_id']} plan={row['plan_type']}")
+        else:
+            errors.append({"user_id": row["user_id"], "error": result.get("error")})
+            print(f"[activate-prepaid] FAILED user_id={row['user_id']}: {result.get('error')}")
+
+    return {
+        "success": True,
+        "activated_count": activated,
+        "failed_count": len(errors),
+        "errors": errors,
+    }
 
 
 if __name__ == '__main__':

@@ -29,6 +29,7 @@ python-dotenv==1.0.1
 beautifulsoup4==4.12.3
 
 # Payment Processing
+stripe
 
 # Google Calendar Integration
 # google-auth==2.36.0
