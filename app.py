@@ -2411,7 +2411,7 @@ async def auth_apple_register(data: AppleRegisterRequest):
         base_username = (payload.get("username") or "").strip()
         if not base_username:
             base_username = email.split("@")[0] if email else "user"
-
+        
         user_row = None
         for attempt in range(max_attempts):
             try:
