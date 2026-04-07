@@ -44,13 +44,13 @@ Content-Type: application/json
 
 The signed URL is valid for 2 hours (Supabase default). The client PUTs raw image bytes to this URL with no auth header.
 
-### Modified Endpoint: `POST /food-scan/analyze`
+### New Endpoint: `POST /food-scan/analyze-json`
 
-Now accepts two modes:
+Accepts the new storage-path-based JSON mode as a separate route.
 
 **Mode 1 — Storage path (new):**
 ```
-POST /food-scan/analyze
+POST /food-scan/analyze-json
 Authorization: Bearer <session_token>
 Content-Type: application/json
 
@@ -61,6 +61,10 @@ Content-Type: application/json
   "description": "chicken and rice"
 }
 ```
+
+### Existing Endpoint: `POST /food-scan/analyze`
+
+Continues to handle the legacy multipart upload path, unchanged.
 
 **Mode 2 — Direct upload (legacy, unchanged):**
 ```
@@ -74,7 +78,7 @@ date: 2026-04-07
 description: chicken and rice
 ```
 
-**Mode detection:** If the request is `application/json` with an `image_path` field, use Mode 1. If `multipart/form-data` with an `image` file, use Mode 2.
+**Route separation:** These are two separate routes. `/food-scan/analyze` handles the legacy multipart upload exclusively. `/food-scan/analyze-json` handles the new storage path JSON mode exclusively. This avoids content-type sniffing and keeps each route's contract clear.
 
 **Mode 1 logic:**
 1. Validate `image_path` matches pattern `{user_id}/{uuid}.{ext}`
@@ -114,7 +118,7 @@ Client                          Backend                         Supabase Storage
   |   (raw image bytes)           |                   (direct) --> |
   |<-- 200 OK --------------------|                                |
   |                                |                                |
-  |-- POST /food-scan/analyze ---->|                                |
+  |-- POST /food-scan/analyze-json>|                                |
   |   { image_path, dining_hall,  |-- download(image_path) ------->|
   |     date, description }       |<-- image bytes ----------------|
   |                                |                                |
@@ -135,7 +139,7 @@ The PUT to the signed URL goes directly from client to Supabase Storage, bypassi
 | Unsupported file extension | 400 | `"Unsupported file extension"` |
 | Supabase Storage unreachable | 500 | `"Failed to generate upload URL"` |
 
-### `POST /food-scan/analyze` (Mode 1 — storage path)
+### `POST /food-scan/analyze-json` (Mode 1 — storage path)
 
 | Scenario | Status | Detail |
 |---|---|---|
@@ -151,12 +155,12 @@ Unchanged from current implementation.
 
 ## Rollout Plan
 
-1. **Backend first:** Deploy new `upload-url` endpoint and dual-mode `analyze` endpoint. Create `food-scan-images` bucket in Supabase dashboard.
-2. **iOS app later:** Update `FoodScanService.swift` to use three-step flow (get URL → upload to storage → analyze with path). Changes isolated to `FoodScanService.swift`; `FoodAnalysisManager.swift` requires no structural changes.
+1. **Backend first:** Deploy new `upload-url` endpoint and new `analyze-json` endpoint. Create `food-scan-images` bucket in Supabase dashboard.
+2. **iOS app later:** Update `FoodScanService.swift` to use three-step flow (get URL → upload to storage → analyze-json with path). Changes isolated to `FoodScanService.swift`; `FoodAnalysisManager.swift` requires no structural changes.
 3. Old app versions continue working via the legacy multipart path indefinitely.
 
 ## Files Affected (Backend)
 
-- `app.py` — Register new `/food-scan/upload-url` endpoint and add JSON-mode `/food-scan/analyze` route
-- `food_scan_endpoints.py` — Add `handle_food_scan_upload_url` handler; modify `handle_food_scan_analyze` to support `image_path` mode
+- `app.py` — Register new `/food-scan/upload-url` endpoint and new `/food-scan/analyze-json` route
+- `food_scan_endpoints.py` — Add `handle_food_scan_upload_url` handler; add new `handle_food_scan_analyze_json` handler for the `/food-scan/analyze-json` route (existing `handle_food_scan_analyze` remains unchanged)
 - No new dependencies required (Supabase SDK already installed)
