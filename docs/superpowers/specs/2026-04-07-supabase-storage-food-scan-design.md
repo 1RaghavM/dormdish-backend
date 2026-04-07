@@ -29,9 +29,10 @@ Content-Type: application/json
 
 **Server logic:**
 1. Authenticate user via `get_current_user`
-2. Generate storage path: `{user_id}/{uuid}.{ext}`
-3. Call `supabase.storage.from_("food-scan-images").create_signed_upload_url(path)`
-4. Return the signed URL and path
+2. Validate `file_extension` is one of: `jpg`, `jpeg`, `png`, `heic`, `heif`, `webp` (default: `jpg`). Return 400 if unsupported.
+3. Generate storage path: `{user_id}/{uuid}.{ext}`
+4. Call `supabase.storage.from_("food-scan-images").create_signed_upload_url(path)`
+5. Return the signed URL and path
 
 **Response:**
 ```json
@@ -131,6 +132,7 @@ The PUT to the signed URL goes directly from client to Supabase Storage, bypassi
 | Scenario | Status | Detail |
 |---|---|---|
 | Not authenticated | 401 | `"Unauthorized"` |
+| Unsupported file extension | 400 | `"Unsupported file extension"` |
 | Supabase Storage unreachable | 500 | `"Failed to generate upload URL"` |
 
 ### `POST /food-scan/analyze` (Mode 1 — storage path)
