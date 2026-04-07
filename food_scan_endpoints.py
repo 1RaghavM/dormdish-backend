@@ -39,6 +39,8 @@ import re
 from datetime import datetime
 from fastapi import UploadFile, File, Form, HTTPException, Depends
 from typing import Optional
+import uuid as uuid_mod
+from food_scan_models import ALLOWED_IMAGE_EXTENSIONS
 
 logger = logging.getLogger("dormdish.api")
 
@@ -140,6 +142,56 @@ async def handle_food_scan_analyze(
         raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
 
     return result
+
+
+# ==================== UPLOAD URL HANDLER ====================
+
+FOOD_SCAN_BUCKET = "food-scan-images"
+
+
+async def handle_food_scan_upload_url(
+    file_extension: str,
+    current_user: dict,
+    supabase_client,
+) -> dict:
+    """
+    Handler for POST /food-scan/upload-url
+
+    Generates a signed upload URL so the client can upload an image
+    directly to Supabase Storage, bypassing Vercel's body size limit.
+    """
+    user_id = current_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found in session")
+
+    ext = file_extension.lower().strip().lstrip(".")
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file extension. Allowed: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}",
+        )
+
+    image_path = f"{user_id}/{uuid_mod.uuid4()}.{ext}"
+
+    try:
+        response = supabase_client.storage.from_(FOOD_SCAN_BUCKET).create_signed_upload_url(image_path)
+    except Exception as e:
+        logger.error(f"Failed to generate upload URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+
+    signed_url = None
+    if isinstance(response, dict):
+        signed_url = response.get("signed_url") or response.get("signedURL") or response.get("signedUrl")
+    elif hasattr(response, "signed_url"):
+        signed_url = response.signed_url
+
+    if not signed_url:
+        logger.error(f"Unexpected upload URL response format: {response}")
+        raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+
+    logger.info(f"Generated upload URL for user {user_id}: {image_path}")
+
+    return {"upload_url": signed_url, "image_path": image_path}
 
 
 # ==================== FEEDBACK HANDLER ====================
