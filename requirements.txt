@@ -31,6 +31,10 @@ beautifulsoup4==4.12.3
 # Payment Processing
 stripe
 
+# Push Notifications (APNs)
+h2>=4.0.0
+cryptography>=42.0.0
+
 # Google Calendar Integration
 # google-auth==2.36.0
 # google-auth-oauthlib==1.2.1
