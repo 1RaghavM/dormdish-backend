@@ -80,6 +80,12 @@ class BugReportRequest(BaseModel):
     screen_name: str
     app_version: str
 
+class PublicBugReportRequest(BaseModel):
+    name: str
+    email: EmailStr
+    category: str
+    description: str
+
 
 def send_bug_report_email(user_email: str, description: str, screen_name: str, app_version: str) -> bool:
     """Send bug report email via Gmail SMTP"""
@@ -1276,7 +1282,21 @@ async def request_school_endpoint(data: SchoolRequest):
         logger.exception("/request-school failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to submit school request")
 
-
+@app.post('/report-bug-public', summary='Submit a public bug report from landing page')
+async def report_bug_public(data: PublicBugReportRequest):
+    try:
+        payload = {
+            "name": data.name.strip(),
+            "email": data.email.strip().lower(),
+            "category": data.category.strip(),
+            "description": data.description.strip(),
+            "created_at": datetime.now().isoformat(),
+        }
+        supabase.table('bug_reports_public').insert(payload).execute()
+        return {"success": True, "message": "Bug report submitted successfully."}
+    except Exception as e:
+        logger.exception("/report-bug-public failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to submit bug report")
 
 
 class WaitlistJoinRequest(BaseModel):
