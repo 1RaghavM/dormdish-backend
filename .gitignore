@@ -323,6 +323,7 @@ test_commands.ps1
 # *.json
 
 !tests/test_nutrition.py
+!tests/test_food_scan_storage.py
 
 # Local configuration files
 config.local.py
