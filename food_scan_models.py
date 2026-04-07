@@ -64,6 +64,41 @@ class FoodScanResponse(BaseModel):
     date: str
 
 
+# ── Upload URL endpoint ──────────────────────────────────────────────────────
+
+
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "heif", "webp"}
+
+
+class FoodScanUploadUrlRequest(BaseModel):
+    """Request body for ``POST /food-scan/upload-url``."""
+
+    file_extension: str = "jpg"
+
+
+class FoodScanUploadUrlResponse(BaseModel):
+    """Response returned by ``POST /food-scan/upload-url``."""
+
+    upload_url: str
+    image_path: str
+
+
+# ── Analyze endpoint (JSON mode — storage path) ─────────────────────────────
+
+
+class FoodScanAnalyzeRequest(BaseModel):
+    """Request body for ``POST /food-scan/analyze`` when using storage path mode.
+
+    Used when the client uploads the image to Supabase Storage first,
+    then passes the storage path instead of the image bytes.
+    """
+
+    image_path: str
+    dining_hall: str
+    date: str
+    description: Optional[str] = None
+
+
 # ── Feedback endpoint ───────────────────────────────────────────────────────
 
 
