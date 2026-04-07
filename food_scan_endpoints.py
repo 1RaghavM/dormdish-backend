@@ -45,6 +45,70 @@ from food_scan_models import ALLOWED_IMAGE_EXTENSIONS
 logger = logging.getLogger("dormdish.api")
 
 
+async def _run_analysis(
+    image_data: bytes,
+    dining_hall: str,
+    date: str,
+    description: Optional[str] = None,
+) -> dict:
+    """Shared analysis logic used by both multipart and JSON-mode handlers."""
+    if not dining_hall or not dining_hall.strip():
+        raise HTTPException(status_code=400, detail="dining_hall is required")
+    dining_hall = dining_hall.strip()
+
+    if not date or not date.strip():
+        raise HTTPException(status_code=400, detail="date is required")
+    date = date.strip()
+
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not date_pattern.match(date):
+        raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format")
+
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date is not a valid calendar date")
+
+    from food_scan_menu import prepare_menu_for_food_scan
+    try:
+        menu_info = await prepare_menu_for_food_scan(dining_hall, date)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to fetch menu for food scan: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch dining hall menu")
+
+    cache_name = None
+    try:
+        from menu_cache import get_cache_name
+        from food_scan_menu import resolve_dining_hall
+        university, hall_slug = resolve_dining_hall(dining_hall)
+        cache_name = await get_cache_name(
+            dining_hall=hall_slug,
+            university=university,
+            date=date,
+            use_case="food_scan",
+        )
+    except Exception as e:
+        logger.debug(f"Cache lookup skipped: {e}")
+
+    from food_scan_agent import analyze_food_photo
+    try:
+        result = await analyze_food_photo(
+            image_data=image_data,
+            menu_json=menu_info["menu_json"],
+            dining_hall=dining_hall,
+            date=date,
+            description=description,
+            cached_content=cache_name,
+        )
+    except Exception as e:
+        logger.error(f"Food scan analysis failed: {e}")
+        raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
+
+    return result
+
+
 # ==================== ANALYZE HANDLER ====================
 
 async def handle_food_scan_analyze(
@@ -81,67 +145,7 @@ async def handle_food_scan_analyze(
     if len(image_data) > 4 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large (max 4MB)")
 
-    # ── 2. Validate dining_hall ──
-    if not dining_hall or not dining_hall.strip():
-        raise HTTPException(status_code=400, detail="dining_hall is required")
-    dining_hall = dining_hall.strip()
-
-    # ── 3. Validate date format (YYYY-MM-DD) ──
-    if not date or not date.strip():
-        raise HTTPException(status_code=400, detail="date is required")
-    date = date.strip()
-
-    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    if not date_pattern.match(date):
-        raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format")
-
-    # Also validate it's a real date
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="date is not a valid calendar date")
-
-    # ── 4. Fetch menu for the dining hall ──
-    from food_scan_menu import prepare_menu_for_food_scan
-    try:
-        menu_info = await prepare_menu_for_food_scan(dining_hall, date)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to fetch menu for food scan: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch dining hall menu")
-
-    # ── 4b. Look up Gemini cache handle (optional optimization) ──
-    cache_name = None
-    try:
-        from menu_cache import get_cache_name
-        from food_scan_menu import resolve_dining_hall
-        university, hall_slug = resolve_dining_hall(dining_hall)
-        cache_name = await get_cache_name(
-            dining_hall=hall_slug,
-            university=university,
-            date=date,
-            use_case="food_scan",
-        )
-    except Exception as e:
-        logger.debug(f"Cache lookup skipped: {e}")
-
-    # ── 5. Analyze with Gemini ──
-    from food_scan_agent import analyze_food_photo
-    try:
-        result = await analyze_food_photo(
-            image_data=image_data,
-            menu_json=menu_info["menu_json"],
-            dining_hall=dining_hall,
-            date=date,
-            description=description,
-            cached_content=cache_name,
-        )
-    except Exception as e:
-        logger.error(f"Food scan analysis failed: {e}")
-        raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
-
-    return result
+    return await _run_analysis(image_data, dining_hall, date, description)
 
 
 # ==================== UPLOAD URL HANDLER ====================
@@ -192,6 +196,49 @@ async def handle_food_scan_upload_url(
     logger.info(f"Generated upload URL for user {user_id}: {image_path}")
 
     return {"upload_url": signed_url, "image_path": image_path}
+
+
+# ==================== ANALYZE (JSON MODE) HANDLER ====================
+
+IMAGE_PATH_PATTERN = re.compile(
+    r"^[a-f0-9\-]+/[a-f0-9\-]+\.(jpg|jpeg|png|heic|heif|webp)$"
+)
+
+
+async def handle_food_scan_analyze_json(
+    data,  # FoodScanAnalyzeRequest pydantic model
+    current_user: dict,
+    supabase_client,
+) -> dict:
+    """Handler for POST /food-scan/analyze-json (storage path mode)."""
+    user_id = current_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found in session")
+
+    if not IMAGE_PATH_PATTERN.match(data.image_path):
+        raise HTTPException(status_code=400, detail="Invalid image_path format")
+
+    path_user_id = data.image_path.split("/")[0]
+    if path_user_id != str(user_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    try:
+        image_data = supabase_client.storage.from_(FOOD_SCAN_BUCKET).download(data.image_path)
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "not found" in error_msg or "404" in error_msg:
+            raise HTTPException(status_code=404, detail="Image not found in storage")
+        logger.error(f"Failed to download image from storage: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve image from storage")
+
+    if not image_data:
+        raise HTTPException(status_code=404, detail="Image not found in storage")
+
+    logger.info(
+        f"Downloaded image from storage: path={data.image_path} size={len(image_data)} bytes"
+    )
+
+    return await _run_analysis(image_data, data.dining_hall, data.date, data.description)
 
 
 # ==================== FEEDBACK HANDLER ====================
