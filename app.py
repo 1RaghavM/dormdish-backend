@@ -285,6 +285,12 @@ STRIPE_YEARLY_PRICE_ID = os.getenv("STRIPE_YEARLY_PRICE_ID", "")
 ACTIVATION_SECRET = os.getenv("ACTIVATION_SECRET", "")
 ACTIVATION_DATE = "2025-08-25"  # Semester start date for deferred activation
 
+# APNs (Apple Push Notification service) configuration
+APNS_KEY_ID = os.getenv("APNS_KEY_ID")
+APNS_TEAM_ID = os.getenv("APNS_TEAM_ID")
+APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.dormdish.app")
+APNS_KEY_CONTENT = os.getenv("APNS_KEY_CONTENT")  # Base64-encoded .p8 key
+
 class _SupabaseNotConfigured:
     def table(self, *_args, **_kwargs):
         raise HTTPException(
@@ -304,6 +310,107 @@ except Exception as exc:
 
 
 # ===================================
+# APNs (Apple Push Notification service)
+# ===================================
+
+_apns_jwt_cache: Dict[str, Any] = {"token": None, "expires": 0.0}
+
+
+def _get_apns_signing_key():
+    """Decode the base64-encoded .p8 private key from env."""
+    import base64
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    if not APNS_KEY_CONTENT:
+        raise RuntimeError("APNS_KEY_CONTENT env var is not set")
+    pem_bytes = base64.b64decode(APNS_KEY_CONTENT)
+    return load_pem_private_key(pem_bytes, password=None)
+
+
+def _get_apns_jwt() -> str:
+    """Return a cached APNs JWT, refreshing when within 10 min of expiry (Apple allows 1 hr)."""
+    import jwt as pyjwt
+
+    now = time.time()
+    if _apns_jwt_cache["token"] and now < _apns_jwt_cache["expires"]:
+        return _apns_jwt_cache["token"]
+
+    if not APNS_KEY_ID or not APNS_TEAM_ID:
+        raise RuntimeError("APNS_KEY_ID and APNS_TEAM_ID env vars must be set")
+
+    private_key = _get_apns_signing_key()
+    payload = {"iss": APNS_TEAM_ID, "iat": int(now)}
+    token = pyjwt.encode(payload, private_key, algorithm="ES256", headers={"kid": APNS_KEY_ID})
+    _apns_jwt_cache["token"] = token
+    _apns_jwt_cache["expires"] = now + 50 * 60  # 50 minutes
+    return token
+
+
+async def _send_apns_notification(
+    device_token: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Send a push notification directly via APNs HTTP/2."""
+    try:
+        jwt_token = _get_apns_jwt()
+    except RuntimeError as exc:
+        logger.warning("APNs not configured: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    payload: Dict[str, Any] = {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": "default",
+        },
+    }
+    # Merge custom data at root level so iOS reads userInfo["type"] etc.
+    if data:
+        payload.update(data)
+
+    url = f"https://api.push.apple.com/3/device/{device_token}"
+    headers = {
+        "authorization": f"bearer {jwt_token}",
+        "apns-topic": APNS_BUNDLE_ID,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+    }
+
+    try:
+        async with httpx.AsyncClient(http2=True, timeout=HTTP_CLIENT_TIMEOUT) as client:
+            response = await client.post(url, json=payload, headers=headers)
+
+            if response.status_code == 200:
+                logger.info("APNs notification sent to %s...%s", device_token[:8], device_token[-4:])
+                return {"success": True, "result": {"status": "ok"}}
+
+            # Token is no longer valid — deactivate it
+            if response.status_code == 410:
+                logger.warning("APNs token expired (410), deactivating: %s", device_token[:16])
+                try:
+                    supabase.table("push_tokens")\
+                        .update({"active": False})\
+                        .eq("token", device_token)\
+                        .execute()
+                except Exception:
+                    pass
+                return {"success": False, "error": "token_expired"}
+
+            # Auth failure — invalidate cached JWT so next call re-creates it
+            if response.status_code == 403:
+                _apns_jwt_cache["token"] = None
+                _apns_jwt_cache["expires"] = 0.0
+
+            body_text = response.text
+            logger.error("APNs error %d: %s", response.status_code, body_text)
+            return {"success": False, "error": f"APNs {response.status_code}: {body_text}"}
+    except Exception as e:
+        logger.error("Failed to send APNs notification: %s", e)
+        return {"success": False, "error": str(e)}
+
+
+# ===================================
 # Push Notification Functions
 # ===================================
 
@@ -315,22 +422,33 @@ async def send_push_notification(
     priority: str = "high"
 ) -> Dict[str, Any]:
     """
-    Send a push notification via Expo's push notification service.
-    
-    Args:
-        expo_push_token: The Expo push token for the device
-        title: Notification title
-        body: Notification body text
-        data: Optional dictionary of data to include with the notification
-        priority: Priority level ('default', 'normal', 'high')
-    
-    Returns:
-        Dictionary with the response from Expo's API
+    Dispatch a push notification to the correct transport.
+
+    - ExponentPushToken[...] → Expo push service
+    - 64+ hex chars          → APNs direct
     """
-    if not expo_push_token or not expo_push_token.startswith('ExponentPushToken['):
-        logger.warning(f"Invalid Expo push token format: {expo_push_token}")
-        return {"success": False, "error": "Invalid token format"}
-    
+    if not expo_push_token:
+        return {"success": False, "error": "Empty token"}
+
+    if expo_push_token.startswith("ExponentPushToken["):
+        return await _send_expo_notification(expo_push_token, title, body, data, priority)
+
+    # Native APNs hex token (device tokens are 64 hex chars)
+    if re.fullmatch(r"[0-9a-fA-F]{64,}", expo_push_token):
+        return await _send_apns_notification(expo_push_token, title, body, data)
+
+    logger.warning("Unrecognized push token format: %s", expo_push_token[:30])
+    return {"success": False, "error": "Unrecognized token format"}
+
+
+async def _send_expo_notification(
+    expo_push_token: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    priority: str = "high"
+) -> Dict[str, Any]:
+    """Send a push notification via Expo's push notification service."""
     message = {
         'to': expo_push_token,
         'sound': 'default',
@@ -340,7 +458,7 @@ async def send_push_notification(
         'priority': priority,
         'channelId': 'default',  # Android channel
     }
-    
+
     try:
         async with httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT) as client:
             response = await client.post(
@@ -582,6 +700,7 @@ async def send_meal_plan_ready_notification(user_id: str, date: str) -> bool:
             title="✨ Your Meal Plan is Ready!",
             body="Check out your personalized nutrition recommendations for today.",
             data={
+                "type": "meal_plan_ready",
                 "screen": "meal-plan-detail",
                 "date": date
             }
@@ -2805,6 +2924,68 @@ async def register_push_token(data: PushTokenRequest, current_user=Depends(get_c
     except Exception as e:
         logger.error(f"Failed to register push token: {e}")
         raise HTTPException(status_code=500, detail="Failed to register push token")
+
+
+class DeviceRegisterRequest(BaseModel):
+    """Request model for native device token registration (iOS APNs)."""
+    token: str
+    platform: str  # 'ios', 'android'
+
+
+@app.post('/device/register', summary='Register native device push token')
+async def device_register(data: DeviceRegisterRequest, current_user=Depends(get_current_user)):
+    """
+    Register or update a native device push token (e.g. APNs hex token from iOS).
+    The iOS app calls this endpoint on every launch.
+    """
+    user_id = str(current_user.get("id"))
+
+    if data.platform == "ios" and not re.fullmatch(r"[0-9a-fA-F]{64,}", data.token):
+        raise HTTPException(status_code=400, detail="Invalid APNs device token format")
+
+    try:
+        existing = supabase.table('push_tokens')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .eq('token', data.token)\
+            .execute()
+
+        now = datetime.now().isoformat()
+
+        if existing.data and len(existing.data) > 0:
+            supabase.table('push_tokens')\
+                .update({
+                    'active': True,
+                    'updated_at': now,
+                    'platform': data.platform,
+                })\
+                .eq('id', existing.data[0]['id'])\
+                .execute()
+            logger.info("Updated device token for user %s", user_id)
+        else:
+            # Deactivate old tokens for this user (keep only one active)
+            supabase.table('push_tokens')\
+                .update({'active': False})\
+                .eq('user_id', user_id)\
+                .execute()
+
+            supabase.table('push_tokens').insert({
+                'user_id': user_id,
+                'token': data.token,
+                'platform': data.platform,
+                'active': True,
+                'created_at': now,
+                'updated_at': now,
+            }).execute()
+            logger.info("Registered new device token for user %s", user_id)
+
+        return {"success": True, "message": "Device token registered successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to register device token: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to register device token")
 
 
 @app.api_route('/api/send-daily-reminders', methods=['GET', 'POST'], summary='Send daily meal plan reminders (admin/cron only)')
@@ -6469,7 +6650,16 @@ async def delete_food_log_entry(
 
 # ==================== FOOD SCAN ENDPOINTS ====================
 
-from food_scan_models import FoodScanFeedbackRequest
+from food_scan_models import FoodScanFeedbackRequest, FoodScanUploadUrlRequest, FoodScanAnalyzeRequest
+
+
+@app.post('/food-scan/upload-url', summary='Get a signed URL to upload a food photo')
+async def food_scan_upload_url(
+    data: FoodScanUploadUrlRequest = Body(default=FoodScanUploadUrlRequest()),
+    current_user=Depends(get_current_user),
+):
+    from food_scan_endpoints import handle_food_scan_upload_url
+    return await handle_food_scan_upload_url(data.file_extension, current_user, supabase)
 
 
 @app.post('/food-scan/analyze', summary='Analyze a food photo using AI')
@@ -6482,6 +6672,15 @@ async def food_scan_analyze(
 ):
     from food_scan_endpoints import handle_food_scan_analyze
     return await handle_food_scan_analyze(image, dining_hall, date, description, current_user)
+
+
+@app.post('/food-scan/analyze-json', summary='Analyze a food photo from storage path')
+async def food_scan_analyze_json(
+    data: FoodScanAnalyzeRequest,
+    current_user=Depends(get_current_user),
+):
+    from food_scan_endpoints import handle_food_scan_analyze_json
+    return await handle_food_scan_analyze_json(data, current_user, supabase)
 
 
 @app.post('/food-scan/feedback', summary='Submit feedback on food scan accuracy')
