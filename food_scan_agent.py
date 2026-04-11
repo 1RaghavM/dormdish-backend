@@ -104,8 +104,8 @@ def _extract_first_json_object(text: str) -> str:
 
 async def analyze_food_photo(
     image_data: bytes,
-    menu_json: str,
-    dining_hall: str,
+    menu_json: str | None,
+    dining_hall: str | None,
     date: str,
     description: str | None = None,
     cached_content: str | None = None,
@@ -136,11 +136,16 @@ async def analyze_food_photo(
     client = _get_client()
 
     # ---- Build prompts ----
-    system_prompt = build_system_prompt(
-        dining_hall=dining_hall,
-        date=date,
-        menu_json=menu_json,
-    )
+    if menu_json and dining_hall:
+        system_prompt = build_system_prompt(
+            dining_hall=dining_hall,
+            date=date,
+            menu_json=menu_json,
+        )
+    else:
+        from food_scan_prompts import build_own_food_system_prompt
+        system_prompt = build_own_food_system_prompt()
+
     user_prompt = build_user_prompt(description=description)
 
     # ---- Model configuration ----

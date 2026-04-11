@@ -188,7 +188,7 @@ def calculate_totals(items: list[dict[str, Any]]) -> dict[str, float]:
 
 def build_scan_response(
     items: list[dict[str, Any]],
-    dining_hall: str,
+    dining_hall: str | None,
     date: str,
 ) -> dict[str, Any]:
     """Build the final API response dict for the food scan analyse endpoint.

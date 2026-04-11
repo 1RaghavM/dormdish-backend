@@ -6582,6 +6582,33 @@ async def barcode_lookup(
 
 # ==================== FOOD LOG ENDPOINTS ====================
 
+_FOOD_LOG_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_food_log_date(date: str) -> str:
+    """Validate a food log date string.
+
+    The food log stores dates as plain `YYYY-MM-DD` strings representing the
+    user's local calendar date. We don't do timezone conversion here — the
+    client is the source of truth for what "today" means to the user — but
+    we do enforce the format so malformed input fails loudly instead of
+    silently returning empty results from an exact-match query.
+    """
+    if not isinstance(date, str) or not _FOOD_LOG_DATE_RE.match(date):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date format. Expected YYYY-MM-DD.",
+        )
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date. Expected a real calendar date in YYYY-MM-DD format.",
+        )
+    return date
+
+
 @app.post("/food-log/add", summary="Add item to food log")
 async def add_food_log_entry(
     req: FoodLogAddRequest,
@@ -6589,6 +6616,7 @@ async def add_food_log_entry(
 ):
     """Add a scanned or manually entered food item to the daily food log."""
     try:
+        _validate_food_log_date(req.date)
         entry_data = {
             "user_id": str(user["id"]),
             "date": req.date,
@@ -6632,6 +6660,7 @@ async def get_food_log(
 ):
     """Get all food log entries for a specific date."""
     try:
+        _validate_food_log_date(date)
         result = supabase.table("food_log") \
             .select("*") \
             .eq("user_id", str(user["id"])) \
@@ -6644,6 +6673,8 @@ async def get_food_log(
             "message": "Food log retrieved",
             "entries": result.data or [],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get food log: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get food log: {str(e)}")
@@ -6685,7 +6716,7 @@ async def food_scan_upload_url(
 @app.post('/food-scan/analyze', summary='Analyze a food photo using AI')
 async def food_scan_analyze(
     image: UploadFile = File(...),
-    dining_hall: str = Form(...),
+    dining_hall: Optional[str] = Form(None),
     date: str = Form(...),
     description: Optional[str] = Form(None),
     current_user=Depends(get_current_user),

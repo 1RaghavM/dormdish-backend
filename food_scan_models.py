@@ -60,7 +60,7 @@ class FoodScanResponse(BaseModel):
     scan_id: str
     items: List[FoodScanItem]
     totals: FoodScanTotals
-    dining_hall: str
+    dining_hall: Optional[str] = None
     date: str
 
 
@@ -94,7 +94,7 @@ class FoodScanAnalyzeRequest(BaseModel):
     """
 
     image_path: str
-    dining_hall: str
+    dining_hall: Optional[str] = None
     date: str
     description: Optional[str] = None
 
@@ -114,7 +114,7 @@ class FoodScanFeedbackRequest(BaseModel):
     accurate: bool
     original_items: List[FoodScanItem]
     edited_items: List[FoodScanItem]
-    dining_hall: str
+    dining_hall: Optional[str] = None
     date: str
 
 

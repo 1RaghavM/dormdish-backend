@@ -47,14 +47,13 @@ logger = logging.getLogger("dormdish.api")
 
 async def _run_analysis(
     image_data: bytes,
-    dining_hall: str,
+    dining_hall: str | None,
     date: str,
     description: Optional[str] = None,
 ) -> dict:
     """Shared analysis logic used by both multipart and JSON-mode handlers."""
-    if not dining_hall or not dining_hall.strip():
-        raise HTTPException(status_code=400, detail="dining_hall is required")
-    dining_hall = dining_hall.strip()
+    if dining_hall is not None:
+        dining_hall = dining_hall.strip() or None
 
     if not date or not date.strip():
         raise HTTPException(status_code=400, detail="date is required")
@@ -69,42 +68,68 @@ async def _run_analysis(
     except ValueError:
         raise HTTPException(status_code=400, detail="date is not a valid calendar date")
 
-    from food_scan_menu import prepare_menu_for_food_scan
-    try:
-        menu_info = await prepare_menu_for_food_scan(dining_hall, date)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to fetch menu for food scan: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch dining hall menu")
-
-    cache_name = None
-    try:
-        from menu_cache import get_cache_name
-        from food_scan_menu import resolve_dining_hall
-        university, hall_slug = resolve_dining_hall(dining_hall)
-        cache_name = await get_cache_name(
-            dining_hall=hall_slug,
-            university=university,
-            date=date,
-            use_case="food_scan",
-        )
-    except Exception as e:
-        logger.debug(f"Cache lookup skipped: {e}")
-
     from food_scan_agent import analyze_food_photo
-    try:
-        result = await analyze_food_photo(
-            image_data=image_data,
-            menu_json=menu_info["menu_json"],
-            dining_hall=dining_hall,
-            date=date,
-            description=description,
-            cached_content=cache_name,
-        )
-    except Exception as e:
-        logger.error(f"Food scan analysis failed: {e}")
-        raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
+
+    if dining_hall:
+        # --- DINING HALL MODE (existing flow) ---
+        from food_scan_menu import prepare_menu_for_food_scan
+        try:
+            menu_info = await prepare_menu_for_food_scan(dining_hall, date)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.error(f"Failed to fetch menu for food scan: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch dining hall menu")
+
+        cache_name = None
+        try:
+            from menu_cache import get_cache_name
+            from food_scan_menu import resolve_dining_hall
+            university, hall_slug = resolve_dining_hall(dining_hall)
+            cache_name = await get_cache_name(
+                dining_hall=hall_slug,
+                university=university,
+                date=date,
+                use_case="food_scan",
+            )
+        except Exception as e:
+            logger.debug(f"Cache lookup skipped: {e}")
+
+        try:
+            result = await analyze_food_photo(
+                image_data=image_data,
+                menu_json=menu_info["menu_json"],
+                dining_hall=dining_hall,
+                date=date,
+                description=description,
+                cached_content=cache_name,
+            )
+        except Exception as e:
+            logger.error(f"Food scan analysis failed: {e}")
+            raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
+
+    else:
+        # --- OWN FOOD MODE (no menu context) ---
+        try:
+            result = await analyze_food_photo(
+                image_data=image_data,
+                menu_json=None,
+                dining_hall=None,
+                date=date,
+                description=description,
+                cached_content=None,
+            )
+        except Exception as e:
+            logger.error(f"Own-food scan analysis failed: {e}")
+            raise HTTPException(status_code=500, detail="Food scan analysis failed. Please try again.")
+
+        # Enrich with USDA nutrition data
+        from usda_service import enrich_items_with_usda
+        from food_scan_validation import calculate_totals
+        items = result.get("items", [])
+        result["items"] = await enrich_items_with_usda(items)
+        # Recalculate totals since USDA may have replaced nutrition values
+        result["totals"] = calculate_totals(result["items"])
 
     return result
 
@@ -113,7 +138,7 @@ async def _run_analysis(
 
 async def handle_food_scan_analyze(
     image: UploadFile,
-    dining_hall: str,
+    dining_hall: str | None,
     date: str,
     description: Optional[str] = None,
     current_user: dict = None,
