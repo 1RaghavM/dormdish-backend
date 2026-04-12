@@ -95,13 +95,13 @@ async def search_usda(query: str) -> USDAResult | None:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
+            resp = await client.post(
                 f"{USDA_API_BASE}/foods/search",
-                params={
-                    "api_key": api_key,
+                params={"api_key": api_key},
+                json={
                     "query": query,
                     "pageSize": 5,
-                    "dataType": ",".join(_DATA_TYPE_PRIORITY),
+                    "dataType": list(_DATA_TYPE_PRIORITY),
                 },
             )
             resp.raise_for_status()
