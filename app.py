@@ -5978,25 +5978,30 @@ async def save_meal_plan(
     try:
         # Check if this is a new plan or an update
         is_update = payload.plan_id is not None
-        
+
+        # When the client did not supply a plan_id, look up any existing row
+        # for this (user_id, date, dining_hall) and reuse its id. Without this
+        # lookup the upsert below would generate a fresh UUID, miss the
+        # primary-key conflict target, and fall through to an INSERT that
+        # violates the saved_meal_plans_user_date_hall unique constraint
+        # (returning a 23505 / 409 Conflict).
         if not is_update:
-            # For new plans, check if a meal plan already exists for this date
-            # NOTE: Disabled for testing so multiple meal plans per day can be created.
-            # existing_plan = supabase.table("saved_meal_plans")\
-            #     .select("id, dining_hall")\
-            #     .eq("user_id", current_user["id"])\
-            #     .eq("date", payload.date)\
-            #     .execute()
-            # 
-            # if existing_plan.data and len(existing_plan.data) > 0:
-            #     existing = existing_plan.data[0]
-            #     raise HTTPException(
-            #         status_code=409,
-            #         detail=f"You already have a meal plan for {payload.date} at {existing['dining_hall']}. Please update or delete it first."
-            #     )
-            pass
-        
-        plan_id = payload.plan_id or str(uuid4())
+            existing_plan = supabase.table("saved_meal_plans")\
+                .select("id")\
+                .eq("user_id", current_user["id"])\
+                .eq("date", payload.date)\
+                .eq("dining_hall", payload.dining_hall)\
+                .limit(1)\
+                .execute()
+            if existing_plan.data:
+                plan_id = existing_plan.data[0]["id"]
+                # Treat this as an update so we don't re-fire the
+                # "meal plan ready" push notification on every resave.
+                is_update = True
+            else:
+                plan_id = str(uuid4())
+        else:
+            plan_id = payload.plan_id
         
         # Prepare data to save
         save_data = {
