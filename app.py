@@ -2357,7 +2357,7 @@ async def auth_google_register(data: GoogleRegisterRequest):
         print(f"[google.register] unhandled_error: {e}")
         raise HTTPException(status_code=500, detail="Google registration failed")
 
-#hi
+
 @app.post('/auth/apple/login')
 async def auth_apple_login(payload: AppleIdTokenRequest):
     """Login with Apple ID token.
