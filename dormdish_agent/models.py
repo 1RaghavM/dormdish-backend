@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
-    AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, StringConstraints,
+    AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl, StringConstraints,
     TypeAdapter, model_validator,
 )
 
@@ -16,13 +16,24 @@ Amount = Annotated[float, Field(strict=True, ge=0, le=100_000, allow_inf_nan=Fal
 MealType = Literal["breakfast", "lunch", "dinner"]
 
 
+def calendar_date(value):
+    if type(value) is date:
+        return value
+    if not isinstance(value, str) or len(value) != 10 or value[4] != "-" or value[7] != "-":
+        raise ValueError("Expected YYYY-MM-DD calendar date")
+    return date.fromisoformat(value)
+
+
+CalendarDate = Annotated[date, BeforeValidator(calendar_date)]
+
+
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
 class PlanningContext(Contract):
     dining_hall: Hall
-    date: date
+    date: CalendarDate
     meal_type: MealType | None = None
 
 
@@ -55,7 +66,7 @@ class MealProposal(Contract):
     id: UUID
     version: PositiveInt
     dining_hall: Hall
-    date: date
+    date: CalendarDate
     meal_type: MealType
     description: Annotated[str, Field(max_length=4000)]
     items: Annotated[list[MealItem], Field(min_length=1, max_length=30)]
@@ -102,18 +113,18 @@ class ActionRequiredData(Contract):
 
 class CompleteData(Contract):
     saved_plan_id: UUID | None = None
-    preferences_changed: bool = False
+    preferences_changed: Annotated[bool, Field(strict=True)] = False
     citations: Annotated[list[Citation], Field(max_length=20)] = Field(default_factory=list)
 
 
 class ErrorData(Contract):
     code: Name
     message: Annotated[str, Field(min_length=1, max_length=2000)]
-    retryable: bool
+    retryable: Annotated[bool, Field(strict=True)]
 
 
 class EventEnvelope(Contract):
-    version: Literal[1] = 1
+    version: Annotated[int, Field(strict=True, ge=1, le=1)] = 1
     sequence: PositiveInt
     run_id: UUID
 
