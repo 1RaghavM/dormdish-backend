@@ -18,13 +18,14 @@ Foundation backend PRs 2 and 1 merged, main `aa01f47b207886be3f099ace921bf6f7685
 | T-IOS ios_testing | ios-tests / test/dd-agent/ios-streaming | A-IOS exact70d5c56 | iOS PR2 / ab1e2f11378226a27d58d5a623ecf5a4cdf2932d | 16pass; old decoder mutation2fail; fresh review_ios_tests no findings, confirmed native evidence; merged18d1745f2dba25e498459aaa0190b5d03ba52569 |
 | XCODE coordinator | ios-xcode / fix/dd-agent/xcode27-revenuecat | T-IOS exactab1e2f1 | iOS PR3 / ba6d7b5d68e5ec6b0b77615dab9deddf49d02f5b | Full native build+16XCTest pass; fresh review_ios_xcode no findings; merged6240cdaac6790bab88375782c6661bf152df4899 |
 | F-IOS ios_conversation | ios-chat / feat/dd-agent/ios-chat | XCODE exactba6d7b5 | iOS PR4 / f5942e4 | Service/state selfcheck passed; native UI active, ios_chat_testing active owns test/project files |
-| C-RUNTIME queued | backend-runtime / feat/dd-agent/runtime | main aa01f47 + meals00b1b37 + persistence4b06aaa | prepared integration a0c321680741e2a69c2ab2ceb768db4923dfaaa3 | Own runtime/tools, focused checks and docs; no app.py ownership assigned yet. Coordinator updates this ledger here |
+| C-RUNTIME queued | backend-runtime / feat/dd-agent/runtime | main aa01f47 + meals00b1b37 + persistence4b06aaa + menu3197304 | prepared integration adc1fa0ebc8bae67748fe4d6a906df1588ca50bb | Own runtime/tools, focused checks and docs; no app.py ownership assigned yet. Coordinator updates this ledger here |
+
+| MENU-SOURCE coordinator | backend-menu-source / fix/dd-agent/menu-provenance | main aa01f47 | backend PR7 /3197304 | 139pass including9new source tests;8initial cases fail meaningfully on oldmain; companion test author and fresh reviews queued |
+| T-CHAT ios_chat_testing | ios-chat-tests / test/dd-agent/ios-chat | F-IOS exactf5942e4 + incoming UI update | iOS PR5 /63c17fb | 16new XCTest authored; simulator run active, final SHA/results pending |
 
 All implementation/testing owners must commit and push their own work, create an early draft PR and attach it. Every PR gets a separate fresh reviewer. Same-account reviews do not bypass any GitHub approval requirement. New heads require refreshed evidence. Test PRs remain explicit merge/rollout dependencies. Slot cap currently permits coordinator +two workers; queued assignments rotate after completion.
 
-| MENU-SOURCE coordinator | backend-menu-source / fix/dd-agent/menu-provenance | main aa01f47 | backend PR7 /3197304 | 139pass including9new source tests;8initial cases fail meaningfully on oldmain; companion test author and fresh reviews queued |
 
-| T-CHAT ios_chat_testing | ios-chat-tests / test/dd-agent/ios-chat | F-IOS exactf5942e4 + incoming UI update | iOS PR5 /63c17fb | 16new XCTest authored; simulator run active, final SHA/results pending |
 
 ## Access and evidence
 
