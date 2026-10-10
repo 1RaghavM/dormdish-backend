@@ -233,3 +233,24 @@ def test_real_sdk_import_and_required_offline_interfaces():
     assert callable(RunResult.to_input_list)
     assert RunConfig(tracing_disabled=True).tracing_disabled
     assert Agent(name="offline-smoke", model="gpt-6-luna", tools=[WebSearchTool()]).model == "gpt-6-luna"
+
+
+@pytest.mark.parametrize("date", [0, "2026-10-10T00:00:00"])
+def test_client_planning_date_must_be_a_calendar_date_string(date):
+    with pytest.raises(ValidationError):
+        TurnRequest.model_validate(turn(context={"dining_hall": "Busch", "date": date}))
+
+
+@pytest.mark.parametrize("version", [True, 1.0])
+def test_event_version_rejects_noninteger_json_values(version):
+    with pytest.raises(ValidationError):
+        agent_event_adapter.validate_python(event(version=version))
+
+
+@pytest.mark.parametrize("kind,field", [("complete", "preferences_changed"), ("error", "retryable")])
+@pytest.mark.parametrize("value", [0, "false"])
+def test_terminal_flags_reject_coercion(kind, field, value):
+    data = event(kind)
+    data["data"][field] = value
+    with pytest.raises(ValidationError):
+        agent_event_adapter.validate_python(data)
