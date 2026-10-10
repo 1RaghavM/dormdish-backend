@@ -26,6 +26,7 @@ class FoodContext:
     snapshot: MenuSnapshot | None = field(default=None, init=False)
     proposal: MealProposal | None = field(default=None, init=False)
     validation_attempts: int = field(default=0, init=False)
+    tool_calls: int = field(default=0, init=False)
 
     def __post_init__(self):
         self.user_id = str(UUID(self.user_id))
@@ -38,6 +39,11 @@ class FoodContext:
             raise ValueError('A supported campus, hall, and meal are required')
         self.university = campus['university']
         self.planning = self.planning.model_copy(update={'dining_hall': hall['slug']})
+
+    def claim_tool(self):
+        self.tool_calls += 1
+        if self.tool_calls > 16:
+            raise ValueError('Tool budget exhausted')
 
     async def menu(self) -> MenuSnapshot:
         def read():
@@ -91,6 +97,7 @@ def _safe_tool_error(_context, _error):
 async def read_profile(context: RunContextWrapper[FoodContext]) -> dict:
     """Read current trusted goals, hard restrictions, and soft preferences without identifying profile data."""
     data = context.context
+    data.claim_tool()
     return {'targets': data.targets.model_dump(), 'restrictions': data.restrictions,
             'allergens': data.allergens, 'preferences': data.preferences,
             'planning': data.planning.model_dump(mode='json')}
@@ -99,6 +106,7 @@ async def read_profile(context: RunContextWrapper[FoodContext]) -> dict:
 @function_tool(failure_error_function=_safe_tool_error)
 async def retrieve_menu(context: RunContextWrapper[FoodContext]) -> dict:
     """Retrieve the authoritative menu for the server-selected campus, hall, date, and meal."""
+    context.context.claim_tool()
     snapshot = await context.context.menu()
     return {'fetched_at': snapshot.fetched_at.isoformat(), 'items': snapshot.items}
 
@@ -106,12 +114,14 @@ async def retrieve_menu(context: RunContextWrapper[FoodContext]) -> dict:
 @function_tool(failure_error_function=_safe_tool_error)
 async def read_intake(context: RunContextWrapper[FoodContext]) -> dict:
     """Read owner-scoped food logs and their remaining targets, with explicit completion coverage."""
+    context.context.claim_tool()
     return await context.context.intake()
 
 
 @function_tool(failure_error_function=_safe_tool_error)
 async def preview_meal(context: RunContextWrapper[FoodContext], selections: list[Selection]) -> dict:
     """Validate canonical menu selections and calculate nutrition. At most one repair; no save occurs."""
+    context.context.claim_tool()
     return context.context.preview(selections)
 
 

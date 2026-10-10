@@ -87,15 +87,19 @@ class AgentTurn:
         self._started = True
         result = None
         buffer = ''
-        privacy_token = _private_run.set(True)
         try:
             async with asyncio.timeout(self.deadline_seconds):
                 agent = Agent[FoodContext](name='DormDish', instructions=INSTRUCTIONS, tools=READ_TOOLS,
                     model=OpenAIResponsesModel(MODEL, self.client),
                     model_settings=ModelSettings(max_tokens=2048, parallel_tool_calls=False, store=False))
-                result = Runner.run_streamed(agent, input=self.history + [{'role': 'user', 'content': self.request.text}],
-                    context=self.context, max_turns=8,
-                    run_config=RunConfig(tracing_disabled=True, trace_include_sensitive_data=False))
+                privacy_token = _private_run.set(True)
+                try:
+                    # SDK background tasks inherit privacy without leaking it into the SSE consumer.
+                    result = Runner.run_streamed(agent, input=self.history + [{'role': 'user', 'content': self.request.text}],
+                        context=self.context, max_turns=8,
+                        run_config=RunConfig(tracing_disabled=True, trace_include_sensitive_data=False))
+                finally:
+                    _private_run.reset(privacy_token)
                 tool_count = 0
                 shown_proposal = None
                 async for sdk_event in result.stream_events():
@@ -145,7 +149,6 @@ class AgentTurn:
                 result.cancel()
             yield self._error('runtime_unavailable', 'The request could not be completed. No changes were saved.', True)
         finally:
-            _private_run.reset(privacy_token)
             if result is not None:
                 result.cancel()
             if self.state.status == 'running':

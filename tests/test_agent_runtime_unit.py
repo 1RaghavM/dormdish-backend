@@ -179,3 +179,27 @@ def test_sdk_errors_do_not_log_private_content(monkeypatch, caplog):
             assert 'secret' not in events[-1].model_dump_json()
         assert 'secret' not in caplog.text
     asyncio.run(run())
+
+
+def test_another_task_can_close_stream_without_leaking_sdk_privacy(monkeypatch):
+    from dormdish_agent.runtime import _private_run
+    async def run():
+        monkeypatch.setattr('dormdish_agent.runtime.Runner.run_streamed', lambda *a, **k: Stream())
+        async with AsyncOpenAI(api_key='synthetic-test-key') as client:
+            turn = AgentTurn(context(), TurnRequest(request_id=uuid4(), text='Dinner'), uuid4(), [], client=client)
+            gen = turn.stream()
+            await anext(gen)
+            assert not _private_run.get()
+            await asyncio.create_task(gen.aclose())
+            assert turn.state.status == 'error'
+    asyncio.run(run())
+
+
+def test_tool_budget_precedes_database_read():
+    async def run():
+        c = context()
+        c.tool_calls = 16
+        result = await retrieve_menu.on_invoke_tool(RunContextWrapper(c), '{}')
+        assert 'could not verify' in result
+        assert not c.client.filters
+    asyncio.run(run())
