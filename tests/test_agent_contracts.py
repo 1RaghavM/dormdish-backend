@@ -219,3 +219,17 @@ def test_shared_fixture_roundtrips_all_events_and_restored_pending_action():
     action = fixture["conversation"]["pending_actions"][0]
     assert action == fixture["run"]["events"][3]["data"]["action"]
     assert "🌶️" in fixture["run"]["events"][1]["data"]["text"]
+
+
+def test_real_sdk_import_and_required_offline_interfaces():
+    from importlib.metadata import distribution
+    import agents
+    from agents import Agent, RunConfig, RunResult, Runner, WebSearchTool
+
+    assert Path(agents.__file__).resolve() == Path(
+        distribution("openai-agents").locate_file("agents/__init__.py")
+    ).resolve()
+    assert callable(Runner.run_streamed)
+    assert callable(RunResult.to_input_list)
+    assert RunConfig(tracing_disabled=True).tracing_disabled
+    assert Agent(name="offline-smoke", model="gpt-6-luna", tools=[WebSearchTool()]).model == "gpt-6-luna"
