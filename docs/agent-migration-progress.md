@@ -4,7 +4,7 @@ Coordinator-owned ledger. Handoff: `/Users/raghavmehta/Downloads/DormDish/DORMDI
 
 ## Current state
 
-Backend foundation PRs2/1 and meal service/test PRs3/4 merged, main `139dbc4620e4c858d26b1781ddd5098d26347b12` matches independently tested216-pass combined tree. Main Vercel status initially blocked; recheck pending. All new runtime behavior remains disabled. No production schema migration or application rollout has run. iOS PR1/2/3 merged with ancestry retained, main6240cdaac6790bab88375782c6661bf152df4899 has an identical tree to the tested combined head. No main check runs configured. Full native simulator build and 16 XCTest cases pass at combined iOS `ba6d7b5d68e5ec6b0b77615dab9deddf49d02f5b`.
+Backend foundation PRs2/1, meal service/test PRs3/4 and persistence PRs5/6 merged; main `6b9349e046f02b878439f43c1e0da4f210449171`; combined main local PostgreSQL regression run active. Previousmain139dbc4 Vercel deployment completed successfully. All new runtime behavior remains disabled. No production schema migration or application rollout has run. iOS PR1/2/3 merged with ancestry retained, main6240cdaac6790bab88375782c6661bf152df4899 has an identical tree to the tested combined head. No main check runs configured. Full native simulator build and 16 XCTest cases pass at combined iOS `ba6d7b5d68e5ec6b0b77615dab9deddf49d02f5b`.
 
 | Task / owner | Worktree / branch | Dependencies | PR / latest head | Checks / review / next |
 |---|---|---|---|---|
@@ -12,18 +12,22 @@ Backend foundation PRs2/1 and meal service/test PRs3/4 merged, main `139dbc4620e
 | T-BE backend_testing | backend-tests / tests/dd-agent/backend-contracts | A-BE | backend PR1 / 2fd80c2385dda305452f07506c72dd4d57114fb4 | 130 pass, 8 real old-behavior failures; independent initial/final reviews; merged aa01f47 |
 | B-MEALS backend_meals | backend-meals / feat/dd-agent/meal-correctness | A-BE | backend PR3 / 00b1b3701f034750af809e4d1016fb4382fee442 | 50feature/216combined pass; fresh review_backend_meals no findings; merged5560762054acd998827be574988d2e8c51db0022 |
 | T-MEALS backend_meal_testing | backend-meal-tests / tests/dd-agent/meal-correctness | B-MEALS + main aa01f47 | backend PR4 / 1b9de306e675c477ef151787a7f4378fadfcc551 | 216pass,4genuine old failures independently reproduced; fresh review_backend_meal_tests no findings; merged139dbc4620e4c858d26b1781ddd5098d26347b12 |
-| D-STATE backend_data | backend-data / feat/dd-agent/persistence | main aa01f47 | backend PR5 / 4b06aaaa4f1e8c951c18db72f3c4496de07363ba | 143 pass including13 new/local PostgreSQL checks; independent tests active then fresh review |
-| T-STATE persistence_testing | backend-persistence-tests / tests/dd-agent/persistence | D-STATE exact4b06aaa | backend PR6 / d4eca728f723ca11b5d251b503bc41bfa290092d | 162pass0fail0skip including19independent realSQL cases; fresh review queued |
+| D-STATE backend_data | backend-data / feat/dd-agent/persistence | main aa01f47 | backend PR5 / 4b06aaaa4f1e8c951c18db72f3c4496de07363ba | 143pass; separate fresh review_backend_persistence independently162combinedpass; mergedeb46028d95b7c2004ce4adbc3621abf6c853e30b |
+| T-STATE persistence_testing | backend-persistence-tests / tests/dd-agent/persistence | D-STATE exact4b06aaa | backend PR6 / d4eca728f723ca11b5d251b503bc41bfa290092d | 162pass0fail0skip including19independent realSQL cases; fresh review_backend_persistence_tests no findings; merged6b9349e046f02b878439f43c1e0da4f210449171 |
 | A-IOS ios_implementation | ios-conversation / feat/dd-agent/ios-conversation | iOS main6672974 | iOS PR1 / 70d5c56574eb1fd396cdf6ea0ae4c663af6d89f5 | Fresh review_ios_foundation no findings; 16 CLT and combined native passes; merged a8bdb97df6cf8ca4956dcd2dc5cad2cbdb157c20 |
 | T-IOS ios_testing | ios-tests / test/dd-agent/ios-streaming | A-IOS exact70d5c56 | iOS PR2 / ab1e2f11378226a27d58d5a623ecf5a4cdf2932d | 16pass; old decoder mutation2fail; fresh review_ios_tests no findings, confirmed native evidence; merged18d1745f2dba25e498459aaa0190b5d03ba52569 |
 | XCODE coordinator | ios-xcode / fix/dd-agent/xcode27-revenuecat | T-IOS exactab1e2f1 | iOS PR3 / ba6d7b5d68e5ec6b0b77615dab9deddf49d02f5b | Full native build+16XCTest pass; fresh review_ios_xcode no findings; merged6240cdaac6790bab88375782c6661bf152df4899 |
 | F-IOS ios_conversation | ios-chat / feat/dd-agent/ios-chat | XCODE exactba6d7b5 | iOS PR4 /7cd0f87bd081a64d652a85e9fd7a21e8cffff690 | Native service/state/UI complete; own simulator build passed,35native tests pass on prior8f9f0e2, finalhead35pass verified by dedicated tester, ios_chat_testing active owns test/project files |
-| C-RUNTIME backend_runtime | backend-runtime / feat/dd-agent/runtime | main aa01f47 + meals00b1b37 + persistence4b06aaa + menu3197304 | backend PR8 /8fe7d051909bfc27ba92d3a2923bbd9c1c29c027 | 266pass including9realSDKtoolloop cases plusSQL; both companiontest branches explicitlymerged. Runtime selfinspection active, dedicatedtests queued; no routes yet |
+| C-RUNTIME backend_runtime | backend-runtime / feat/dd-agent/runtime | main aa01f47 + meals00b1b37 + persistence4b06aaa + menu3197304 | backend PR8 /ada94f78c866d7c14c08b74a80f48de4d144a394 | 268pass including11realSDKtoolloop cases plusSQL; both companiontest branches explicitlymerged. Runtime sourcecomplete; dedicated tester ios_implementation reassigned to backend runtime active; no routes yet |
 
 | MENU-SOURCE coordinator | backend-menu-source / fix/dd-agent/menu-provenance | main aa01f47 | backend PR7 /3197304 | 139pass including9new source tests;8initial cases fail meaningfully on oldmain; companion test author and fresh reviews queued |
 | T-CHAT ios_chat_testing | ios-chat-tests / test/dd-agent/ios-chat | F-IOS exactf5942e4 + incoming UI update | iOS PR5 /b7605cc0a06fe261bfaccccbb1a775db15214aa6 | 19new XCTest;35pass0fail0skip on feature7cd0f87 at combined8278744, finalhead docs-only;2genuine oldbehavior regressions; fresh reviews queued |
 
+| T-RUNTIME ios_implementation (new backend testing role) | backend-runtime-tests / tests/dd-agent/runtime | C-RUNTIME exactada94f7 | backend PR9 /58143bb |47newindependent cases pass; fullSQL run and finalcheckpoint pending |
+| E-ROUTES backend_routes | backend-routes / feat/dd-agent/routes | main139dbc4 +runtimeada94f7, persistence5/6, menu7 | prepared9c8add2 | Authenticated routes, gated runtime, exact actions, sourceapp ownership fix, atomic daily save policy forwardmigration active; dedicated APItests queued |
+
 All implementation/testing owners must commit and push their own work, create an early draft PR and attach it. Every PR gets a separate fresh reviewer. Same-account reviews do not bypass any GitHub approval requirement. New heads require refreshed evidence. Test PRs remain explicit merge/rollout dependencies. Slot cap currently permits coordinator +two workers; queued assignments rotate after completion.
+
 
 
 
