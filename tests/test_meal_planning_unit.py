@@ -90,3 +90,22 @@ def test_intake_uses_evidence_and_deduplicates_across_sources_without_multiplyin
         remaining_targets(targets, [log], [], user_id="other", requested_date=CONTEXT.date)
     with pytest.raises(ValueError):
         remaining_targets(targets, [log, {**log, "calories": 1}], [], user_id="owner", requested_date=CONTEXT.date)
+
+
+@pytest.mark.parametrize("metadata, allergy", [("dairy", "milk"), ("milk", "dairy"),
+                                                 ("wheat", "gluten"), ("eggs", "egg"),
+                                                 ("unmapped allergen", "milk")])
+def test_allergen_aliases_and_unknown_taxonomy_fail_closed(metadata, allergy):
+    row = deepcopy(ROW)
+    row["menu_data"]["items"][0]["allergens"] = [metadata]
+    menu = snapshot(row)
+    with pytest.raises(ValueError):
+        validate(menu, [{"menu_item_id": menu.items[0]["menu_item_id"], "servings": 1.0}], allergens=[allergy])
+
+
+def test_duplicate_food_log_cannot_change_source_identity():
+    targets = Nutrition(calories=2000, protein_g=100, fat_g=70, carbs_g=250)
+    log = {"id": "lunch", "user_id": "owner", "date": "2026-10-10", **targets.model_dump()}
+    with pytest.raises(ValueError):
+        remaining_targets(targets, [log, {**log, "source_id": "different"}], [],
+                          user_id="owner", requested_date=CONTEXT.date)

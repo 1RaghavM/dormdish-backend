@@ -46,6 +46,22 @@ def _labels(value):
     return {label.strip().lower().replace("-", "_").replace(" ", "_") for label in value}
 
 
+_ALLERGEN_ALIASES = {
+    "milk": "milk", "dairy": "milk", "egg": "egg", "eggs": "egg",
+    "peanut": "peanut", "peanuts": "peanut", "tree_nut": "tree_nuts", "tree_nuts": "tree_nuts",
+    "soy": "soy", "soya": "soy", "soybean": "soy", "soybeans": "soy",
+    "wheat": "gluten", "gluten": "gluten", "barley": "gluten", "rye": "gluten",
+    "fish": "fish", "shellfish": "shellfish", "sesame": "sesame",
+}
+
+
+def _allergen_labels(value):
+    labels = _labels(value)
+    if labels - _ALLERGEN_ALIASES.keys():
+        raise ValueError("Unrecognized allergen metadata; verify the source taxonomy before use")
+    return {_ALLERGEN_ALIASES[label] for label in labels}
+
+
 def build_menu_snapshot(row: dict, *, university: str, context: PlanningContext,
                         now: datetime, max_age: timedelta) -> MenuSnapshot:
     """Read a complete `menus` row, preserving date/meal/freshness provenance.
@@ -118,7 +134,7 @@ def validate_meal(snapshot: MenuSnapshot, selections: list, *, university: str,
     choices = _selections.validate_python(selections)
     if len({choice.menu_item_id for choice in choices}) != len(choices):
         raise ValueError("Duplicate selection; combine servings first")
-    required, excluded = _labels(restrictions), _labels(allergens)
+    required, excluded = _labels(restrictions), _allergen_labels(allergens)
     catalog = {item["menu_item_id"]: item for item in snapshot.items}
     items = []
     for choice in choices:
@@ -127,7 +143,7 @@ def validate_meal(snapshot: MenuSnapshot, selections: list, *, university: str,
             raise ValueError("Selected item is not in this menu snapshot")
         if required and (raw["dietary_tags"] is None or not required <= _labels(raw["dietary_tags"])):
             raise ValueError("Dietary restriction is unsupported or safety metadata is unknown")
-        if excluded and (raw["allergens"] is None or excluded & _labels(raw["allergens"])):
+        if excluded and (raw["allergens"] is None or excluded & _allergen_labels(raw["allergens"])):
             raise ValueError("Allergen restriction failed or allergen metadata is unknown")
         items.append(MealItem(
             menu_item_id=choice.menu_item_id, name=raw["name"], serving_size=raw["serving_size"],
@@ -149,7 +165,7 @@ def remaining_targets(targets: Nutrition, food_logs: list[dict], completions: li
     Shared source IDs link a completion to a food log; conflicting duplicates fail.
     """
     requested_date = calendar_date(requested_date)
-    consumed = {}
+    consumed, log_sources = {}, {}
     for kind, rows in (("food_log", food_logs), ("completion", completions)):
         for row in rows:
             if str(row.get("user_id")) != user_id or calendar_date(row.get("date")) != requested_date:
@@ -159,6 +175,13 @@ def remaining_targets(targets: Nutrition, food_logs: list[dict], completions: li
             identity = row.get("source_id") or (f"food_log:{row['id']}" if kind == "food_log" and row.get("id") else None)
             if not isinstance(identity, str) or not identity.strip():
                 raise ValueError("Intake evidence requires a stable source identity")
+            if kind == "food_log":
+                log_id = row.get("id")
+                if not isinstance(log_id, str) or not log_id.strip():
+                    raise ValueError("Food log requires its stored ID")
+                if log_id in log_sources and log_sources[log_id] != identity:
+                    raise ValueError("Conflicting source identities for the same food log")
+                log_sources[log_id] = identity
             values = row if kind == "food_log" else row.get("totals", {})
             nutrition = Nutrition(**{field: values.get(field) for field in Nutrition.model_fields})
             if identity in consumed and consumed[identity] != nutrition:
