@@ -5,6 +5,7 @@ python-multipart==0.0.20
 
 # AI/ML
 # Kept for compatibility
+openai-agents==0.8.1
 google-genai==1.68.0
 #ortools==9.14.6206
 
@@ -13,7 +14,7 @@ httpx
 requests==2.32.5
 
 # Data Validation & Settings
-pydantic==2.10.4
+pydantic==2.12.3
 pydantic-settings==2.7.0
 
 # Authentication & Security
