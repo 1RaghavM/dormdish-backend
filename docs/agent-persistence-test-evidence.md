@@ -1,0 +1,13 @@
+# Independent persistence tests
+
+Companion to backend PR #5. Implementation tested: `4b06aaaa4f1e8c951c18db72f3c4496de07363ba`. Test source commit: `7c3bf9784a16814c4b9b63147d254085eea68d92`. Test branch: `tests/dd-agent/persistence`, explicitly stacked on `feat/dd-agent/persistence`; companion [PR #6](https://github.com/1RaghavM/dormdish-backend/pull/6).
+
+`DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-foundation-uv/bin/python -m pytest tests/test_agent_persistence.py -q -o addopts=''`: **19 passed, 0 failed, 0 skipped**, PostgreSQL 17.11 in local Docker, October 10, 2026. The module reuses the implementation's local psql transport and synthetic fixtures; pytest gives it a separate disposable database. AgentStore RPC calls execute as `service_role`. No production connection or model call occurs.
+
+Added coverage exercises competing distinct turns, the last hourly quota and conversation slots, owner-scoped request IDs, confirmation request collisions, competing creates and replacements, cross-owner saved plans, complete transaction rollback after an injected receipt-write failure, recovery after a committed response is lost, forgetting across conversations and in-flight completion, item/UTF-8 byte replay bounds, expired-run recovery, conversation deletion preserving saved meals, and all RPC execution grants plus table reads/deletes for anon/authenticated roles.
+
+The barrier starts concurrent connections together; outcomes and database rows/charges are asserted. The failure-injection trigger is confined to the disposable database and removed in `finally`. These are independent behavior assertions, not paid-model mocks or production SQL tests. No behavior defect was reproduced in this initial run. An initial test collection failed because a helper import omitted the existing `tests` package; fixing the import is not counted as a red/green regression demonstration.
+
+Both feature and companion tests need fresh independent review and combined checks before merge. Rollout stays disabled until additive deployment and the handoff's live/staging/rollback gates pass. Production RLS/schema privileges, deployment limits, real PostgREST transport failures, and runtime integration are not verified by this local suite.
+
+Combined revision `7c3bf9784a16814c4b9b63147d254085eea68d92`: `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-foundation-uv/bin/python -m pytest -q -o addopts=''` — **162 passed, 0 failed, 0 skipped** in 16.55 seconds. This includes the 130 existing tests, 13 implementation selfchecks, and 19 independent persistence cases. `git diff 4b06aaaa --check` passed; commit identity and absence of co-author trailers were checked.
