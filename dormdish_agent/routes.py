@@ -182,7 +182,9 @@ def build_context(client, user, request, get_targets):
     restrictions, allergens = [], []
     for value in hard:
         key = value.strip().lower().replace('-', '_').replace(' ', '_')
-        if key in ('vegetarian', 'vegan', 'pescatarian', 'halal', 'kosher'):
+        if key == 'pescetarian':
+            key = 'pescatarian'
+        if key in ('vegetarian', 'vegan', 'pescatarian', 'keto', 'halal', 'kosher'):
             restrictions.append(key)
         elif key in {'dairy_free', 'gluten_free'}:
             allergens.append({'dairy_free': 'milk', 'gluten_free': 'gluten'}[key])

@@ -381,3 +381,42 @@ def test_known_profile_rejection_persists_only_recoverable_error(monkeypatch):
     assert writes[1][0].status == 'error' and writes[1][1:] == ([], '', None)
     assert writes[1][0].events[-1].data.code == 'stale_profile'
     assert b'"type":"error"' in frames[-1] and not any(b'"type":"complete"' in frame for frame in frames)
+
+
+@pytest.mark.parametrize('stored,restriction,allergen', [
+    ('vegan', 'vegan', None), ('vegetarian', 'vegetarian', None),
+    ('pescetarian', 'pescatarian', None), ('pescatarian', 'pescatarian', None),
+    ('keto', 'keto', None), ('gluten_free', None, 'gluten'), ('dairy_free', None, 'milk'),
+])
+def test_existing_profile_diets_keep_their_hard_constraint(stored, restriction, allergen):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from dormdish_agent.models import Nutrition, TurnRequest
+    from services.meal_planning import Selection, build_menu_snapshot
+    class DB:
+        data = []
+        def table(self, *_): return self
+        def select(self, *_): return self
+        def eq(self, *_): return self
+        def limit(self, *_): return self
+        def execute(self): return self
+    profile = {'id': str(uuid4()), 'university': 'rutgers', 'dietary_preference': stored}
+    request = TurnRequest(request_id=uuid4(), text='Dinner', context={
+        'dining_hall': 'busch', 'date': '2026-10-11', 'meal_type': 'dinner'})
+    context = routes.build_context(DB(), profile, request,
+        lambda _: Nutrition(calories=2000, protein_g=100, fat_g=60, carbs_g=200))
+    assert context.restrictions == ((restriction,) if restriction else ())
+    assert context.allergens == ((allergen,) if allergen else ())
+    now = datetime.now(timezone.utc)
+    context.snapshot = build_menu_snapshot({'university': context.university,
+        'dining_hall': context.planning.dining_hall, 'date': '2026-10-11', 'fetched_at': now.isoformat(),
+        'menu_data': {'items': [{'name': 'Verified dinner', 'meal': 'dinner', 'serving_size': '1 bowl',
+            'calories': 200, 'protein_g': 20, 'fat_g': 10, 'carbs_g': 5,
+            'dietary_tags': [restriction] if restriction else [], 'allergens': []}]}},
+        university=context.university, context=context.planning, now=now, max_age=timedelta(hours=24))
+    selection = [Selection(menu_item_id=context.snapshot.items[0]['menu_item_id'], servings=1)]
+    assert context.preview(selection)['totals']['calories'] == 200
+    unknown = {**context.snapshot.items[0], 'dietary_tags': None, 'allergens': None}
+    context.snapshot = replace(context.snapshot, items=(unknown,))
+    with pytest.raises(ValueError, match='metadata'):
+        context.preview(selection)
