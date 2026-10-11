@@ -103,14 +103,23 @@ class CompletionStore:
             if receipt['request'] != request:
                 raise HTTPException(409, 'Meal completion conflict')
             return receipt['state']
-        if body.mode == 'current':
-            current = self.current(plan_id)
-            row = current['plan']
-            if row['completion_version'] != str(body.plan_version) or row['date'] != body.date.isoformat():
-                raise HTTPException(409, 'Meal completion stale_plan')
-            catalog = current['available_items']
-        else:
-            catalog = []  # The RPC uses only previously eaten, frozen foods for this version.
+        try:
+            if body.mode == 'current':
+                current = self.current(plan_id)
+                row = current['plan']
+                if row['completion_version'] != str(body.plan_version) or row['date'] != body.date.isoformat():
+                    raise HTTPException(409, 'Meal completion stale_plan')
+                catalog = current['available_items']
+            else:
+                catalog = []  # The RPC uses only previously eaten, frozen foods for this version.
+        except HTTPException:
+            # The original write may commit between the receipt read and a plan edit/deletion.
+            receipt = self.receipt(body.request_id)
+            if receipt:
+                if receipt['request'] != request:
+                    raise HTTPException(409, 'Meal completion conflict')
+                return receipt['state']
+            raise
         return self.rpc('meal_completion_write', p_plan_id=str(plan_id), p_request=request,
                         p_items=catalog)
 
