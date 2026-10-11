@@ -30,7 +30,14 @@ def store(save_pg, stores):
     ('What would you save?', None), ('Find dinner and maybe save it', None), ('Saved plans', None),
     ('Save dinner?!', None), ('Save dinner!?', None), ('Save dinner？', None), ('Save dinner?.', None),
     ('Save dinner?\u200b\ufeff\u3000', None), ('Save dinner, don‘t wait', None), ('Save dinner, donʼt', None),
-    ('Save dinner, don`t', None), ('Save dinner, don′t', None), ('\u200bSave dinner!\u00a0', 'save')])
+    ('Save dinner, don`t', None), ('Save dinner, don′t', None), ('\u200bSave dinner!\u00a0', 'save'),
+    ('Save dinner? 🙂', None), ('Save dinner? !', None), ('Save dinner?)', None), ('Save dinner?"', None),
+    ('Save dinner?”', None), ('Save dinner?…', None), ('Save dinner?\ufe0f', None), ('Save dinner?\u2060', None),
+    ('Save dinner‽', None), ('Save dinner⁇', None), ('Save dinner﹖', None), ('Save dinner؟', None),
+    ('Replace my dinner? 🙂', None), ('Save, don´t', None), ('Save, don＇t', None), ("Save, do\u200bn't", None),
+    ('Save dinner', 'save'), ('Save dinner.', 'save'), ('Save dinner 🙂', 'save'), ('Save dinner. Thanks!', 'save'),
+    ("Save dinner, it's great", 'save'), ('Save dinner, donated', 'save'), ('Save donuts for dinner', 'save'),
+    ('\ufeff\u200dSave dinner', 'save')])
 def test_intent_is_strict(save_pg, text, intent):
     value = save_pg.sql("SET ROLE service_role; SELECT agent_save_intent('" + text.replace("'", "''") + "', 'dinner')")
     assert (value or None) == intent
