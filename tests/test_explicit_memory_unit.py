@@ -212,3 +212,8 @@ def test_json_literal_target_preserves_exact_name_and_forgets(memory_pg, name):
 ])
 def test_json_target_requires_complete_command_and_safe_decoding(memory_pg, target):
     assert memory_pg.rpc('agent_memory_intent', {'p_text': 'Remember that I like ' + target}).execute().data is None
+
+
+@pytest.mark.parametrize('target', ['if', 'or', 'for', 'when', 'unless', 'my', 'do', 'temporarily'])
+def test_bare_grammatical_placeholders_are_not_food_targets(memory_pg, target):
+    assert memory_pg.rpc('agent_memory_intent', {'p_text': 'Remember that I like ' + target}).execute().data is None
