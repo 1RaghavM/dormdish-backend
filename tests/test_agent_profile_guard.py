@@ -128,13 +128,17 @@ def test_profile_change_before_finish_cannot_persist_an_action(api, monkeypatch)
 
     monkeypatch.setattr(api.database, 'rpc', rpc)
     conversation = api.owner.create_conversation()
-    response = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=turn_body())
+    body = turn_body()
+    response = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
     assert len(finish_calls) == 1
     assert not any(event['type'] in ('action_required', 'complete') for event in events(response))
     state = side_effects(api)
     assert state['plans'] == state['actions'] == []
     assert state['quota'][0]['requests'] == 1  # Only the already-admitted model turn.
-    assert all(run['status'] != 'complete' for run in state['runs'])
+    recovered = api.client.get(f"/agent/runs/{body['request_id']}")
+    assert recovered.status_code == 200 and recovered.json()['status'] == 'error'
+    assert recovered.json()['events'][-1]['type'] == 'error'
+    assert '1200' not in recovered.text and 'custom_calories' not in recovered.text
     assert api.owner.get_conversation(conversation.id).pending_actions == []
 
 

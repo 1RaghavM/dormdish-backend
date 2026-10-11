@@ -285,7 +285,7 @@ def test_admission_errors_are_http_preflight_and_do_not_load_history(api, reason
 
 
 def test_unknown_profile_safety_fails_before_sse_and_persists_error(api):
-    api.profiles['owner']['dietary_restrictions'] = ['mystery-allergen']
+    api.pg.sql(f"UPDATE users SET dietary_restrictions = '[\"mystery-allergen\"]' WHERE id = '{api.owner.user_id}'")
     conversation = api.owner.create_conversation()
     body = turn_body()
     result = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
