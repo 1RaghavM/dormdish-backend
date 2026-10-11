@@ -1,5 +1,13 @@
 -- Apply after add_agent_persistence.sql, before deploying the RPC-backed preference manager.
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+-- Preserve every row while allowing the same choice for different meals.
+DROP INDEX IF EXISTS public.idx_user_preferences_unique;
+CREATE UNIQUE INDEX idx_user_preferences_unique
+    ON public.user_preferences(user_id, category, lower(item_name), meal_type);
+ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.user_preferences FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_preferences TO service_role;
 
 -- Normalize surrounding Unicode whitespace independently of database locale.
 CREATE FUNCTION public.preference_item_name(value text) RETURNS text
