@@ -50,7 +50,7 @@ async def storage_call(function, *args):
         raise
     except StorageError as exc:
         code = {'not_found': 404, 'conflict': 409, 'busy': 409, 'quota': 429,
-                'expired': 409, 'invalid': 422, 'stale_plan': 409}.get(exc.code, 503)
+                'expired': 409, 'invalid': 422, 'stale_plan': 409, 'stale_profile': 409}.get(exc.code, 503)
         raise HTTPException(code, 'Agent request ' + exc.code) from None
     except Exception:
         raise HTTPException(503, 'Agent storage unavailable; reconcile before retrying') from None
@@ -114,7 +114,9 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
                 finish_attempted = True
                 state = await storage_call(owner.finish_turn, state, [], text)
                 return StreamingResponse(replay(state.events), media_type='text/event-stream', headers=STREAM_HEADERS)
-            context = await asyncio.wait_for(asyncio.to_thread(build_context, get_client(), user, body, get_targets), 10)
+            profile = await storage_call(owner.get_profile)
+            trusted_user = {**profile['profile'], 'id': owner.user_id}
+            context = await asyncio.wait_for(asyncio.to_thread(build_context, get_client(), trusted_user, body, get_targets), 10)
             target = await storage_call(read_target, owner, context)
         except asyncio.CancelledError:
             if not finish_attempted:
@@ -126,7 +128,7 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
             if isinstance(exc, HTTPException):
                 raise
             raise HTTPException(422, 'Select a supported meal and verify your dietary profile') from None
-        return StreamingResponse(run_stream(owner, state, body, context, history, target),
+        return StreamingResponse(run_stream(owner, state, body, context, history, target, profile['version']),
                                  media_type='text/event-stream', headers=STREAM_HEADERS)
 
     return router
@@ -218,7 +220,7 @@ def read_target(owner, context):
     return target
 
 
-def stored_action(context, target):
+def stored_action(context, target, expected_profile_version=None):
     proposal = context.proposal
     if target:
         # Preserve the legacy spelling so the transaction's exact hall/version guard still applies.
@@ -245,7 +247,7 @@ def stored_action(context, target):
     action = PendingAction(id=uuid4(), proposal=proposal,
                            expires_at=min(datetime.now(timezone.utc) + timedelta(hours=24), context.snapshot.expires_at))
     return StoredAction(action, payload, UUID(target['plan']['id']) if target else None,
-                        target['version'] if target else None)
+                        target['version'] if target else None, expected_profile_version)
 
 
 async def finish_failure(owner, state, code, message):
@@ -258,7 +260,7 @@ async def finish_failure(owner, state, code, message):
             pass  # Unknown outcome remains recoverable by request ID; never retry a write.
 
 
-async def run_stream(owner, state, request, context, history, target):
+async def run_stream(owner, state, request, context, history, target, expected_profile_version=None):
     turn, iterator, client = None, None, None
     finish_attempted = False
     emitted = 0
@@ -276,7 +278,7 @@ async def run_stream(owner, state, request, context, history, target):
             raise ValueError('Runtime ended without a terminal event')
         action = None
         if state.status == 'complete' and context.proposal is not None:
-            action = await asyncio.to_thread(stored_action, context, target)
+            action = await asyncio.to_thread(stored_action, context, target, expected_profile_version)
             terminal = state.events.pop()
             state.status = 'running'
             append_event(state, 'action_required', {'action': action.action.model_dump(mode='json')})
