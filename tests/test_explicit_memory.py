@@ -100,6 +100,7 @@ def changed(response):
     ('Remember my flavor preference: spicy', 'favorite', 'spicy', 'all', 'flavor'),
     ('Remember my cuisine preference: Indian', 'favorite', 'Indian', 'all', 'cuisine'),
     ('Remember my texture preference: crunchy', 'favorite', 'crunchy', 'all', 'texture'),
+    ('Remember that I like Chef’s rice', 'favorite', 'Chef’s rice', 'all', 'food_item'),
 ])
 def test_literal_instruction_persists_typed_provenance_without_model(api, text, category, name, meal, kind):
     response, conversation, request = send(api, text)
@@ -359,3 +360,30 @@ def test_encoded_slash_preference_delete_is_owner_and_category_scoped(api, categ
     assert response.json()['was_found']
     assert [(r['category'], r['item_name']) for r in rows(api.pg, api.owner.user_id)] == [(opposite, name)]
     assert len(rows(api.pg, api.other.user_id)) == 1
+
+
+def test_lost_commit_and_failed_immediate_recovery_remain_recoverable(api, monkeypatch, caplog):
+    original = api.database.rpc
+    writes = []
+
+    def unavailable(name, parameters):
+        call = original(name, parameters)
+        if name not in {'agent_memory_turn', 'agent_get_run'}:
+            return call
+        def execute():
+            if name == 'agent_memory_turn':
+                writes.append(name)
+                call.execute()
+            raise ConnectionError('PRIVATE_MEMORY_DATABASE_REPLY')
+        return SimpleNamespace(execute=execute)
+
+    monkeypatch.setattr(api.database, 'rpc', unavailable)
+    response, conversation, request = send(api, 'Remember that I like rice')
+    assert response.status_code == 503
+    assert 'PRIVATE_MEMORY_DATABASE_REPLY' not in response.text + caplog.text
+    assert writes == ['agent_memory_turn'] and len(rows(api.pg, api.owner.user_id)) == 1
+    monkeypatch.setattr(api.database, 'rpc', original)
+    recovered = api.client.get('/agent/runs/' + request).json()
+    assert recovered['status'] == 'complete' and recovered['events'][-1]['data']['preferences_changed']
+    replay = send(api, 'Remember that I like rice', conversation, request)[0]
+    assert events(replay) == recovered['events'] and len(rows(api.pg, api.owner.user_id)) == 1
