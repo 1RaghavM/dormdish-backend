@@ -11,7 +11,7 @@ Environment: Python 3.11, `openai-agents==0.8.1`, `openai==2.26.0`. Run from the
 - `git diff --check`: passed.
 - Two isolated temporary source mutations were rejected by assertion failures: deleting the food-log owner filter; increasing the SDK model-turn bound from eight to nine. Original production files and branches were not modified. Both original behaviors pass. This is mutation evidence, not a claim that either defect existed in the feature.
 
-The real Runner, Responses streaming, tool schemas, validators, usage construction and SDK history serialization execute. Only HTTP and database transports are synthetic. No paid/external model, production database or deployment call is made. Initial fixture corrections handled the pinned SDK's Python-literal tool outputs and its fail-closed schema errors; assertions were aligned with observable safety requirements rather than assuming JSON tool strings or a follow-up model request after invalid tool schema.
+The real Runner, Responses streaming, tool schemas, validators, usage construction and SDK history serialization execute. Only HTTP and database transports are synthetic. No paid/external model, production database or deployment call is made. Fixture corrections handled the pinned SDK's Python-literal tool outputs and a duplicated synthetic tool call ID. The corrected test proves rejected model-supplied nutrition produces safe tool-error evidence, no preview, and a subsequent explanatory answer. The intermediate draft checkpoint `b73c326` had one stale fixture assertion (48 passed/1 failed); the following checkpoint fixes it and reruns the complete suite. No production defect was reproduced or production assertion weakened.
 
 ## Covered behavior
 

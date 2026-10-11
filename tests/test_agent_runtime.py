@@ -216,12 +216,17 @@ def test_model_cannot_override_user_scope_or_supply_trusted_nutrition():
         return answer('Unable to validate those arguments')
 
     turn, events, requests = exercise(respond, context=context)
-    assert len(requests) == 3
+    assert len(requests) == 4
     assert turn.context.proposal is None
     assert not any(event.type == 'meal_preview' for event in events)
     assert all(query['table'] != 'food_log' or query['filters'] == [
         ('user_id', context.user_id), ('date', '2026-10-10')] for query in context.client.queries)
-    assert events[-1].type == 'error' and turn.history == []
+    safe_error = 'This tool could not verify the requested data. Do not invent an answer; explain the limitation.'
+    assert tool_outputs(requests[-1])[-1] == safe_error
+    assert [item['output'] for item in turn.history
+            if item.get('type') == 'function_call_output' and item['call_id'] == 'call_3'] == [safe_error]
+    assert events[-1].type == 'complete' and events[-1].data.saved_plan_id is None
+    assert not events[-1].data.preferences_changed
 
 
 @pytest.mark.parametrize('kind', ['too_many_items', 'too_many_bytes', 'deadline', 'logging_model', 'logging_tools'])
