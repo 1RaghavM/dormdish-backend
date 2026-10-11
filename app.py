@@ -6014,6 +6014,10 @@ async def save_meal_plan(
                 plan_id = str(uuid4())
         else:
             plan_id = payload.plan_id
+            owned = supabase.table("saved_meal_plans").select("id")\
+                .eq("id", plan_id).eq("user_id", current_user["id"]).limit(1).execute()
+            if not owned.data:
+                raise HTTPException(status_code=404, detail="Meal plan not found")
         
         # Prepare data to save
         save_data = {
@@ -6027,7 +6031,11 @@ async def save_meal_plan(
         }
         
         # Use upsert to either create or update
-        response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+        if is_update:
+            response = supabase.table("saved_meal_plans").update(save_data)\
+                .eq("id", plan_id).eq("user_id", current_user["id"]).execute()
+        else:
+            response = supabase.table("saved_meal_plans").insert(save_data).execute()
         
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to save meal plan")
@@ -8222,6 +8230,25 @@ async def activate_prepaid(authorization: Optional[str] = Header(None)):
         "failed_count": len(errors),
         "errors": errors,
     }
+
+
+def agent_daily_targets(user):
+    from dormdish_agent.models import Nutrition
+    metrics = calculate_extended_metrics(
+        age=user['age'], height_feet=user['height_feet'], height_inches=user['height_inches'],
+        weight_lbs=float(user['weight_lbs']), gender=user.get('gender'),
+        activity_level=user['activity_level'], goal=user['goal'],
+        goal_weight_lbs=float(user['goal_weight_lbs']) if user.get('goal_weight_lbs') else None,
+        weight_change_speed=user.get('weight_change_speed'))
+    calories = int(metrics['daily_calorie_target'])
+    protein = int(round(min(max(float(user['weight_lbs']) * 0.95, 80), float(user['weight_lbs']) * 1.1)))
+    macros = calculate_macro_targets(float(user['weight_lbs']), calories, protein, user['goal'].lower())
+    targets = {'calories': calories, 'protein_g': protein, **macros}
+    return Nutrition(**{key: user.get('custom_' + key) or targets[key] for key in Nutrition.model_fields})
+
+
+from dormdish_agent.routes import create_router as create_agent_router
+app.include_router(create_agent_router(get_current_user, require_premium, lambda: supabase, agent_daily_targets))
 
 
 if __name__ == '__main__':

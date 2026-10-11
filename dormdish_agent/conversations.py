@@ -28,6 +28,7 @@ class StoredAction:
     save_payload: dict[str, Any]
     target_plan_id: UUID | None = None
     expected_plan_version: str | None = None
+    expected_profile_version: str | None = None
 
     def payload(self):
         if (self.target_plan_id is None) != (self.expected_plan_version is None):
@@ -37,6 +38,7 @@ class StoredAction:
             "save_payload": self.save_payload,
             "target_plan_id": str(self.target_plan_id) if self.target_plan_id else None,
             "expected_plan_version": self.expected_plan_version,
+            "expected_profile_version": self.expected_profile_version,
         }
 
 
@@ -52,7 +54,7 @@ class AgentStore:
             message = getattr(exc, "message", "")
             if message in {
                 "agent_not_found", "agent_conflict", "agent_busy", "agent_quota",
-                "agent_expired", "agent_invalid", "agent_stale_plan",
+                "agent_expired", "agent_invalid", "agent_stale_plan", "agent_stale_profile",
             }:
                 raise StorageError(message.removeprefix("agent_")) from None
             # Do not expose PostgREST's request details, SQL, or private data.
@@ -93,6 +95,10 @@ class AgentStore:
         return RunState.model_validate(self._rpc("finish_turn", p_conversation_id=str(run.conversation_id),
             p_request_id=str(run.id), p_events=events, p_history=history,
             p_assistant_text=assistant_text, p_action=pending))
+
+    def get_profile(self) -> dict:
+        """Current planning inputs and an opaque SQL fingerprint of that exact snapshot."""
+        return self._rpc("get_profile")
 
     def get_saved_plan(self, plan_id: UUID) -> dict:
         """Returns {plan, version}; pass this opaque version back for replacement."""
