@@ -35,9 +35,9 @@ def context(rows=()):
 
 
 def test_tool_schemas_never_accept_owner_or_scope():
-    assert [tool.name for tool in READ_TOOLS] == ['read_profile', 'retrieve_menu', 'read_intake', 'preview_meal']
+    assert [tool.name for tool in READ_TOOLS] == ['read_profile', 'retrieve_menu', 'read_intake', 'preview_meal', 'search_public_dining']
     for tool in READ_TOOLS:
-        assert set(tool.params_json_schema['properties']) <= {'selections'}
+        assert set(tool.params_json_schema['properties']) <= {'selections', 'topic'}
         assert tool.params_json_schema['additionalProperties'] is False
 
 
