@@ -1,6 +1,7 @@
 """Authenticated v1 endpoints. Rollback keeps reads and deletion available."""
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 
@@ -202,13 +203,26 @@ def read_target(owner, context):
             .eq('date', context.planning.date.isoformat()).limit(2).execute().data or [])
     if not rows:
         return None
-    if len(rows) != 1 or rows[0]['dining_hall'] != context.planning.dining_hall:
-        raise HTTPException(409, 'A plan already exists for this date at another hall; use that plan')
-    return owner.get_saved_plan(UUID(rows[0]['id']))
+    if len(rows) != 1:
+        raise HTTPException(409, 'Multiple plans exist for this date; resolve the existing plans')
+    target = owner.get_saved_plan(UUID(rows[0]['id']))
+    try:
+        # Reuse the authenticated campus registry; legacy IDs/names are not new halls.
+        saved_context = replace(context, planning=context.planning.model_copy(
+            update={'dining_hall': target['plan']['dining_hall']}))
+        if (saved_context.planning.dining_hall != context.planning.dining_hall
+                or target['plan']['date'] != context.planning.date.isoformat()):
+            raise ValueError('Different plan context')
+    except ValueError:
+        raise HTTPException(409, 'A plan already exists for this date at another hall; use that plan') from None
+    return target
 
 
 def stored_action(context, target):
     proposal = context.proposal
+    if target:
+        # Preserve the legacy spelling so the transaction's exact hall/version guard still applies.
+        proposal = proposal.model_copy(update={'dining_hall': target['plan']['dining_hall']})
     payload = deepcopy(target['plan']['meal_plan_data']) if target else {'success': True}
     plan = payload.setdefault('meal_plan', {})
     meals = plan.setdefault('meals', {})
