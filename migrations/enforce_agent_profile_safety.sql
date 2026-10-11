@@ -38,6 +38,10 @@ CREATE OR REPLACE FUNCTION public.agent_finish_turn(p_user_id uuid, p_conversati
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE r agent_runs; e jsonb; n integer := 0; terminal text; action_count integer := 0;
 BEGIN
+    IF p_action IS NOT NULL THEN
+        PERFORM 1 FROM users WHERE id = p_user_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'agent_not_found'; END IF;
+    END IF;
     PERFORM 1 FROM agent_conversations WHERE user_id = p_user_id AND id = p_conversation_id AND expires_at > now() FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent_not_found'; END IF;
     SELECT * INTO r FROM agent_runs WHERE user_id = p_user_id AND conversation_id = p_conversation_id AND id = p_request_id FOR UPDATE;
@@ -65,6 +69,7 @@ BEGIN
     IF p_action IS NOT NULL THEN
         IF p_action->>'expected_profile_version' IS NULL
             OR p_action->>'expected_profile_version' !~ '^[0-9a-f]{64}$'
+            OR p_action->>'expected_profile_version' IS DISTINCT FROM (agent_get_profile(p_user_id)->>'version')
             THEN RAISE EXCEPTION 'agent_stale_profile'; END IF;
         IF (p_action->'action'->>'expires_at')::timestamptz NOT BETWEEN now() AND now() + interval '24 hours'
             THEN RAISE EXCEPTION 'agent_expired'; END IF;
