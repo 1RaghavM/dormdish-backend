@@ -1,7 +1,6 @@
 """Independent completion API/SQL tests: synthetic rows, real transactions, no models."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from datetime import date
 import json
 from pathlib import Path
@@ -405,7 +404,8 @@ def test_untrusted_database_roles_and_account_deletion(api):
         for statement in ['SELECT * FROM meal_completions', 'SELECT * FROM meal_completion_requests',
                           f"SELECT meal_completion_list('{api.owner}','{DAY}')",
                           f"SELECT meal_completion_request('{api.owner}','{request['request_id']}')",
-                          f"SELECT meal_completion_intake('{api.owner}','{DAY}')"]:
+                          f"SELECT meal_completion_intake('{api.owner}','{DAY}')",
+                          f"SELECT meal_completion_write('{api.owner}','{plan}',{literal({'plan_id': plan, **request})},'[]')"]:
             with pytest.raises(RuntimeError, match='permission denied'):
                 api.pg.sql(f'SET ROLE {role}; {statement}')
     # Existing synthetic saved-plan FK has no cascade; real deletion route removes plans first.
@@ -543,7 +543,8 @@ def test_additive_migration_preserves_preexisting_saved_rows(completion_pg):
     assert UUID(row['completion_version'])
 
 
-def test_duplicate_recovers_when_original_commits_and_plan_disappears_after_receipt_read(api, monkeypatch):
+@pytest.mark.parametrize('conflicting', [False, True])
+def test_duplicate_recovers_when_original_commits_and_plan_disappears_after_receipt_read(api, monkeypatch, conflicting):
     from services.meal_completion import CompletionRequest, CompletionStore
     plan = seed(api)
     request = body(api, plan)
@@ -553,13 +554,15 @@ def test_duplicate_recovers_when_original_commits_and_plan_disappears_after_rece
 
     def rpc(name, params):
         if name == 'meal_completion_current' and not committed:
-            committed.append(store.write(plan, CompletionRequest(**request)))
+            committing = {**request, 'selected_items': [{'meal_type': 'dinner', 'index': 1}]} if conflicting else request
+            committed.append(store.write(plan, CompletionRequest(**committing)))
             api.pg.sql(f"DELETE FROM saved_meal_plans WHERE id = '{plan}'")
         return original_rpc(name, params)
 
     monkeypatch.setattr(api.database, 'rpc', rpc)
     response = api.client.put(f'/meal-plan/{plan}/completion', json=request)
-    assert response.status_code == 200, response.text
-    assert response.json() == committed[0]
+    assert response.status_code == (409 if conflicting else 200), response.text
+    if not conflicting:
+        assert response.json() == committed[0]
     assert recorded(api) == committed
     assert api.client.get(f"/meal-completion-requests/{request['request_id']}").json() == committed[0]
