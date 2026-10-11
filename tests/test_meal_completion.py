@@ -47,7 +47,10 @@ def completion_pg(pg):
     database.sql('''CREATE TABLE food_log(id text PRIMARY KEY, user_id uuid REFERENCES users(id) ON DELETE CASCADE,
         date date, calories numeric, protein_g numeric, fat_g numeric, carbs_g numeric);
         GRANT SELECT ON food_log TO service_role;''')
+    legacy_owner, legacy_plan = str(uuid4()), str(uuid4())
+    database.sql(f"INSERT INTO users(id) VALUES ('{legacy_owner}'); INSERT INTO saved_meal_plans(id,user_id,date,meal_plan_data) VALUES ('{legacy_plan}','{legacy_owner}','{DAY}', '{{\"legacy\":true}}');")
     database.sql((ROOT / 'migrations/add_meal_completion.sql').read_text())
+    database.legacy_plan = legacy_plan
     return database
 
 
@@ -530,3 +533,11 @@ def test_rpc_rejects_tampered_server_catalog_without_partial_write(api):
                    'p_request': {'plan_id': plan, **request}, 'p_items': catalog}).execute()
     assert recorded(api) == []
     assert api.client.get(f"/meal-completion-requests/{request['request_id']}").status_code == 404
+
+
+def test_additive_migration_preserves_preexisting_saved_rows(completion_pg):
+    row = json.loads(completion_pg.sql(f"SELECT to_jsonb(p) FROM saved_meal_plans p WHERE id = '{completion_pg.legacy_plan}'"))
+    assert row['meal_plan_data'] == {'legacy': True}
+    assert row['date'] == DAY
+    from uuid import UUID
+    assert UUID(row['completion_version'])
