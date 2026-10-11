@@ -187,7 +187,7 @@ def test_action_keeps_other_meals_and_sums_the_whole_plan():
         'contracts/agent-v1.json').read_text())['conversation']['pending_actions'][0]).proposal
     old = {'description': 'Preserved breakfast', 'items': [{'name': 'Egg', 'calories': 100,
         'protein_g': 10, 'fat_g': 5, 'carbs_g': 3}]}
-    target = {'plan': {'id': str(uuid4()), 'meal_plan_data': {'meal': 'breakfast', 'generation_id': 'old',
+    target = {'plan': {'id': str(uuid4()), 'dining_hall': proposal.dining_hall, 'meal_plan_data': {'meal': 'breakfast', 'generation_id': 'old',
         'meal_plan': {'meals': {'breakfast': old}}}}, 'version': 'opaque'}
     context = SimpleNamespace(proposal=proposal, targets=Nutrition(calories=2000, protein_g=100, fat_g=60, carbs_g=200),
                               snapshot=SimpleNamespace(expires_at=datetime.now(timezone.utc) + timedelta(hours=2)))
@@ -233,3 +233,28 @@ def test_pg_replacement_collision_and_hall_change_rejected(policy_stores, pg):
     with pytest.raises(routes.StorageError, match='stale_plan'):
         owner.confirm_action(replacement.id, confirmation())
     assert owner.get_saved_plan(saved) == target
+
+
+@pytest.mark.parametrize('saved_hall', ['busch', 'Busch Dining Hall', 'busch-dining-hall'])
+def test_registered_legacy_hall_alias_uses_original_target(saved_hall):
+    from dormdish_agent.models import Nutrition, PlanningContext
+    class DB:
+        data = [{'id': str(uuid4()), 'dining_hall': saved_hall}]
+        def table(self, *_): return self
+        def select(self, *_): return self
+        def eq(self, *_): return self
+        def limit(self, *_): return self
+        def execute(self): return self
+    db = DB()
+    context = routes.FoodContext(db, str(uuid4()), 'rutgers',
+        PlanningContext(dining_hall='busch', date='2026-10-10', meal_type='dinner'),
+        Nutrition(calories=2000, protein_g=100, fat_g=60, carbs_g=220))
+    snapshot = {'plan': {'id': db.data[0]['id'], 'dining_hall': saved_hall, 'date': '2026-10-10'}, 'version': 'unchanged'}
+    owner = SimpleNamespace(client=db, user_id=context.user_id, get_saved_plan=lambda _: snapshot)
+    assert routes.read_target(owner, context) is snapshot
+    assert snapshot['plan']['dining_hall'] == saved_hall
+    for different_hall in ('livingston', 'hopkins-cafe', 'BUSCH', 'invented-busch'):
+        snapshot['plan']['dining_hall'] = different_hall
+        with pytest.raises(HTTPException) as caught:
+            routes.read_target(owner, context)
+        assert caught.value.status_code == 409
