@@ -1,31 +1,34 @@
 # Meal completion independent test evidence
 
-Dedicated test branch: `tests/dd-agent/meal-completion`. Feature dependency: `feat/dd-agent/meal-completion` (first source checkpoint pending). Initial explicit integration base: `4b0efa96a4c487d5a5cebb1881f1d009a7069a81`.
+Feature [PR #18](https://github.com/1RaghavM/dormdish-backend/pull/18), branch `feat/dd-agent/meal-completion`; companion [test PR #17](https://github.com/1RaghavM/dormdish-backend/pull/17), branch `tests/dd-agent/meal-completion`. The test PR explicitly stacks the feature and requires its own fresh independent review.
 
-Tests use synthetic users and saved rows in a disposable PostgreSQL database inside the local `dd-agent-migration-db` container. Only the session-token verification boundary is mocked; the existing authentication dependency, FastAPI request validation, service, SQL RPCs, transaction locks, and runtime intake tool execute normally. No model calls or production data.
+## Verified revisions and results
 
-Initial checkpoint contains test definitions and passes Python compilation. Behavior suite is **not yet run**, pending the explicit implementation merge. The tests cover selection nutrition, idempotency/recovery, concurrent and delayed writes, ownership, malformed inputs, immutable consumed snapshots after edits/deletion, explicit frozen undo, manual/linked intake, rollback, database roles, and account deletion.
-
-Run with:
+- Source code: `68d493e346647792f31a82d4c93111ccf55201a3`.
+- Tested combined source/test code: `ed9c6c8307a783a312de682f36d0767714f81c48`.
+- Subsequently merged source documentation checkpoint `50b6f0a7c816035af10228312b4c6d9828dce134`; no production or test code changed after the verified combined revision.
+- Dedicated tests: **59 passed, 0 failed, 0 skipped**, 26.45 seconds. Log: `/private/tmp/dd-completion-independent-race-fixed.log`.
+- Full backend suite: **619 passed, 0 failed, 0 skipped**, 122.98 seconds. Log: `/private/tmp/dd-completion-independent-final-full.log`.
+- Both runs emitted one existing Starlette/AnyIO deprecation warning.
 
 ```sh
 DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest tests/test_meal_completion.py -q -o addopts=''
+DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -q -o addopts=''
 ```
 
-Rollout and production schema remain disabled/unapplied. A fresh independent review is required for this test PR and its feature dependency. The coordinator owns integration and rollout gates.
+Tests use synthetic users and saved rows in disposable PostgreSQL 17 databases inside the local `dd-agent-migration-db` container. Only session-token verification and the PostgREST transport boundary are replaced; the existing authentication dependency, FastAPI validation, service, SQL RPCs, transaction locks, and actual runtime intake tool execute normally. The test transport preserves real database errors, including `completion_*` codes. No paid model calls or production data.
 
-## First integrated behavior run
+## Coverage and real regressions
 
-Explicitly merged feature source `86ff7f1b8444fdd0240bb2cf1e56a5f90dec624d` into test branch at `379bf5a880946aaf5a860bd153196e216497f275`. Companion feature PR: [#18](https://github.com/1RaghavM/dormdish-backend/pull/18); test PR: [#17](https://github.com/1RaghavM/dormdish-backend/pull/17), now targeting the feature branch.
+The 59 cases cover trusted partial/whole nutrition without multiplying servings twice; custom authentication and owner/date isolation; forged/invalid inputs; duplicate receipts and conflicting request IDs; concurrent distinct toggles and delayed stale revisions; plan edits/deletion/owner changes without loss of actual intake; explicit frozen undo/recheck; independent manual logs and trusted linked-source deduplication; conflict and record-bound fail-closed behavior; transactional rollback and ambiguous transport recovery; untrusted database roles; account deletion and old-receipt retention; preserved legacy row data and additive migration compatibility.
 
-- First focused run: **44 passed, 0 failed, 0 skipped**, 19.89 seconds (`/private/tmp/dd-completion-independent-focused.log`).
-- Expanded run: **48 passed, 4 failed, 0 skipped**, 21.39 seconds (`/private/tmp/dd-completion-independent-expanded.log`). Four real behavior defects: malformed saved JSON at the root, nested meal plan, meal, or food level returned HTTP 503 instead of the documented 422. Reported to source owner; assertions retained unchanged for red/green verification.
-- Four additional tests for multiple versions, old receipts/recheck, canonical ordering, and direct RPC catalog tampering are written but not yet run at this checkpoint.
+Two behavior defects were reproduced and fixed by the feature owner without weakening assertions:
 
-One existing AnyIO/Starlette deprecation warning occurred; no paid model or production queries ran. Full-suite integration awaits the source fixes and final focused checks.
+1. At source `86ff7f1b8444fdd0240bb2cf1e56a5f90dec624d`, four malformed saved JSON shapes returned 503 instead of documented 422. Expanded run: **48 passed, 4 failed**, 21.39 seconds (`/private/tmp/dd-completion-independent-expanded.log`). Source fix `79fdf29be73437d24f85eedf4217bbdaa4ec1b51` made these same assertions pass.
+2. At source `79fdf29`, a duplicate returned 404 if the original request committed and its plan was deleted between the duplicate's empty receipt read and plan lookup. The deterministic test uses a second real service instance and SQL deletion. **1 failed, 57 deselected**, 1.98 seconds (`/private/tmp/dd-completion-receipt-race-red.log`). Source fix `68d493e` adds bounded receipt reconciliation without retrying writes. Final tests verify exact 200 replay and 409 for a conflicting body in this race.
 
-## Validation fix and duplicate/deletion race
+Intermediate checkpoints were pushed with honest unrun/failing evidence. The test PR changes only this document and `tests/test_meal_completion.py`; no production source or historical fixture was edited. Git identity is `1RaghavM <lebrongoated2323@gmail.com>` and no co-author trailers were added.
 
-Source fix `79fdf29be73437d24f85eedf4217bbdaa4ec1b51` was explicitly merged. The four malformed-row assertions passed unchanged; expanded dedicated suite reached **57 passed, 0 failed, 0 skipped** in 25.85 seconds, including preservation of a row inserted before migration (`/private/tmp/dd-completion-independent-final-focused.log`). Test code checkpoint: `a0a41e0bf1dd5e9b0b4285ebbca2ab34e6ee2a33`.
+## Remaining gates
 
-A subsequently added deterministic race reproduces a real HTTP 404 instead of the exact committed receipt: the original request commits and its plan is deleted after a duplicate's empty receipt read but before its current-plan lookup. The test uses a second real service instance and SQL deletion, not a mocked write result. **1 failed, 57 deselected**, 1.98 seconds at source `79fdf29` (`/private/tmp/dd-completion-receipt-race-red.log`). Source owner is fixing this via bounded receipt reconciliation; no write retry is authorized. The regression assertion remains unchanged.
+Production SQL, deployment health, live models, native simulation, and UI accessibility were not performed by this backend test task. Native completion integration has its own owner and tests. `DORMDISH_COMPLETION_ENABLED` remains off. Apply schema first, satisfy feature/test independent reviews and dependency gates, and verify native integration before activation. Local suite success does not establish those rollout gates.
