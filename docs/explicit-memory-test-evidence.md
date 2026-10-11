@@ -4,10 +4,8 @@ This dedicated test PR verifies [source PR19](https://github.com/1RaghavM/dormdi
 
 ## Revisions and checks
 
-- Source tested: `60a14f2928bbb9fbdeba093b5c7079926389ab56` (fresh review parser fix).
-- Combined test/source code: `a82df6127f8af5690b6a6bd0bd5859d96bbe1052` on `tests/dd-agent/explicit-memory`.
-- Original 65 dedicated cases: **65 passed, 0 failed, 0 skipped**, 28.67 seconds. The six additional typed-forget cases: **6 passed, 0 failed, 0 skipped** (65 deselected), 8.32 seconds.
-- Complete backend suite at the combined code revision: **668 passed, 0 failed, 0 skipped**, 135.70 seconds, including all **71 dedicated memory cases**. The coordinator explicitly merged the reviewed parser fix and reran the complete suite; the 71 independent test cases remain unchanged. Later changes to this evidence document do not change the tested code.
+- Current: source `945a03740d1e6e0bddd5b01591949a732af5a0e7` with test head `de4644c831ef5c3d3d49bb9cd2877a303dcef7b3` passed the complete suite, **774 passed, 0 failed, 0 skipped**, including all **139 dedicated cases**; see the final section. Current-main integration results are recorded there too.
+- Earlier history: source `60a14f2` / combined `a82df61` passed 668 with the original 71 cases. The sections below record how the dedicated cases grew and the red runs that drove each source fix.
 - Python runtime: `/private/tmp/dd-agent-runtime-uv/bin/python`; local Docker PostgreSQL container `dd-agent-migration-db`; every test module uses a disposable randomly named database. No production database, user records, or paid models are used. Model construction is forbidden for memory-command API cases.
 
 Commands:
@@ -49,3 +47,5 @@ Before the source fix, source `60a14f2928bbb9fbdeba093b5c7079926389ab56` produce
 The first expanded grammar suite passed **128 tests**, 0 failures/skips, in 69.10s at combined `581017e93684db673023f7a0e7f03401a972ca5d` / source `09dc425fca398fef5953b18c290ef0d8363cdbaa` (`/private/tmp/dd-explicit-memory-grammar-focused.log`). Further independently authored same-conversation checks found that a rejected target still erased existing SDK replay history. Three executed history assertions failed (`[]` versus the stored prior turn); six additional bare grammatical-placeholder cases incorrectly wrote memory. This follow-up ran **9 failed, 2 passed**, 128 deselected, 0 skipped, 5.69s (`/private/tmp/dd-explicit-memory-replay-placeholder-red.log`). These 11 new assertions block acceptance pending the source fix and will remain unchanged. No source edits were made by the test author.
 
 After explicitly merging source fix `945a03740d1e6e0bddd5b01591949a732af5a0e7` (test head `de4644c831ef5c3d3d49bb9cd2877a303dcef7b3`), all 11 replay/placeholder assertions and the earlier grammar regressions passed unchanged. The complete backend suite passed **774 tests, 0 failed, 0 skipped**, 206.63s, including all **139 dedicated memory cases** (`DD_AGENT_LOCAL_PG=1`, real Agents 0.8.1 runtime; `/private/tmp/dd-explicit-memory-grammar-full.log`). Source `27758cd` differs from `945a037` in documentation only. Fresh independent source (PR19) and test (PR20) reviews are still required.
+
+Current-main integration (main `e7a50061451b1d5b2f51863f42964b6769016498`, which includes food-log access PR21/22): the only merge conflict was the coordinator ledger. Full suites, 0 failed/0 skipped each: completion source `c869dc7` **588 passed**; explicit-memory source `e06471a` **663 passed**; release candidate `6bccb0a` (this branch at `e7407bb` plus completion tests `02d47ba`) **863 passed** in 208.53s (`/private/tmp/dd-stack-main-{pr18,pr19,candidate}.log`).
