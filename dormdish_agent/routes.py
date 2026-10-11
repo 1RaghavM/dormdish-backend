@@ -148,6 +148,13 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
 
 
 STREAM_HEADERS = {'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'}
+SAVE_ERRORS = {
+    'stale_profile': 'Your profile changed. Request a new preview before applying a meal.',
+    'stale_plan': 'Your saved plan changed. Request a new preview before saving.',
+    'expired': 'This preview expired. Ask again for a fresh meal before saving.',
+    'quota': 'The agent request limit was reached. Try again later.',
+    'conflict': 'This save conflicted with another request. Review your saved plans before trying again.',
+}
 
 
 class BoundedAgentRoute(APIRoute):
@@ -300,18 +307,26 @@ async def run_stream(owner, state, request, context, history, target, expected_p
             state.status = 'running'
             append_event(state, 'action_required', {'action': action.action.model_dump(mode='json')})
             append_event(state, terminal.type, terminal.data.model_dump(mode='json'))
+        save = action is not None and os.getenv('DORMDISH_CONTROLLED_SAVE_ENABLED', 'false') == 'true'
         finish_attempted = True
         try:
-            result = await storage_call(owner.finish_turn, state, turn.history, turn.assistant_text, action)
+            result = await storage_call(owner.save_turn if save else owner.finish_turn,
+                                        state, turn.history, turn.assistant_text, action)
         except HTTPException as exc:
-            if exc.status_code != 409 or exc.detail != 'Agent request stale_profile':
+            code = str(exc.detail).removeprefix('Agent request ')
+            if save and exc.status_code == 503:
+                # The save may have committed. Only read the result; never repeat the write.
+                result = await storage_call(owner.get_run, state.id)
+                if result.status == 'running':
+                    raise exc from None
+            elif code == 'stale_profile' or (save and code in SAVE_ERRORS):
+                # This explicit rejection rolled back; persist a new terminal error, never retry an ambiguous write.
+                state.events = state.events[:emitted]
+                state.status = 'running'
+                append_event(state, 'error', {'code': code, 'message': SAVE_ERRORS[code], 'retryable': True})
+                result = await storage_call(owner.finish_turn, state, [], '')
+            else:
                 raise
-            # This explicit rejection rolled back; persist a new terminal error, never retry an ambiguous write.
-            state.events = state.events[:emitted]
-            state.status = 'running'
-            append_event(state, 'error', {'code': 'stale_profile',
-                'message': 'Your profile changed. Request a new preview before applying a meal.', 'retryable': True})
-            result = await storage_call(owner.finish_turn, state, [], '')
         if result.events[:emitted] == state.events[:emitted]:
             async for data in replay(result.events[emitted:]):
                 yield data
