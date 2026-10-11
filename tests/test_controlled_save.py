@@ -1,6 +1,7 @@
 """Independent controlled-save acceptance tests: real FastAPI/SSE routes, real SDK runtime and real
 PostgreSQL RPCs. Only session auth and the model HTTP boundary are synthetic."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -24,6 +25,13 @@ SEED = {'success': True, 'meal_plan': {'meals': {
     'totals': {'calories': 1200, 'protein_g': 16, 'fat_g': 60, 'carbs_g': 123}}}
 # One Busch "Rice" dinner item at 1.5 servings, as chosen by the synthetic model.
 RICE = dict(calories=300, protein_g=6, fat_g=1.5, carbs_g=66)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def controlled_save_schema(route_pg):
+    migration = Path(__file__).resolve().parents[1] / 'migrations/add_agent_controlled_save.sql'
+    if migration.exists():  # Absent on the pre-feature base, where the red run must still reach assertions.
+        route_pg.sql(migration.read_text())
 
 
 @pytest.fixture(autouse=True)
