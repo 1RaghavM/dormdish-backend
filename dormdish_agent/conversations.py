@@ -82,8 +82,13 @@ class AgentStore:
     def get_run(self, request_id: UUID) -> RunState:
         return RunState.model_validate(self._rpc("get_run", p_request_id=str(request_id)))
 
+    def save_turn(self, run: RunState, history: list[dict], assistant_text: str = "",
+                  action: StoredAction | None = None) -> RunState:
+        """finish_turn, plus an atomic save when SQL finds explicit authorization in this turn's stored text."""
+        return self.finish_turn(run, history, assistant_text, action, rpc="save_turn")
+
     def finish_turn(self, run: RunState, history: list[dict], assistant_text: str = "",
-                    action: StoredAction | None = None) -> RunState:
+                    action: StoredAction | None = None, rpc: str = "finish_turn") -> RunState:
         if run.status == "running":
             raise ValueError("A finish requires a terminal outcome")
         if len(assistant_text) > 64000 or len(run.events) > 512:
@@ -96,7 +101,7 @@ class AgentStore:
         pending = action.payload() if action else None
         if len(json.dumps(events).encode()) > 524288 or (pending and len(json.dumps(pending, allow_nan=False).encode()) > 262144):
             raise ValueError("Outcome exceeds storage bounds")
-        return RunState.model_validate(self._rpc("finish_turn", p_conversation_id=str(run.conversation_id),
+        return RunState.model_validate(self._rpc(rpc, p_conversation_id=str(run.conversation_id),
             p_request_id=str(run.id), p_events=events, p_history=history,
             p_assistant_text=assistant_text, p_action=pending))
 
