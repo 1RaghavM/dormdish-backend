@@ -9,13 +9,14 @@ Usage:
 """
 
 import os
+import json
 import re
 import sys
 import asyncio
 import random
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -145,13 +146,13 @@ def _add_food_obj_from_new_schema(food: dict, items: List[dict], category: str =
     out_item: Dict[str, object] = {"name": title_case_name(name)}
     if category:
         out_item["category"] = category
-    prot = food.get("g_protein") or food.get("protein_g")
+    prot = next((food[k] for k in ("g_protein", "protein_g") if food.get(k) is not None), None)
     if prot is not None:
         out_item["protein_g"] = prot
-    fat = food.get("g_fat") or food.get("fat_g")
+    fat = next((food[k] for k in ("g_fat", "fat_g") if food.get(k) is not None), None)
     if fat is not None:
         out_item["fat_g"] = fat
-    carbs = food.get("g_carbs") or food.get("carbs_g") or food.get("carbohydrates")
+    carbs = next((food[k] for k in ("g_carbs", "carbs_g", "carbohydrates") if food.get(k) is not None), None)
     if carbs is not None:
         out_item["carbs_g"] = carbs
     cals = food.get("calories")
@@ -170,6 +171,9 @@ def _add_food_obj_from_new_schema(food: dict, items: List[dict], category: str =
             out_item["serving_size"] = " ".join(parts)
     elif isinstance(sv, str) and sv:
         out_item["serving_size"] = sv
+    for key in ("allergens", "dietary_tags", "nutrition_url"):
+        if key in food:
+            out_item[key] = food[key]
     items.append(out_item)
 
 
@@ -221,6 +225,9 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
                     out_item["serving_size"] = it["serving_size"]
                 if it.get("category"):
                     out_item["category"] = it["category"]
+                for key in ("allergens", "dietary_tags", "nutrition_url"):
+                    if key in it:
+                        out_item[key] = it[key]
                 out_item["meal"] = meal
                 items.append(out_item)
         else:
@@ -259,13 +266,14 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
             meals_dict[meal] = items
             all_items.extend(items)
 
-    # Deduplicate by name
+    # Keep distinct meal, portion and provenance records; remove only exact duplicates.
     seen = set()
     unique_items: List[dict] = []
     for it in all_items:
         nm = (it.get("name") or "").strip()
-        if nm and nm not in seen:
-            seen.add(nm)
+        identity = json.dumps(it, sort_keys=True)
+        if nm and identity not in seen:
+            seen.add(identity)
             unique_items.append(it)
 
     if not unique_items:
@@ -289,7 +297,7 @@ async def fetch_foodpro_menu(client: httpx.AsyncClient, hall_slug: str, date: st
         "hall": hall_slug,
         "hall_slug": hall_slug,
         "date": date,
-        "fetched_at": datetime.now().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
         "items": unique_items,
         "meals": meals_dict,
         "meal_sources": meal_sources,
@@ -311,7 +319,7 @@ def save_menu_to_supabase(supabase_client, university: str, dining_hall: str, da
         if meal:
             menu_id = f"{menu_id}_{meal}"
         hall_slug = menu_data.get("hall_slug", dining_hall)
-        fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
+        fetched_at = menu_data.get("fetched_at", datetime.now(timezone.utc).isoformat())
 
         items_count = 0
         if "items" in menu_data:
@@ -332,7 +340,7 @@ def save_menu_to_supabase(supabase_client, university: str, dining_hall: str, da
             "date": date,
             "fetched_at": fetched_at,
             "menu_data": stored_menu_data,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         if meal:
             data_to_insert["meal"] = meal
