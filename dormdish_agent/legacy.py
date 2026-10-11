@@ -34,15 +34,18 @@ async def events(client, user, get_targets, dining_hall, date, targets, restaura
     openai = AsyncOpenAI(max_retries=0, timeout=30)
     try:
         for index, meal in enumerate(meals):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or model_budget <= 0:
+            if model_budget <= 0:
                 raise ValueError('Generation budget exhausted')
             hint = targets[meal]
             request = TurnRequest(request_id=uuid4(), context={'dining_hall': dining_hall, 'date': date, 'meal_type': meal},
                 text=f'Generate my {meal} from the current menu. Aim for about {hint["calories"]} kcal, '
                      f'{hint["protein_g"]} g protein, {hint["fat_g"]} g fat and {hint["carbs_g"]} g carbs. '
                      'Return one validated meal preview.')
-            context = await asyncio.to_thread(build_context, client, user, request, get_targets)
+            context = await asyncio.wait_for(asyncio.to_thread(build_context, client, user, request, get_targets),
+                                             max(0, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('Generation budget exhausted')
             context.restaurant = restaurant
             context.model_limit = min(8, model_budget)
             context.validation_limit = min(2, attempts_left - (len(meals) - index - 1))

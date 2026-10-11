@@ -5296,6 +5296,19 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         if not authenticated_user:
             raise HTTPException(status_code=401, detail="Authentication required.")
 
+        # The agent path saves to the requested date; apply /generate-meal-plan's one-plan-per-day check.
+        if agent_generation:
+            existing_plan_check = supabase.table("saved_meal_plans")\
+                .select("id, created_at")\
+                .eq("user_id", authenticated_user["id"])\
+                .in_("date", [datetime.now(ZoneInfo("America/New_York")).date().isoformat(), meal_plan_request.date])\
+                .execute()
+            if existing_plan_check.data:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"You already have a meal plan for today. You can generate a new one at the start of tomorrow or use the existing plan."
+                )
+
         # Get user data
         user = User(
             age=authenticated_user['age'],

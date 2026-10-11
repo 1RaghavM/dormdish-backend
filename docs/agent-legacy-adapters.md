@@ -67,7 +67,9 @@ Autosave uses each route's existing `saved_meal_plans` insert (same row shape, s
 semantics, same referral check). In the agent path the saved row's `date` (and the stream payload's
 `date`) is the **requested** date, not today. `/generate-meal-plan`'s existing one-plan-per-day
 check still checks today and, in the agent path, also the requested date (no plan can be generated
-for a date that already has one). Single-meal routes already check the requested date.
+for a date that already has one). In the agent path `/generate-meal-plan-stream` applies the same
+today/requested-date check with the same 409 before the stream opens (flag off: no check, as today).
+The 45 s deadline includes the per-meal context reads. Single-meal routes already check the requested date.
 
 ## Errors
 
