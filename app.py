@@ -3106,7 +3106,7 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
         try:
             menu_id = f"{university}_{dining_hall}_{date}_{meal}" if meal else f"{university}_{dining_hall}_{date}"
             hall_slug = menu_data.get("hall_slug", dining_hall)
-            fetched_at = menu_data.get("fetched_at", datetime.now().isoformat())
+            fetched_at = menu_data.get("fetched_at", datetime.now(timezone.utc).isoformat())
             items_count = 0
             if "items" in menu_data:
                 items_count = len(menu_data["items"])
@@ -3140,7 +3140,7 @@ async def save_menu_to_supabase(university: str, dining_hall: str, date: str, me
                 "date": date,
                 "fetched_at": fetched_at,
                 "menu_data": stored_menu_data,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
             if meal:
                 data_to_insert["meal"] = meal
@@ -3361,10 +3361,10 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         if prot is not None:
             out_item["protein_g"] = prot
         # include fat and carbs if present in new FoodPro schema
-        fat = food.get("g_fat") or food.get("fat_g")
+        fat = next((food[k] for k in ("g_fat", "fat_g") if food.get(k) is not None), None)
         if fat is not None:
             out_item["fat_g"] = fat
-        carbs = food.get("g_carbs") or food.get("carbs_g") or food.get("carbohydrates")
+        carbs = next((food[k] for k in ("g_carbs", "carbs_g", "carbohydrates") if food.get(k) is not None), None)
         if carbs is not None:
             out_item["carbs_g"] = carbs
         cals = food.get("calories")
@@ -3383,6 +3383,9 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                 out_item["serving_size"] = " ".join(parts)
         elif isinstance(sv, str) and sv:
             out_item["serving_size"] = sv
+        for key in ("allergens", "dietary_tags", "nutrition_url"):
+            if key in food:
+                out_item[key] = food[key]
         items.append(out_item)
 
     async def _attempt_all_meals(location_num: str, location_name: str) -> dict:
@@ -3440,6 +3443,9 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
                         out_item["serving_size"] = it.get("serving_size")
                     if it.get("category"):
                         out_item["category"] = it["category"]
+                    for key in ("allergens", "dietary_tags", "nutrition_url"):
+                        if key in it:
+                            out_item[key] = it[key]
                     items.append(out_item)
             else:
                 if isinstance(parsed, dict):
@@ -3504,8 +3510,9 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
     unique_items: List[dict] = []
     for it in all_items:
         nm = (it.get("name") or '').strip()
-        if nm and nm not in seen:
-            seen.add(nm)
+        identity = json.dumps(it, sort_keys=True)
+        if nm and identity not in seen:
+            seen.add(identity)
             unique_items.append(it)
 
     warnings: List[str] = attempt.get("warnings", [])
@@ -3537,7 +3544,7 @@ async def fetch_foodpro_menu_rutgers(dining_hall: str, hall_slug: str, date: str
         "hall": dining_hall,
         "hall_slug": hall_slug,
         "date": date,
-        "fetched_at": datetime.now().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
         "items": unique_items,
         "menu": {"items": unique_items, "meal_sources": meal_sources or ["foodpro"]},
         "meta": {"warnings": warnings, "notes": ["source: FoodPro"]},
@@ -3598,11 +3605,10 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         try:
             items = await fetch_meal_items(api_base, hall_slug, meal_slug, date)
             if items:
-                meal_name = meal_slug.split("-")[-1] if "-" in meal_slug else meal_slug
-                if meal_name == "dinner-2":
+                if meal_slug.endswith("dinner-2") or meal_slug == "lunch-test":
                     meal_name = "lunch"
-                elif meal_name == "lunch-test":
-                    meal_name = "lunch"
+                else:
+                    meal_name = meal_slug.rsplit("-", 1)[-1]
                 for item in items:
                     item["meal"] = meal_name
                 all_items.extend(items)
@@ -3616,8 +3622,9 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
     unique_items: List[dict] = []
     for item in all_items:
         item_name = item.get("name", "")
-        if item_name and item_name not in seen_items:
-            seen_items.add(item_name)
+        identity = json.dumps(item, sort_keys=True)
+        if item_name and identity not in seen_items:
+            seen_items.add(identity)
             unique_items.append(item)
     
     
@@ -3633,7 +3640,7 @@ async def fetch_nutrislice_menu(university: str, hall_slug: str, dining_hall: st
         "hall": dining_hall,
         "hall_slug": hall_slug,
         "date": date,
-        "fetched_at": datetime.now().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
         "items": unique_items,
         "menu": {"items": unique_items, "meal_sources": meal_sources},
         "meta": {"warnings": warnings, "notes": []},
@@ -3718,14 +3725,18 @@ def process_menu_item(item: dict) -> Optional[dict]:
     else:
         # Extract from flat structure (alternative format)
         nutrition = {
-            "protein_g": item.get("g_protein") or item.get("protein"),
-            "calories": item.get("calories") or item.get("kcal"),
-            "fat_g": item.get("g_fat") or item.get("fat"),  # Extract fat
-            "carbs_g": item.get("g_carbs") or item.get("carbs") or item.get("carbohydrates"),  # Extract carbs
+            "protein_g": next((item[k] for k in ("g_protein", "protein") if item.get(k) is not None), None),
+            "calories": next((item[k] for k in ("calories", "kcal") if item.get(k) is not None), None),
+            "fat_g": next((item[k] for k in ("g_fat", "fat") if item.get(k) is not None), None),
+            "carbs_g": next((item[k] for k in ("g_carbs", "carbs", "carbohydrates") if item.get(k) is not None), None),
             "serving_size": item.get("serving_size") or item.get("portion_size"),
         }
     
     result: Dict[str, object] = {"name": title_case_name(name)}
+    source = item["food"] if isinstance(item.get("food"), dict) else item
+    for key in ("allergens", "dietary_tags", "nutrition_url"):
+        if key in source:
+            result[key] = source[key]
     
     # Add required macros (protein and calories)
     if nutrition.get("protein_g") is not None:
