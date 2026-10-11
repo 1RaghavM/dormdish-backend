@@ -126,7 +126,8 @@ def test_flag_off_keeps_preview_for_explicit_save(api, monkeypatch, flag):
 
 
 @pytest.mark.parametrize('text', [SAVE, 'Generate and save dinner for tonight', '  please PLAN AND SAVE dinner ',
-                                  'Make and save a dinner', 'Save dinner.', 'Save dinner 🙂'])
+                                  'Make and save a dinner', 'Save dinner.', 'Save dinner 🙂',
+                                  'Save a donut for breakfast'])
 def test_explicit_save_writes_once_atomically_and_duplicate_replays(api, monkeypatch, text):
     requests = install_model(monkeypatch)
     before = account(api)

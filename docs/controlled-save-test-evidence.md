@@ -1,6 +1,6 @@
 # Controlled save — independent test evidence
 
-Owner: dedicated test author. File under test: `tests/test_controlled_save.py` (60 cases). Real FastAPI/SSE
+Owner: dedicated test author. File under test: `tests/test_controlled_save.py` (61 cases). Real FastAPI/SSE
 routes, real Agents SDK runtime, real PostgreSQL RPCs (Docker `dd-agent-migration-db`, PG17, throwaway DB).
 Only session auth (`verify_session_token`) and the model HTTP transport are synthetic, as in existing route tests.
 
@@ -11,8 +11,8 @@ Only session auth (`verify_session_token`) and the model HTTP transport are synt
 | Base | `fdec0fea4aacfe84fe40a72adec5067d44c0de17` |
 | Tests, first red | `28c9e53e8896fa48c7d1a62e89b7e92b2e129a12` |
 | Tests, review fixes | `0ae23da` |
-| Source tested | `dd36a8006874aa83225d1870905495869cf1846d` (`feat/dd-agent/controlled-save`), merged with `--no-ff` |
-| Earlier source runs | `262b3a5` (round 1), `249b45c` (bypass red) |
+| Source tested | `4e22d361c521b14c811046d0d24fd32b81d3877d` (`feat/dd-agent/controlled-save`, final cleared head), merged with `--no-ff` |
+| Earlier source runs | `262b3a5` (round 1), `249b45c` (bypass red), `dd36a80` (round 2) |
 
 ## Runs
 
@@ -25,12 +25,14 @@ Command: `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pyt
 | Bypass red, source `249b45c` (60 cases) | 5 failed (assertions), 55 passed | `/private/tmp/dd-controlled-save-tests-red2-249b45c.log` |
 | Dedicated, source `dd36a80` | 60 passed, 0 failed, 0 skipped | `/private/tmp/dd-controlled-save-tests-green2.log` |
 | Full suite, source `dd36a80` | 974 passed, 0 failed, 0 skipped, 342s | `/private/tmp/dd-controlled-save-tests-full2.log` |
+| Dedicated, source `4e22d36` (61 cases) | 61 passed, 0 failed, 0 skipped | `/private/tmp/dd-controlled-save-tests-green3.log` |
+| Full suite, source `4e22d36` | 980 passed, 0 failed, 0 skipped, 313s | `/private/tmp/dd-controlled-save-tests-full3.log` |
 
 The `249b45c` red cases were `Save dinner don´t`, `Save dinner, do​n't add rice` (zero-width space),
 `Save dinner?”`, `Save dinner? 🙂`, and `Replace my dinner? 🙂` with an existing plan. Each one saved or
 replaced instead of previewing. `dd36a80` fixes all five.
 
-## Mutations (source edited temporarily, run, then `git checkout -- .`; worktree confirmed clean)
+## Mutations at `dd36a80` (source edited temporarily, run, then `git checkout -- .`; worktree confirmed clean)
 
 | Mutation | Result | Killing test |
 | --- | --- | --- |
@@ -45,7 +47,7 @@ The reviewer already killed M1b, M2, M3 and M4 at `ddef039`.
 ## Coverage
 
 - Flag unset or `false`: explicit save and exact replace keep the Apply preview, no write.
-- Authorized SAVE (6 phrasings, including `please`, case, whitespace, `Save dinner.`, `Save dinner 🙂`): no
+- Authorized SAVE (7 phrasings, including `please`, case, whitespace, `Save dinner.`, `Save dinner 🙂`, `Save a donut for breakfast`): no
   `action_required`; `complete.saved_plan_id` is the only row; date, hall and totals correct; run replay
   equals the stream; a duplicate request replays the same bytes with no model call or second write; profile
   and preferences unchanged; exactly one derived internal confirmation run; quota at 2 (turn + confirm).
@@ -74,12 +76,13 @@ Implementer doc deviations, judged safe and adopted:
 2. The save confirms under a derived internal request id (`md5('dormdish-controlled-save:' || request_id)`),
    adding one internal run row and one quota unit per save. The test asserts exactly one of each.
 3. Hardening (`dd36a80`): any `? ？ ‽ ⁇ ﹖ ؟` anywhere rejects; negation is `don.?t|do\s+not|never|not|without`;
-   zero-width and variation selectors are stripped everywhere.
+   zero-width and variation selectors are stripped everywhere. `4e22d36` narrows the negation token to
+   `don([^[:alnum:]]|ʼ)?t`, so `donut` is not a negation. The negation cases are unchanged and still pass.
 
 Test-author correction: bare `save` matches the agreed regex, so it is not in the non-authorizing list.
 
 ## Source defects
 
-None open against `dd36a80`. The question-mark and apostrophe-variant bypasses at `249b45c` are fixed.
+None open against `4e22d36`. The question-mark and apostrophe-variant bypasses at `249b45c` are fixed.
 
 Not covered: production schema deployment (not applied anywhere) and live models.
