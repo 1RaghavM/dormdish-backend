@@ -36,12 +36,14 @@ def test_candidate_gate_does_not_authorize_quoted_or_negated_commands():
 @pytest.mark.parametrize('text,expected', [
     ("Remember that I don't like mushrooms", ('dislike','mushrooms','all')),
     ("Remember that I don’t like mushrooms", ('dislike','mushrooms','all')),
+    ("Remember that I don’t like Chef’s rice", ('dislike','Chef’s rice','all')),
     ('Remember that I like rice for dinner', ('favorite','rice','dinner')),
     ('Remember my flavor preference: spicy', ('favorite','spicy','all')),
     ('Remember that I like mushrooms tonight', None),
     ('Remember that I am allergic to peanuts', None),
     ('Do not remember that I like peanuts', None),
     ('Remember that I like rice and forget mushrooms', None),
+    ("Remember that I like rice. Actually don't save that", None),
     ('"Remember that I like rice"', None),
 ])
 def test_sql_parser_is_bound_to_exact_literal_instruction(memory_pg, text, expected):
@@ -94,4 +96,45 @@ def test_pending_memory_cannot_resurrect_after_forget(memory_pg):
     result = store.apply_memory_turn(pending.id, remember.request_id)
     assert not result.events[-1].data.preferences_changed
     assert 'changed while' in result.events[0].data.text
+    assert memory_pg.sql(f"SELECT count(*) FROM user_preferences WHERE user_id='{owner}'") == '0'
+
+
+@pytest.mark.parametrize('category', ['favorite', 'dislike'])
+def test_delete_preserves_complete_encoded_name(monkeypatch, category):
+    from types import SimpleNamespace
+    from urllib.parse import quote
+    from fastapi.testclient import TestClient
+    import app
+    calls = []
+    class Client:
+        def rpc(self, name, params):
+            calls.append((name, params))
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data={'status':'deleted'}))
+    owner = str(uuid4())
+    monkeypatch.setattr(app, 'supabase', Client())
+    app.app.dependency_overrides[app.require_premium] = lambda: {'id':owner}
+    name = 'Mac/Cheese? #%'
+    try:
+        with TestClient(app.app) as client:
+            result = client.delete('/preferences/' + category + '/' + quote(name, safe=''))
+        assert result.status_code == 200
+        assert calls == [('preference_forget', {'p_user_id':owner,'p_category':category,'p_item_name':name})]
+    finally:
+        app.app.dependency_overrides.pop(app.require_premium, None)
+
+
+def test_typed_taste_changes_and_forget_keep_kind_and_category(memory_pg):
+    owner = uuid4()
+    memory_pg.sql(f"INSERT INTO users VALUES ('{owner}')")
+    store = AgentStore(memory_pg, owner)
+    conversation = store.create_conversation()
+    for text in ['Remember my flavor preference: spicy', 'Remember my flavor dislike: spicy',
+                 'Forget my flavor preference: spicy']:
+        request = TurnRequest(request_id=uuid4(), text=text)
+        store.claim_turn(conversation.id, request)
+        assert store.apply_memory_turn(conversation.id, request.request_id).events[-1].data.preferences_changed
+    assert memory_pg.sql(f"SELECT preference_kind || ':' || category FROM user_preferences WHERE user_id='{owner}'") == 'flavor:dislike'
+    request = TurnRequest(request_id=uuid4(), text='Forget my flavor dislike: spicy')
+    store.claim_turn(conversation.id, request)
+    store.apply_memory_turn(conversation.id, request.request_id)
     assert memory_pg.sql(f"SELECT count(*) FROM user_preferences WHERE user_id='{owner}'") == '0'

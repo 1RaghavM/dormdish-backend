@@ -90,23 +90,29 @@ CREATE FUNCTION public.agent_memory_intent(p_text text) RETURNS jsonb
 LANGUAGE plpgsql IMMUTABLE SET search_path = public, pg_temp AS $$
 DECLARE text_value text; found text[]; item text; category text; kind text := 'food_item'; meal text := 'all'; operation text;
 BEGIN
-    text_value := regexp_replace(preference_item_name(replace(p_text, '’', '''')), '^please +', '', 'i');
+    text_value := regexp_replace(preference_item_name(p_text), '^please +', '', 'i');
     text_value := regexp_replace(text_value, '[.!]$', '');
     IF lower(text_value) = 'forget that preference' THEN RETURN jsonb_build_object('operation','reference'); END IF;
-    IF text_value ~ E'[\\n\\r;"?]' THEN RETURN NULL; END IF;
-    found := regexp_match(text_value, '^remember(?: that)? i (like|love|prefer|dislike|don''t like|do not like) (.+)$', 'i');
+    IF text_value ~ E'[\\n\\r;"?.!`“”]' THEN RETURN NULL; END IF;
+    found := regexp_match(text_value, '^remember(?: that)? i (like|love|prefer|dislike|don[''’]t like|do not like) (.+)$', 'i');
     IF found IS NOT NULL THEN
         operation := 'set'; item := found[2];
-        category := CASE WHEN lower(found[1]) IN ('dislike','don''t like','do not like') THEN 'dislike' ELSE 'favorite' END;
+        category := CASE WHEN lower(found[1]) IN ('dislike','don''t like','don’t like','do not like') THEN 'dislike' ELSE 'favorite' END;
     ELSE
         found := regexp_match(text_value, '^remember my (flavor|cuisine|texture) (preference|dislike): +(.+)$', 'i');
         IF found IS NOT NULL THEN
             operation := 'set'; kind := lower(found[1]); item := found[3];
             category := CASE WHEN lower(found[2]) = 'dislike' THEN 'dislike' ELSE 'favorite' END;
         ELSE
-            found := regexp_match(text_value, '^forget (?:my (favorite|dislike) of )?(.+)$', 'i');
-            IF found IS NULL THEN RETURN NULL; END IF;
-            operation := 'forget'; category := lower(found[1]); item := found[2];
+            found := regexp_match(text_value, '^forget my (flavor|cuisine|texture) (preference|dislike): +(.+)$', 'i');
+            IF found IS NOT NULL THEN
+                operation := 'forget'; kind := lower(found[1]); item := found[3];
+                category := CASE WHEN lower(found[2])='dislike' THEN 'dislike' ELSE 'favorite' END;
+            ELSE
+                found := regexp_match(text_value, '^forget (?:my (favorite|dislike) of )?(.+)$', 'i');
+                IF found IS NULL THEN RETURN NULL; END IF;
+                operation := 'forget'; category := lower(found[1]); item := found[2];
+            END IF;
         END IF;
     END IF;
     IF operation = 'set' THEN
@@ -115,11 +121,11 @@ BEGIN
     END IF;
     item := preference_item_name(item);
     IF length(item) NOT BETWEEN 1 AND 200 OR item ~ '^["'']|["'']$'
-        OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|unless|if|then|but|except|only|not|no|and|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
+        OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|unless|if|then|but|except|only|just|for|now|this|during|next|current|maybe|perhaps|probably|not|no|and|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
         OR item ~* '\mand (also|i|do|don''t|never)\M' OR item ~* '\mfor (breakfast|lunch|dinner)\M'
         OR lower(item) IN ('that','it','this','that preference','my preference','everything','all preferences')
         THEN RETURN NULL; END IF;
-    RETURN jsonb_build_object('operation',operation,'item_name',item,'category',category,'preference_kind',kind,'meal_type',meal);
+    RETURN jsonb_build_object('operation',operation,'item_name',item,'category',category,'preference_kind',kind,'meal_type',meal,'exact_kind',kind<>'food_item');
 END $$;
 
 CREATE FUNCTION public.agent_memory_turn(p_user_id uuid, p_conversation_id uuid, p_request_id uuid) RETURNS jsonb
@@ -144,7 +150,7 @@ BEGIN
         SELECT id,agent_memory_intent(request->>'text') INTO prior_id,prior_intent FROM agent_runs WHERE user_id=p_user_id AND conversation_id=p_conversation_id AND id<>p_request_id
             ORDER BY created_at DESC,id DESC LIMIT 1;
         SELECT jsonb_agg(jsonb_build_object('operation','forget','item_name',item_name,'category',category,
-            'preference_kind',coalesce(preference_kind,item_type),'meal_type',meal_type,'exact_scope',true)) INTO found_rows
+            'preference_kind',coalesce(preference_kind,item_type),'meal_type',meal_type,'exact_scope',true,'exact_kind',true)) INTO found_rows
             FROM user_preferences WHERE user_id=p_user_id AND source='explicit_chat'
             AND source_conversation_id=p_conversation_id AND source_request_id=prior_id
             AND prior_intent->>'operation'='set' AND meal_type=prior_intent->>'meal_type'
@@ -165,7 +171,8 @@ BEGIN
         DELETE FROM user_preferences WHERE user_id=p_user_id
             AND lower(preference_item_name(item_name))=lower(intent->>'item_name')
             AND (intent->>'category' IS NULL OR category=intent->>'category')
-            AND (coalesce((intent->>'exact_scope')::boolean,false)=false OR meal_type=intent->>'meal_type');
+            AND (coalesce((intent->>'exact_scope')::boolean,false)=false OR meal_type=intent->>'meal_type')
+            AND (coalesce((intent->>'exact_kind')::boolean,false)=false OR coalesce(preference_kind,item_type)=intent->>'preference_kind');
         PERFORM agent_clear_history(p_user_id);
         changed := true;
         text_value := 'Forgot the preference for ' || (intent->>'item_name') || '.';
