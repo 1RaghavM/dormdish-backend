@@ -40,15 +40,21 @@ def enabled():
 def saved_items(row):
     """Existing saved item amounts already include servings; do not multiply twice."""
     data = row['meal_plan_data']
+    if not isinstance(data, dict) or not isinstance(data.get('meal_plan', data), dict):
+        raise ValueError('Unsupported saved meal format')
     meals = data.get('meal_plan', data).get('meals')
     if not isinstance(meals, dict) or set(meals) - {'breakfast', 'lunch', 'dinner'}:
         raise ValueError('Unsupported saved meal format')
     result = []
     for meal, value in meals.items():
+        if not isinstance(value, dict):
+            raise ValueError('Unsupported saved meal format')
         foods = value.get('items')
         if not isinstance(foods, list) or not 1 <= len(foods) <= 30:
             raise ValueError('Unsupported saved food list')
         for index, item in enumerate(foods):
+            if not isinstance(item, dict):
+                raise ValueError('Unsupported saved food')
             name = item.get('name')
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200:
                 raise ValueError('Invalid saved food name')
