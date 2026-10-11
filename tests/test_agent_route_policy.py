@@ -215,3 +215,41 @@ def test_existing_legacy_hall_alias_can_be_refined_without_moving_the_plan(api, 
     plan = api.owner.get_saved_plan(plan_id)['plan']
     assert plan['dining_hall'] == legacy_hall and plan['date'] == '2026-10-10'
     assert plan['meal_plan_data']['meal_plan']['meals']['breakfast'] == original['meal_plan']['meals']['breakfast']
+
+
+@pytest.mark.parametrize('other_hall', ['livingston', 'Livingston Dining Commons', 'livingston-dining-commons', 'Busch Dining Hall Annex'])
+def test_alias_resolution_must_not_accept_another_or_unregistered_hall(api, monkeypatch, other_hall):
+    plan_id, original = seed_plan(api, hall=other_hall)
+    requests = install_model(monkeypatch)
+    conversation = api.owner.create_conversation()
+    body = turn_body()
+    result = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
+    assert result.status_code == 409
+    assert requests == []
+    assert api.owner.get_saved_plan(plan_id)['plan']['meal_plan_data'] == original
+    assert api.owner.get_conversation(conversation.id).pending_actions == []
+    assert api.owner.get_run(UUID(body['request_id'])).status == 'error'
+
+
+@pytest.mark.parametrize('field,value', [('user_id', str(uuid4())), ('meal_plan_data', {}),
+                                       ('target_plan_id', str(uuid4()))])
+def test_confirmation_never_accepts_client_selected_owner_or_plan_payload(api, field, value):
+    _, action = prepared_action(api.owner)
+    body = confirmation().model_dump(mode='json') | {field: value}
+    result = api.client.post(f'/agent/actions/{action.id}/confirm', json=body)
+    assert result.status_code == 422
+    assert api.database.calls == []
+    assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '0'
+
+
+def test_actual_legacy_route_cannot_save_over_another_owners_existing_id(api, monkeypatch):
+    import app as application
+    foreign = SimpleNamespace(owner=api.other, pg=api.pg)
+    plan_id, original = seed_plan(foreign)
+    monkeypatch.setattr(application, 'supabase', api.database)
+    api.client.app.add_api_route('/meal-plan/save', application.save_meal_plan, methods=['POST'])
+    result = api.client.post('/meal-plan/save', json={'plan_id': str(plan_id), 'dining_hall': 'busch',
+        'date': '2026-10-10', 'meal_plan_data': {'malicious_replacement': True}})
+    assert result.status_code == 404
+    assert api.other.get_saved_plan(plan_id)['plan']['meal_plan_data'] == original
+    assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '0'
