@@ -1,18 +1,18 @@
 # Independent preference transaction checks
 
-Companion to backend PR #13. Production implementation tested: `1cf56a385c15643318f0485049124f54118b1310`. Combined implementation/test revision: `037ca05824857349a3fdeb6b312cbdf323b46935`; subsequent evidence-only commits do not change executable files. Ponytail full applied. This PR owns only `tests/test_preference_transactions.py` and this evidence file; no production edits.
+Companion to backend PR #13. Production implementation tested: `80054ed`. Combined implementation/test revision: `017792c785c234e5c704e55ffbf7110290ecd2c7`; subsequent evidence-only commits do not change executable files. Ponytail full applied. This PR owns only `tests/test_preference_transactions.py` and this evidence file; no production edits.
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Independent preference cases | 38 passed, 0 failed, 0 skipped within the full suite | `/private/tmp/dd-preference-runtime-integrated-full.log` |
-| Full combined backend suite | 393 passed, 0 failed, 0 skipped; 42.08 seconds | `/private/tmp/dd-preference-runtime-integrated-full.log` |
+| Independent preference cases | 38 passed, 0 failed, 0 skipped within the full suite | `/private/tmp/dd-preference-search-integrated-full.log` |
+| Full combined backend suite | 436 passed, 0 failed, 0 skipped; 52.74 seconds | `/private/tmp/dd-preference-search-integrated-full.log` |
 | Original tab-only name defect, feature production source `4b56dc993a48f4fe84eea84178f998ce113bb849` | Both set and forget assertions failed on actual SQL behavior; 7 other selected cases passed | `/private/tmp/dd-preference-whitespace-both.log` |
 | Same assertions after source fix | Passed unchanged in the combined suite | Current full log above |
 | Legacy long-name HTTP DELETE regression before fix (production `6dd1d8ad18d05ee77190f2c6789d31d30cae7931`) | Both favorite and dislike cases failed with HTTP 500 instead of 200; 36 deselected | `/private/tmp/dd-preference-long-red.log` |
 | Same long-name assertions after source fix | Both pass unchanged; 201-character favorite and 260-character dislike | Current full log above |
 | Semantic mutation removing SQL replay invalidation | Both set and forget cases failed on persisted stale histories; 31 deselected | `/private/tmp/dd-preference-mutation-fnyuhgzb/result.log` |
 
-Source PR #13 now includes reviewed runtime/menu main revision `96f726b`; it was integrated by an explicit merge. All 38 independent preference cases are unchanged from test head `29327de636cede81bd4596206f16bc6adc94efd0`. Compared with source `1cf56a385c15643318f0485049124f54118b1310`, this branch differs only in the independent test file and this evidence file.
+Source PR #13 now includes reviewed runtime/menu/search main revision `ebba8ef`; it was integrated by an explicit merge. All 38 independent preference cases are unchanged from test head `29327de636cede81bd4596206f16bc6adc94efd0`. Compared with source `80054ed`, this branch differs only in the independent test file and this evidence file.
 
 Commands use `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -o addopts='' -q`, optionally adding `tests/test_preference_transactions.py`. The existing Docker transport creates and drops a separate disposable PostgreSQL database. Tests exercise real RPCs, the actual PreferenceManager, and actual FastAPI routes with synthetic authenticated identity overrides; unauthenticated cases use the real dependency. No live credentials, models, or production rows are used. The reported warning is Starlette's deprecated AnyIO BlockingPortal alias, not a skipped check.
 
