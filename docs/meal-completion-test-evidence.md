@@ -13,3 +13,13 @@ DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest tests/
 ```
 
 Rollout and production schema remain disabled/unapplied. A fresh independent review is required for this test PR and its feature dependency. The coordinator owns integration and rollout gates.
+
+## First integrated behavior run
+
+Explicitly merged feature source `86ff7f1b8444fdd0240bb2cf1e56a5f90dec624d` into test branch at `379bf5a880946aaf5a860bd153196e216497f275`. Companion feature PR: [#18](https://github.com/1RaghavM/dormdish-backend/pull/18); test PR: [#17](https://github.com/1RaghavM/dormdish-backend/pull/17), now targeting the feature branch.
+
+- First focused run: **44 passed, 0 failed, 0 skipped**, 19.89 seconds (`/private/tmp/dd-completion-independent-focused.log`).
+- Expanded run: **48 passed, 4 failed, 0 skipped**, 21.39 seconds (`/private/tmp/dd-completion-independent-expanded.log`). Four real behavior defects: malformed saved JSON at the root, nested meal plan, meal, or food level returned HTTP 503 instead of the documented 422. Reported to source owner; assertions retained unchanged for red/green verification.
+- Four additional tests for multiple versions, old receipts/recheck, canonical ordering, and direct RPC catalog tampering are written but not yet run at this checkpoint.
+
+One existing AnyIO/Starlette deprecation warning occurred; no paid model or production queries ran. Full-suite integration awaits the source fixes and final focused checks.

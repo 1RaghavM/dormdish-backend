@@ -409,3 +409,124 @@ def test_untrusted_database_roles_and_account_deletion(api):
     api.pg.sql(f"DELETE FROM saved_meal_plans WHERE user_id = '{api.owner}'; DELETE FROM users WHERE id = '{api.owner}'")
     for table in ('meal_completions', 'meal_completion_requests'):
         assert api.pg.sql(f"SELECT count(*) FROM {table} WHERE user_id = '{api.owner}'") == '0'
+
+
+@pytest.mark.parametrize('path,value', [
+    ([], []), (['meal_plan'], []), (['meal_plan', 'meals', 'dinner'], []),
+    (['meal_plan', 'meals', 'dinner', 'items', '0'], None),
+])
+def test_malformed_saved_shapes_report_validation_error_not_service_outage(api, path, value):
+    plan = seed(api)
+    if path:
+        expression = f"jsonb_set(meal_plan_data, '{{{','.join(path)}}}', {literal(value)})"
+    else:
+        expression = literal(value)
+    api.pg.sql(f"UPDATE saved_meal_plans SET meal_plan_data = {expression} WHERE id = '{plan}'")
+    response = api.client.get(f'/meal-plan/{plan}/completion')
+    assert response.status_code == 422, response.text
+    assert recorded(api) == []
+
+
+def test_edit_between_snapshot_read_and_transaction_rejects_stale_indices(api, monkeypatch):
+    plan = seed(api)
+    request = body(api, plan)
+    original = api.database.rpc
+    writes = []
+
+    def rpc(name, params):
+        if name == 'meal_completion_write':
+            writes.append(params)
+            api.pg.sql(f"UPDATE saved_meal_plans SET meal_plan_data = jsonb_set(meal_plan_data, "
+                       f"'{{meal_plan,meals,dinner,items,0,name}}', '\"Changed after read\"') WHERE id = '{plan}'")
+        return original(name, params)
+
+    monkeypatch.setattr(api.database, 'rpc', rpc)
+    put(api, plan, request, 409)
+    assert len(writes) == 1 and recorded(api) == []
+    assert api.client.get(f"/meal-completion-requests/{request['request_id']}").status_code == 404
+
+
+def test_owner_change_rotates_version_and_never_transfers_old_consumption(api):
+    plan = seed(api)
+    request = body(api, plan)
+    state = put(api, plan, request)
+    api.pg.sql(f"UPDATE saved_meal_plans SET user_id = '{api.other}' WHERE id = '{plan}'")
+    assert api.client.get(f'/meal-plan/{plan}/completion').status_code == 404
+    assert recorded(api) == [state]
+    assert intake(api)['remaining_targets']['calories'] == 1700
+    api.client.headers['Authorization'] = 'Bearer other'
+    assert current(api, plan)['plan']['completion_version'] != request['plan_version']
+    assert current(api, plan)['state']['revision'] == 0
+    assert recorded(api) == []
+
+
+def test_over_500_food_logs_fail_closed_instead_of_truncating_intake(api):
+    api.pg.sql(f"""INSERT INTO food_log(id,user_id,date,calories,protein_g,fat_g,carbs_g)
+        SELECT gen_random_uuid()::text,'{api.owner}','{DAY}',1,0,0,0 FROM generate_series(1,501)""")
+    context = FoodContext(api.database, api.owner, 'rutgers',
+        PlanningContext(dining_hall='busch', date=date.fromisoformat(DAY), meal_type='dinner'),
+        Nutrition(calories=2000, protein_g=100, fat_g=70, carbs_g=200))
+    result = asyncio.run(read_intake.on_invoke_tool(RunContextWrapper(context), '{}'))
+    assert isinstance(result, str) and 'could not verify' in result
+
+
+def test_initial_state_is_empty_and_saved_rows_keep_legacy_data(api):
+    plan = seed(api)
+    before = json.loads(api.pg.sql(f"SELECT meal_plan_data FROM saved_meal_plans WHERE id = '{plan}'"))
+    snapshot = current(api, plan)
+    assert snapshot['state']['revision'] == 0
+    assert snapshot['state']['items'] == snapshot['state']['selected_items'] == []
+    assert snapshot['state']['totals'] == ZERO
+    put(api, plan, body(api, plan))
+    assert json.loads(api.pg.sql(f"SELECT meal_plan_data FROM saved_meal_plans WHERE id = '{plan}'")) == before
+
+
+def test_multiple_versions_count_actual_consumption_and_undo_only_selected_version(api):
+    plan = seed(api)
+    old_request = body(api, plan)
+    old = put(api, plan, old_request)
+    api.pg.sql(f"UPDATE saved_meal_plans SET meal_plan_data = jsonb_set(meal_plan_data, "
+               f"'{{meal_plan,meals,dinner,items,0,calories}}', '450') WHERE id = '{plan}'")
+    new_request = body(api, plan)
+    new = put(api, plan, new_request)
+    assert len(recorded(api)) == 2
+    assert {state['plan_version'] for state in recorded(api)} == {old['plan_version'], new['plan_version']}
+    assert intake(api)['remaining_targets']['calories'] == 1250
+    put(api, plan, {**old_request, 'request_id': str(uuid4()), 'expected_revision': 1,
+                    'mode': 'frozen', 'selected_items': []})
+    assert intake(api)['remaining_targets']['calories'] == 1550
+    assert current(api, plan)['state'] == new
+
+
+def test_receipts_remain_exact_after_old_age_and_frozen_undo_can_be_rechecked(api):
+    plan = seed(api)
+    request = body(api, plan)
+    original = put(api, plan, request)
+    api.pg.sql(f"UPDATE meal_completion_requests SET created_at = now() - interval '2 years' WHERE user_id = '{api.owner}'; "
+               f"DELETE FROM saved_meal_plans WHERE id = '{plan}'")
+    assert put(api, plan, request) == original
+    undo = {**request, 'request_id': str(uuid4()), 'expected_revision': 1, 'mode': 'frozen', 'selected_items': []}
+    put(api, plan, undo)
+    recheck = put(api, plan, {**request, 'request_id': str(uuid4()), 'expected_revision': 2, 'mode': 'frozen'})
+    assert recheck['items'] == original['items'] and recheck['totals'] == RICE
+    assert recheck['revision'] == 3
+
+
+def test_selection_order_is_canonical_for_exact_duplicate_replay(api):
+    plan = seed(api)
+    request = body(api, plan, selected=(1, 0))
+    original = put(api, plan, request)
+    assert original['selected_items'] == [{'meal_type': 'dinner', 'index': 0}, {'meal_type': 'dinner', 'index': 1}]
+    assert put(api, plan, {**request, 'selected_items': list(reversed(request['selected_items']))}) == original
+
+
+def test_rpc_rejects_tampered_server_catalog_without_partial_write(api):
+    plan = seed(api)
+    request = body(api, plan)
+    catalog = current(api, plan)['available_items']
+    catalog[0]['totals']['calories'] = 1
+    with pytest.raises(RuntimeError, match='completion_invalid'):
+        api.pg.rpc('meal_completion_write', {'p_user_id': api.owner, 'p_plan_id': plan,
+                   'p_request': {'plan_id': plan, **request}, 'p_items': catalog}).execute()
+    assert recorded(api) == []
+    assert api.client.get(f"/meal-completion-requests/{request['request_id']}").status_code == 404
