@@ -9,3 +9,9 @@ Coverage includes a six-way favorite/dislike race with normalized names and stab
 The first run's four failures were test-fixture errors: the existing HTTP exception handler returns `message`, not FastAPI's default `detail`. Assertions now check the exact existing envelope. No product defect was hidden or production code edited. Full-suite and mutation evidence follow before final handoff.
 
 Merge/deployment gate: PR #13 changes existing preference buttons to RPCs regardless of agent flags. Verify and apply `add_agent_persistence.sql`, then `atomic_preferences.sql`, before merging/deploying that backend. Production SQL credentials and schema privileges remain unverified. This test PR and PR #13 each need a fresh independent reviewer; neither author approves their own changes. Keep runtime rollout disabled. Rollback preserves additive functions and data.
+
+Full suite at combined `be44d5b74bf540b0b5fcb5bcc478efda52eabce6` (feature ledger head `bc8c7009008e38d7f6f1f6354b3ceae4667dc3c2`, unchanged production source): **288 passed, 0 failed, 0 skipped** in 31.43 seconds. Log: `/private/tmp/dd-preference-full.log`.
+
+Semantic mutation check: in a disposable source copy, remove both `PERFORM agent_clear_history(p_user_id)` calls from the SQL migration. The set and forget replay-resurrection cases both fail on actual persisted stale histories: **2 failed, 31 deselected**. Log: `/private/tmp/dd-preference-mutation-fnyuhgzb/result.log`. This is mutation evidence, not a claim about the old manager running the new RPC.
+
+Additional trust-boundary tests found a real defect after that green run: PostgreSQL `btrim` removes spaces, but a tab-only item passes SQL validation and mutates preferences/history. HTTP rejects the same name. The new set/forget assertions are retained and reported to the feature owner; this checkpoint is intentionally not ready for review until the source fix and combined rerun.

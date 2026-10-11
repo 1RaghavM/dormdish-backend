@@ -263,7 +263,7 @@ def test_http_preferences_require_session_before_storage(api):
 
 @pytest.mark.parametrize('field,value', [
     ('category', 'profile'), ('item_type', None), ('meal_type', 'snack'),
-    ('item_name', ''), ('item_name', 'x' * 201), ('reason', 'x' * 1001),
+    ('item_name', ''), ('item_name', '\t'), ('item_name', 'x' * 201), ('reason', 'x' * 1001),
     ('meal_plan_id', 'x' * 201),
 ])
 def test_rpc_rejects_invalid_values_without_mutation_or_history_loss(stores, pg, field, value):
@@ -274,4 +274,12 @@ def test_rpc_rejects_invalid_values_without_mutation_or_history_loss(stores, pg,
     with pytest.raises(RuntimeError, match='preference_invalid'):
         pg.rpc('preference_set', {**values, 'p_' + field: value}).execute()
     assert rows(pg, owner.user_id) == []
+    assert owner.load_history(conversation.id) == replay
+
+
+def test_forget_rejects_blank_rpc_name_without_clearing_replay(stores, pg):
+    owner, _ = stores
+    conversation, replay = history(owner)
+    with pytest.raises(RuntimeError, match='preference_invalid'):
+        pg.rpc('preference_forget', dict(p_user_id=owner.user_id, p_category='favorite', p_item_name='\t')).execute()
     assert owner.load_history(conversation.id) == replay
