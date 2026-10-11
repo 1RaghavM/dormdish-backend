@@ -183,7 +183,7 @@ class AgentTurn:
                                 raise ValueError('Unrecognized tool')
                             yield self._event('status', {'message': _TOOL_STATUS[name]})
                         elif sdk_event.name == 'tool_output':
-                            if self.context.validation_attempts > 2:
+                            if self.context.validation_attempts > self.context.validation_limit:
                                 raise ValueError('Validation repair budget exceeded')
                             proposal = self.context.proposal
                             if proposal and proposal.id != shown_proposal:
