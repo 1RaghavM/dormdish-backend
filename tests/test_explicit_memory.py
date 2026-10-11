@@ -387,3 +387,18 @@ def test_lost_commit_and_failed_immediate_recovery_remain_recoverable(api, monke
     assert recovered['status'] == 'complete' and recovered['events'][-1]['data']['preferences_changed']
     replay = send(api, 'Remember that I like rice', conversation, request)[0]
     assert events(replay) == recovered['events'] and len(rows(api.pg, api.owner.user_id)) == 1
+
+
+@pytest.mark.parametrize('kind,value,other_kind', [('flavor', 'spicy', 'cuisine'),
+    ('cuisine', 'Indian', 'texture'), ('texture', 'crunchy', 'flavor')])
+@pytest.mark.parametrize('sentiment,opposite', [('preference', 'dislike'), ('dislike', 'preference')])
+def test_typed_forget_matches_kind_and_category(api, kind, value, other_kind, sentiment, opposite):
+    assert changed(send(api, f'Remember my {kind} {sentiment}: {value}')[0])
+    before = rows(api.pg, api.owner.user_id)
+    assert before[0]['preference_kind'] == kind
+    send(api, f'Forget my {other_kind} {sentiment}: {value}')
+    assert rows(api.pg, api.owner.user_id) == before
+    send(api, f'Forget my {kind} {opposite}: {value}')
+    assert rows(api.pg, api.owner.user_id) == before
+    assert changed(send(api, f'Forget my {kind} {sentiment}: {value}')[0])
+    assert rows(api.pg, api.owner.user_id) == []
