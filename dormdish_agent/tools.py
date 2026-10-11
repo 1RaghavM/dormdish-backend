@@ -4,13 +4,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID
 
 from agents import RunContextWrapper, function_tool
 
 from dormdish_agent.models import MealProposal, Nutrition, PlanningContext
 from services.meal_planning import MenuSnapshot, Selection, build_menu_snapshot, remaining_targets, validate_meal
+
+SearchTopic = Literal['opening_hours', 'location', 'dining_policies']
 
 
 @dataclass
@@ -27,6 +29,8 @@ class FoodContext:
     proposal: MealProposal | None = field(default=None, init=False)
     validation_attempts: int = field(default=0, init=False)
     tool_calls: int = field(default=0, init=False)
+    model_calls: int = field(default=0, init=False)
+    public_search: Callable[[SearchTopic], Awaitable[dict]] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.user_id = str(UUID(self.user_id))
@@ -44,6 +48,11 @@ class FoodContext:
         self.tool_calls += 1
         if self.tool_calls > 16:
             raise ValueError('Tool budget exhausted')
+
+    def claim_model(self):
+        self.model_calls += 1
+        if self.model_calls > 8:
+            raise ValueError('Model request budget exhausted')
 
     async def menu(self) -> MenuSnapshot:
         def read():
@@ -125,4 +134,13 @@ async def preview_meal(context: RunContextWrapper[FoodContext], selections: list
     return context.context.preview(selections)
 
 
-READ_TOOLS = [read_profile, retrieve_menu, read_intake, preview_meal]
+@function_tool(failure_error_function=_safe_tool_error)
+async def search_public_dining(context: RunContextWrapper[FoodContext], topic: SearchTopic) -> dict:
+    """Look up public hall hours, location or dining policies once. Never establishes selectable foods or allergy safety."""
+    context.context.claim_tool()
+    if context.context.public_search is None:
+        raise ValueError('Public search is unavailable')
+    return await context.context.public_search(topic)
+
+
+READ_TOOLS = [read_profile, retrieve_menu, read_intake, preview_meal, search_public_dining]

@@ -113,7 +113,7 @@ def test_real_tool_loop_preserves_scope_math_history_and_read_only_policy():
         assert payload['model'] == 'gpt-6-luna' and payload['max_output_tokens'] == 2048
         assert payload['store'] is False and payload['parallel_tool_calls'] is False
         assert not {'previous_response_id', 'conversation'} & payload.keys()
-        assert {tool['name'] for tool in payload['tools']} == {'read_profile', 'retrieve_menu', 'read_intake', 'preview_meal'}
+        assert {tool['name'] for tool in payload['tools']} == {'read_profile', 'retrieve_menu', 'read_intake', 'preview_meal', 'search_public_dining'}
     replay, _, replay_requests = exercise(lambda *_: answer('Follow-up'), history=serialized)
     assert replay_requests[0]['input'][:-1] == serialized
     assert replay.state.status == 'complete'
