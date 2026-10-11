@@ -283,3 +283,16 @@ def test_forget_rejects_blank_rpc_name_without_clearing_replay(stores, pg):
     with pytest.raises(RuntimeError, match='preference_invalid'):
         pg.rpc('preference_forget', dict(p_user_id=owner.user_id, p_category='favorite', p_item_name='\t')).execute()
     assert owner.load_history(conversation.id) == replay
+
+
+def test_unicode_trim_matches_legacy_record_for_update_and_forget(stores, pg):
+    owner, _ = stores
+    legacy_id = str(uuid4())
+    pg.sql(f"""INSERT INTO user_preferences(id,user_id,category,item_name,item_type,meal_type)
+        VALUES ('{legacy_id}','{owner.user_id}','favorite','\u00a0Rice\u0085','food_item','dinner');""")
+    manager = PreferenceManager(pg)
+    changed = manager.add_dislike(owner.user_id, '\tRICE\u202f', 'food_item', 'dinner')['data'][0]
+    assert changed['id'] == legacy_id and changed['item_name'] == 'RICE'
+    assert len(rows(pg, owner.user_id)) == 1
+    assert manager.remove_dislike(owner.user_id, '\u3000rice\u2003') == {'status': 'deleted'}
+    assert rows(pg, owner.user_id) == []
