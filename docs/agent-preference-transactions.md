@@ -1,0 +1,11 @@
+# Atomic preference buttons and forgetting
+
+The existing favorite/dislike endpoints now use service-only PostgreSQL RPCs. A choice replaces the opposite category for the same owner, case-insensitive trimmed item name and meal; other meals and owners remain unchanged. The existing row ID is retained. Existing contradictory records are reconciled only when that item/meal is explicitly changed, not by a bulk data rewrite.
+
+Removal keeps the existing endpoint contract: remove that category/name across meals, returning success even when absent. Every mutation, including an absent removal, clears the owner's SDK histories and increments history epochs in the same transaction. A previously running turn cannot repopulate the cleared history. Display transcripts remain, but are not a model replay source. Database errors are sanitized and never trigger a non-atomic fallback or automatic write retry; refresh preferences after an ambiguous outcome.
+
+Deploy `add_agent_persistence.sql`, then `atomic_preferences.sql`, before this backend. The new functions require the existing custom `public.users` identity and `user_preferences` table. The schema columns were independently verified through Supabase's OpenAPI metadata on 2026-10-10 without reading user rows. Production SQL privileges, indexes and RLS remain unverified; no production migration was applied. Rollback leaves the additive functions and data intact. All new backend preference writers must use the RPC path; an older backend writing the table directly does not provide this transaction guarantee.
+
+This is the persistence foundation for the existing buttons. Chat authorization, typed broader tastes/provenance, inferred preferences and temporary conversational requests are separate migration work. No automatic preference inference or profile/allergy edits are introduced.
+
+Selfchecks use real disposable PostgreSQL databases: category replacement, retained IDs, owner/meal isolation, concurrent opposite choices, forgetting during an in-flight turn, rollback when history invalidation fails, denied untrusted RPC callers, and invalid input/error privacy. Run `DD_AGENT_LOCAL_PG=1 python -m pytest -o addopts='' -q`. Dedicated independent tests and fresh reviews of both PRs are merge dependencies; staging and rollout remain disabled.

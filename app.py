@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from uuid import UUID, uuid4
 
 import bcrypt
@@ -24,7 +24,7 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, Header,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from supabase import Client, create_client
 
 import secrets as _secrets_for_google
@@ -2749,16 +2749,16 @@ class SaveMealPlanRequest(BaseModel):
 # ==================== PREFERENCE MANAGEMENT MODELS ====================
 
 class FavoriteRequest(BaseModel):
-    item_name: str
-    item_type: str  # "meal_plan" or "food_item"
-    meal_type: str  # "breakfast", "lunch", "dinner"
-    meal_plan_id: Optional[str] = None
+    item_name: str = Field(min_length=1, max_length=200, pattern=r"\S")
+    item_type: Literal["meal_plan", "food_item"]
+    meal_type: Literal["breakfast", "lunch", "dinner"]
+    meal_plan_id: Optional[str] = Field(default=None, max_length=200)
 
 class DislikeRequest(BaseModel):
-    item_name: str
-    item_type: str  # "meal_plan" or "food_item"
-    meal_type: str
-    reason: Optional[str] = None
+    item_name: str = Field(min_length=1, max_length=200, pattern=r"\S")
+    item_type: Literal["meal_plan", "food_item"]
+    meal_type: Literal["breakfast", "lunch", "dinner"]
+    reason: Optional[str] = Field(default=None, max_length=1000)
 
 class TokenData(BaseModel):
     user_id: str
@@ -6014,6 +6014,10 @@ async def save_meal_plan(
                 plan_id = str(uuid4())
         else:
             plan_id = payload.plan_id
+            owned = supabase.table("saved_meal_plans").select("id")\
+                .eq("id", plan_id).eq("user_id", current_user["id"]).limit(1).execute()
+            if not owned.data:
+                raise HTTPException(status_code=404, detail="Meal plan not found")
         
         # Prepare data to save
         save_data = {
@@ -6027,7 +6031,11 @@ async def save_meal_plan(
         }
         
         # Use upsert to either create or update
-        response = supabase.table("saved_meal_plans").upsert(save_data).execute()
+        if is_update:
+            response = supabase.table("saved_meal_plans").update(save_data)\
+                .eq("id", plan_id).eq("user_id", current_user["id"]).execute()
+        else:
+            response = supabase.table("saved_meal_plans").insert(save_data).execute()
         
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to save meal plan")
@@ -6774,8 +6782,6 @@ async def add_favorite(
         preference_manager = PreferenceManager(supabase)
 
         user_id = str(current_user["id"])
-        print(f"[API] /preferences/favorite - User ID: {user_id}, Email: {current_user.get('email', 'N/A')}")
-        print(f"[API] Item: {favorite_data.item_name}, Type: {favorite_data.item_type}")
 
         if favorite_data.item_type == "meal_plan":
             result = preference_manager.add_favorite_meal_plan(
@@ -6799,9 +6805,9 @@ async def add_favorite(
             "item_type": favorite_data.item_type,
             "meal_type": favorite_data.meal_type
         }
-    except Exception as e:
-        logger.error(f"Failed to add favorite: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to add favorite: {str(e)}")
+    except Exception:
+        logger.error("Failed to add favorite")
+        raise HTTPException(status_code=500, detail="Failed to add favorite")
 
 
 @app.post("/preferences/dislike", summary="Dislike a meal plan or food item")
@@ -6832,9 +6838,9 @@ async def dislike_item(
             "item_type": dislike_data.item_type,
             "meal_type": dislike_data.meal_type
         }
-    except Exception as e:
-        logger.error(f"Failed to record dislike: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to record dislike: {str(e)}")
+    except Exception:
+        logger.error("Failed to record dislike")
+        raise HTTPException(status_code=500, detail="Failed to record dislike")
 
 
 @app.get("/preferences/favorites", summary="Get user's favorites")
@@ -6856,9 +6862,9 @@ async def get_favorites(
             "count": len(favorites),
             "favorites": favorites
         }
-    except Exception as e:
-        logger.error(f"Failed to retrieve favorites: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve favorites: {str(e)}")
+    except Exception:
+        logger.error("Failed to retrieve favorites")
+        raise HTTPException(status_code=500, detail="Failed to retrieve favorites")
 
 
 @app.get("/preferences/dislikes", summary="Get user's dislikes")
@@ -6880,9 +6886,9 @@ async def get_dislikes_endpoint(
             "count": len(dislikes),
             "dislikes": dislikes
         }
-    except Exception as e:
-        logger.error(f"Failed to retrieve dislikes: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve dislikes: {str(e)}")
+    except Exception:
+        logger.error("Failed to retrieve dislikes")
+        raise HTTPException(status_code=500, detail="Failed to retrieve dislikes")
 
 
 @app.get("/preferences/all", summary="Get all user preferences")
@@ -6918,9 +6924,9 @@ async def get_all_preferences(
                 "dislikes": len(dislikes)
             }
         }
-    except Exception as e:
-        logger.error(f"Failed to retrieve preferences: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve preferences: {str(e)}")
+    except Exception:
+        logger.error("Failed to retrieve preferences")
+        raise HTTPException(status_code=500, detail="Failed to retrieve preferences")
 
 
 @app.get("/preferences/debug", summary="Debug: Get ALL raw preferences")
@@ -6944,9 +6950,9 @@ async def debug_all_preferences(
             "total_preferences": len(all_prefs),
             "preferences": all_prefs
         }
-    except Exception as e:
-        logger.error(f"Failed to retrieve debug preferences: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve debug preferences: {str(e)}")
+    except Exception:
+        logger.error("Failed to retrieve debug preferences")
+        raise HTTPException(status_code=500, detail="Failed to retrieve debug preferences")
 
 
 @app.delete("/preferences/favorite/{item_name}", summary="Remove from favorites")
@@ -6977,9 +6983,9 @@ async def remove_favorite(
             "message": f"Removed {item_name} from favorites",
             "was_found": True
         }
-    except Exception as e:
-        logger.error(f"Failed to remove favorite: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to remove favorite: {str(e)}")
+    except Exception:
+        logger.error("Failed to remove favorite")
+        raise HTTPException(status_code=500, detail="Failed to remove favorite")
 
 
 @app.delete("/preferences/dislike/{item_name}", summary="Remove from dislikes")
@@ -7010,9 +7016,9 @@ async def remove_dislike(
             "message": f"Removed {item_name} from dislikes",
             "was_found": True
         }
-    except Exception as e:
-        logger.error(f"Failed to remove dislike: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to remove dislike: {str(e)}")
+    except Exception:
+        logger.error("Failed to remove dislike")
+        raise HTTPException(status_code=500, detail="Failed to remove dislike")
 
 
 
@@ -8222,6 +8228,25 @@ async def activate_prepaid(authorization: Optional[str] = Header(None)):
         "failed_count": len(errors),
         "errors": errors,
     }
+
+
+def agent_daily_targets(user):
+    from dormdish_agent.models import Nutrition
+    metrics = calculate_extended_metrics(
+        age=user['age'], height_feet=user['height_feet'], height_inches=user['height_inches'],
+        weight_lbs=float(user['weight_lbs']), gender=user.get('gender'),
+        activity_level=user['activity_level'], goal=user['goal'],
+        goal_weight_lbs=float(user['goal_weight_lbs']) if user.get('goal_weight_lbs') else None,
+        weight_change_speed=user.get('weight_change_speed'))
+    calories = int(metrics['daily_calorie_target'])
+    protein = int(round(min(max(float(user['weight_lbs']) * 0.95, 80), float(user['weight_lbs']) * 1.1)))
+    macros = calculate_macro_targets(float(user['weight_lbs']), calories, protein, user['goal'].lower())
+    targets = {'calories': calories, 'protein_g': protein, **macros}
+    return Nutrition(**{key: user.get('custom_' + key) or targets[key] for key in Nutrition.model_fields})
+
+
+from dormdish_agent.routes import create_router as create_agent_router
+app.include_router(create_agent_router(get_current_user, require_premium, lambda: supabase, agent_daily_targets))
 
 
 if __name__ == '__main__':
