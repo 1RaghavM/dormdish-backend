@@ -126,7 +126,12 @@ BEGIN
         found := regexp_match(item, '^([[:alnum:]]+([''’-][[:alnum:]]+)*)(?: for (breakfast|lunch|dinner))?$', 'i');
         IF found IS NULL THEN RETURN NULL; END IF;
         item := found[1]; found := ARRAY[found[1],found[3]];
-        IF item ~* '\m(tonight|today|tomorrow|temporarily|temporary|briefly|now|never|not|no|maybe|perhaps|probably|that|it|this|everything|allergies|allergy|allergic|restriction|restrictions)\M'
+        IF item ~* '\m(i|me|my|mine|we|us|our|you|your|he|she|they|their|it|its|that|these|those)\M'
+            OR item ~* '\m(am|is|are|was|were|be|been|being|do|does|did|have|has|had|can|could|will|would|shall|should|must|may|might|cannot)\M'
+            OR item ~* '\m(don|doesn|didn|won|wouldn|isn|aren|wasn|weren|haven|hasn|hadn|couldn|shouldn|mustn|can)[''’]?t\M'
+            OR item ~* '\m(never|not|no|without|unless|if|then|but|except|only|just|maybe|perhaps|probably|and|or|nor|when|whenever|while|because|although|though|whether|otherwise|instead|despite)\M'
+            OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|briefly|for|now|this|during|next|current|until|till|through|before|after|since|once|permanently|everything)\M'
+            OR item ~* '\m(save|saved|saving|store|stored|storing|persist|persisted|persisting|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
             THEN RETURN NULL; END IF;
     END IF;
     IF found[2] IS NOT NULL THEN
@@ -170,7 +175,7 @@ BEGIN
     IF text_value IS NOT NULL THEN
         NULL; -- A stale in-flight instruction cannot resurrect a forgotten preference.
     ELSIF intent IS NULL THEN
-        text_value := 'Which preference should I remember or forget? Say Remember that I like "brown rice" or Forget "brown rice". Use a single name or a JSON-quoted literal, with an optional meal such as for dinner. Temporary requests stay temporary; change allergies and nutrition goals in your profile.';
+        text_value := 'Which preference should I remember or forget? Say Remember that I like "brown rice" or Forget "brown rice". Put multiword names in double quotes; optionally add for dinner when remembering. Temporary requests stay temporary; change allergies and nutrition goals in your profile.';
     ELSIF intent->>'operation'='set' THEN
         PERFORM preference_apply(p_user_id,intent->>'category',intent->>'item_name',intent->>'preference_kind',
             intent->>'meal_type','explicit_chat',p_conversation_id,p_request_id);
@@ -191,7 +196,8 @@ BEGIN
         jsonb_build_object('version',1,'sequence',1,'run_id',p_request_id,'type','text_delta','data',jsonb_build_object('text',text_value)),
         jsonb_build_object('version',1,'sequence',2,'run_id',p_request_id,'type','complete','data',jsonb_build_object(
             'saved_plan_id',NULL,'preferences_changed',changed,'citations','[]'::jsonb)));
-    RETURN agent_finish_turn(p_user_id,p_conversation_id,p_request_id,events,'[]'::jsonb,text_value);
+    RETURN agent_finish_turn(p_user_id,p_conversation_id,p_request_id,events,
+        (SELECT sdk_history FROM agent_conversations WHERE user_id=p_user_id AND id=p_conversation_id),text_value);
 END $$;
 REVOKE ALL ON FUNCTION public.preference_apply(uuid,text,text,text,text,text,uuid,uuid,text,text),
     public.agent_memory_intent(text), public.agent_memory_turn(uuid,uuid,uuid) FROM PUBLIC,anon,authenticated;
