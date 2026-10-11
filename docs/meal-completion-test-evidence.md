@@ -23,3 +23,9 @@ Explicitly merged feature source `86ff7f1b8444fdd0240bb2cf1e56a5f90dec624d` into
 - Four additional tests for multiple versions, old receipts/recheck, canonical ordering, and direct RPC catalog tampering are written but not yet run at this checkpoint.
 
 One existing AnyIO/Starlette deprecation warning occurred; no paid model or production queries ran. Full-suite integration awaits the source fixes and final focused checks.
+
+## Validation fix and duplicate/deletion race
+
+Source fix `79fdf29be73437d24f85eedf4217bbdaa4ec1b51` was explicitly merged. The four malformed-row assertions passed unchanged; expanded dedicated suite reached **57 passed, 0 failed, 0 skipped** in 25.85 seconds, including preservation of a row inserted before migration (`/private/tmp/dd-completion-independent-final-focused.log`). Test code checkpoint: `a0a41e0bf1dd5e9b0b4285ebbca2ab34e6ee2a33`.
+
+A subsequently added deterministic race reproduces a real HTTP 404 instead of the exact committed receipt: the original request commits and its plan is deleted after a duplicate's empty receipt read but before its current-plan lookup. The test uses a second real service instance and SQL deletion, not a mocked write result. **1 failed, 57 deselected**, 1.98 seconds at source `79fdf29` (`/private/tmp/dd-completion-receipt-race-red.log`). Source owner is fixing this via bounded receipt reconciliation; no write retry is authorized. The regression assertion remains unchanged.

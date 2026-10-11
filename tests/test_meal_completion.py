@@ -541,3 +541,25 @@ def test_additive_migration_preserves_preexisting_saved_rows(completion_pg):
     assert row['date'] == DAY
     from uuid import UUID
     assert UUID(row['completion_version'])
+
+
+def test_duplicate_recovers_when_original_commits_and_plan_disappears_after_receipt_read(api, monkeypatch):
+    from services.meal_completion import CompletionRequest, CompletionStore
+    plan = seed(api)
+    request = body(api, plan)
+    original_rpc = api.database.rpc
+    committed = []
+    store = CompletionStore(RouteDatabase(api.pg), api.owner)
+
+    def rpc(name, params):
+        if name == 'meal_completion_current' and not committed:
+            committed.append(store.write(plan, CompletionRequest(**request)))
+            api.pg.sql(f"DELETE FROM saved_meal_plans WHERE id = '{plan}'")
+        return original_rpc(name, params)
+
+    monkeypatch.setattr(api.database, 'rpc', rpc)
+    response = api.client.put(f'/meal-plan/{plan}/completion', json=request)
+    assert response.status_code == 200, response.text
+    assert response.json() == committed[0]
+    assert recorded(api) == committed
+    assert api.client.get(f"/meal-completion-requests/{request['request_id']}").json() == committed[0]
