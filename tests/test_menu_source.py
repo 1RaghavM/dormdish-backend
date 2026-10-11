@@ -219,3 +219,95 @@ async def test_storage_freshness_does_not_replace_known_source_time(api, databas
     else:
         assert row["fetched_at"] == fetched
     assert before <= datetime.fromisoformat(row["created_at"]) <= after
+
+
+@pytest.fixture(scope="module")
+def scheduled():
+    source = Path(os.environ.get("MENU_SOURCE_REFRESH_FILE", Path(__file__).parents[1] / "refresh_menus.py"))
+    spec = importlib.util.spec_from_file_location("scheduled_menu_source_under_test", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flat", [False, True])
+@pytest.mark.parametrize("known_safety", [False, True])
+async def test_scheduled_refresh_overwrites_same_cache_ids_without_losing_portions(
+    api, scheduled, database, monkeypatch, flat, known_safety
+):
+    import extract
+    small = {"name": "HERBAL TEA", "serving_size": "1 cup", "calories": 0,
+             "protein_g": 0, "fat_g": 0, "carbs_g": 0}
+    if known_safety:
+        small.update(allergens=[], dietary_tags=["vegan"], nutrition_url="https://menu.example/tea")
+    large = {**small, "serving_size": "2 cups"}
+
+    def parse(_html, meal, day, _url):
+        foods = deepcopy([small, large, small])
+        if flat:
+            return {"items": foods}
+        for food in foods:
+            # A measured zero must win over a conflicting fallback alias.
+            food.update(g_protein=0, protein_g=17, g_fat=0, fat_g=18,
+                        g_carbs=0, carbs_g=19)
+        return {meal: {day: [{"foods": foods}]}}
+
+    monkeypatch.setattr(extract, "parse_menu", parse)
+    monkeypatch.setattr(scheduled, "fp_parse_menu", parse)
+    monkeypatch.setattr(api, "_fetch_with_retries", AsyncMock(return_value="synthetic FoodPro"))
+    monkeypatch.setattr(scheduled, "_fetch_with_retries", AsyncMock(return_value="synthetic FoodPro"))
+    assert (await api.fetch_and_cache_menu("rutgers", "busch-dining-hall", DAY, is_foodpro=True))["success"]
+    previous_ids = set(database.rows)
+    before = datetime.now(timezone.utc)
+    result = await scheduled.fetch_and_cache_menu(None, database, "rutgers", "busch-dining-hall", DAY, True)
+    after = datetime.now(timezone.utc)
+    assert result == {"success": True, "hall": "busch-dining-hall", "items": 8}
+    prefix = f"rutgers_busch-dining-hall_{DAY}"
+    meals = ("breakfast", "brunch", "lunch", "dinner")
+    assert set(database.rows) == previous_ids == {prefix, *(f"{prefix}_{meal}" for meal in meals)}
+    full = database.rows[prefix]["menu_data"]["items"]
+    assert len(full) == 8
+    for meal in meals:
+        row = database.rows[f"{prefix}_{meal}"]
+        items = row["menu_data"]["items"]
+        assert items == [item for item in full if item["meal"] == meal]
+        assert [item["serving_size"] for item in items] == ["1 cup", "2 cups"]
+        for item in items:
+            assert all(item[key] == 0 for key in ("calories", "protein_g", "fat_g", "carbs_g"))
+            for key in ("allergens", "dietary_tags", "nutrition_url"):
+                if known_safety:
+                    assert item[key] == small[key]
+                else:
+                    assert key not in item
+    for row in database.rows.values():
+        assert row["hall_slug"] == row["dining_hall"] == "busch-dining-hall"
+        assert row["date"] == DAY
+        for key in ("fetched_at", "created_at"):
+            observed = datetime.fromisoformat(row[key])
+            assert observed.utcoffset() is not None
+            assert before <= observed <= after
+    cached = await api.get_dining_hall_menu("  BUSCH ", DAY)
+    assert cached["items"] == full
+    assert scheduled._fetch_with_retries.await_count == 4
+
+
+@pytest.mark.parametrize("fetched", [None, "2025-12-31T23:30:00-05:00"])
+def test_scheduled_storage_preserves_source_time_and_unknown_fields(scheduled, database, fetched):
+    payload = {"items": [{"name": "Unmeasured Special"}]}
+    if fetched is not None:
+        payload["fetched_at"] = fetched
+    before = datetime.now(timezone.utc)
+    assert scheduled.save_menu_to_supabase(database, "rutgers", "busch-dining-hall", DAY, payload)
+    after = datetime.now(timezone.utc)
+    row = database.rows[f"rutgers_busch-dining-hall_{DAY}"]
+    assert row["menu_data"]["items"] == [{"name": "Unmeasured Special"}]
+    if fetched is not None:
+        assert row["fetched_at"] == fetched
+    else:
+        observed = datetime.fromisoformat(row["fetched_at"])
+        assert observed.utcoffset() is not None
+        assert before <= observed <= after
+    created = datetime.fromisoformat(row["created_at"])
+    assert created.utcoffset() is not None
+    assert before <= created <= after
