@@ -71,6 +71,14 @@ class FoodContext:
         raise ValueError('No current menu is available for this meal')
 
     async def intake(self) -> dict:
+        from services.meal_completion import CompletionStore, enabled
+        if enabled():
+            evidence = await asyncio.to_thread(CompletionStore(self.client, self.user_id).rpc,
+                "meal_completion_intake", p_date=self.planning.date.isoformat())
+            remaining = remaining_targets(self.targets, evidence["food_logs"], evidence["completions"],
+                user_id=self.user_id, requested_date=self.planning.date)
+            return {"remaining_targets": remaining.model_dump(), "completion_records_available": True,
+                    "limitation": "Only logged food and server-synced checkoffs are counted; unlogged food is unknown."}
         def read():
             return (self.client.table('food_log').select('id,user_id,date,calories,protein_g,fat_g,carbs_g')
                     .eq('user_id', self.user_id).eq('date', self.planning.date.isoformat())
