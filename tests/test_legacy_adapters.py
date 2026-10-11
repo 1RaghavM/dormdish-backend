@@ -118,6 +118,11 @@ class Query:
     def gt(self, key, value):
         return self._filter('>', key, value)
 
+    def in_(self, key, values):
+        assert re.fullmatch(r'[a-z_]+', key)
+        self.filters.append(f"{self.table}.{key}::text IN ({', '.join(literal(value) for value in values)})")
+        return self
+
     def order(self, key, desc=False):
         assert re.fullmatch(r'[a-z_]+', key)
         self.ordering = f' ORDER BY {key}' + (' DESC' if desc else '')
@@ -276,7 +281,7 @@ def install_model(monkeypatch):
                          'id': f'fc_{number}', 'arguments': '{}', 'status': 'completed'}]
         if not previews or ('could not verify' in str(previews[-1]) and len(previews) < 2):
             menu_items = literal_eval(menu)['items'] if isinstance(menu, str) else menu['items']
-            ordered = [i for name in model.prefer for i in menu_items if i['name'] == name] + menu_items
+            ordered = [i for name in model.prefer for i in menu_items if i['name'] == name] + list(menu_items)
             choice = ordered[len(previews)]
             return [{'type': 'function_call', 'name': 'preview_meal', 'call_id': f'call_{number}',
                      'id': f'fc_{number}', 'status': 'completed', 'arguments': json.dumps(
