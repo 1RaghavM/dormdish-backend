@@ -2,6 +2,7 @@
 import asyncio
 from ast import literal_eval
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,17 @@ from openai import AsyncOpenAI
 
 from dormdish_agent import routes
 from dormdish_agent.models import Nutrition
-from tests.test_agent_storage_unit import pg, stores, prepared_action, confirmation
+from tests.test_agent_storage_unit import pg, stores, prepared_action as legacy_prepared_action, confirmation
+
+
+def prepared_action(store, **kwargs):
+    # Keep historical migration fixtures unchanged; current routes require a profile guard.
+    def finish(run, history, text, action):
+        return store.finish_turn(run, history, text, replace(action,
+            expected_profile_version=store.get_profile()['version']))
+    adapter = SimpleNamespace(create_conversation=store.create_conversation,
+        claim_turn=store.claim_turn, finish_turn=finish)
+    return legacy_prepared_action(adapter, **kwargs)
 
 
 class RouteDatabase:
@@ -64,13 +75,16 @@ class RouteDatabase:
 
 @pytest.fixture(scope='module')
 def route_pg(pg):
-    pg.sql('''CREATE TABLE user_preferences(user_id uuid, category text, item_name text,
+    pg.sql('''ALTER TABLE users ADD COLUMN university text DEFAULT 'rutgers',
+        ADD COLUMN dietary_restrictions jsonb DEFAULT '[]', ADD COLUMN dietary_preference text;
+        CREATE TABLE user_preferences(user_id uuid, category text, item_name text,
         item_type text, meal_type text, reason text);
         CREATE TABLE menus(university text, dining_hall text, date date,
             fetched_at timestamptz, menu_data jsonb);
         CREATE TABLE food_log(id text, user_id uuid, date date, calories numeric,
             protein_g numeric, fat_g numeric, carbs_g numeric);''')
     pg.sql((Path(__file__).resolve().parents[1] / 'migrations/enforce_agent_daily_save_policy.sql').read_text())
+    pg.sql((Path(__file__).resolve().parents[1] / 'migrations/enforce_agent_profile_safety.sql').read_text())
     menu = {'items': [{'name': 'Rice 🌶', 'meal': 'dinner', 'serving_size': '1 cup',
         'calories': 200, 'protein_g': 4, 'fat_g': 1, 'carbs_g': 44, 'allergens': [], 'dietary_tags': ['vegan']}]}
     pg.sql("INSERT INTO menus VALUES ('Rutgers University', 'busch-dining-hall', '2026-10-10', now(), "

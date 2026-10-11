@@ -8,8 +8,8 @@ import pytest
 
 from dormdish_agent import routes
 from tests.test_agent_persistence import parallel
-from tests.test_agent_routes import api, route_pg, pg, stores, turn_body, events, install_model
-from tests.test_agent_storage_unit import prepared_action, confirmation
+from tests.test_agent_routes import api, route_pg, pg, stores, turn_body, events, install_model, prepared_action
+from tests.test_agent_storage_unit import confirmation
 
 
 @pytest.mark.parametrize('key,value', [
