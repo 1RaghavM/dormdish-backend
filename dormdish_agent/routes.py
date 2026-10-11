@@ -153,6 +153,7 @@ SAVE_ERRORS = {
     'stale_plan': 'Your saved plan changed. Request a new preview before saving.',
     'expired': 'This preview expired. Ask again for a fresh meal before saving.',
     'quota': 'The agent request limit was reached. Try again later.',
+    'conflict': 'This save conflicted with another request. Review your saved plans before trying again.',
 }
 
 

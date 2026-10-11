@@ -18,10 +18,12 @@ Model output, tool arguments, assistant text, and history are never consulted. P
 pre-check; it calls `agent_save_turn` instead of `agent_finish_turn` whenever the flag is on and
 the turn produced a validated proposal.
 
-`agent_save_intent(text, meal_type)` lowercases and trims the text, then:
+`agent_save_intent(text, meal_type)` removes zero-width/format characters everywhere (U+200B–U+200D,
+U+2060, U+FEFF, U+FE0E/U+FE0F), trims leading whitespace including Unicode spaces, lowercases, then:
 
-- returns `NULL` if it ends with `?` or contains a whole-word negation
-  (`don't`, `don’t`, `dont`, `do not`, `never`, `not`, `without`);
+- returns `NULL` if the text contains any of `? ？ ‽ ⁇ ﹖ ؟` anywhere (questions are previews), or a
+  whole-word negation `\m(don.?t|do\s+not|never|not|without)\M` (any apostrophe variant; also
+  conservatively the single word `donut`);
 - `replace` if it matches `^(please\s+)?(replace|overwrite) my (breakfast|lunch|dinner)` (word
   boundary) and the named meal equals the request's `context.meal_type`;
 - `save` if it matches `^(please\s+)?(save|generate and save|plan and save|make and save)` (word
@@ -61,6 +63,7 @@ falls back to the legacy generator.
 | `stale_plan` | Target plan changed, or a plan now exists for the date / another hall | true |
 | `expired` | Proposal (menu snapshot) expired | true |
 | `quota` | Agent request quota exhausted | true |
+| `conflict` | Save collided with an existing run (e.g. the derived confirm id was pre-claimed) | true |
 
 If the run deadline itself has passed, persisting the error also fails; the stream ends without a
 terminal event and `GET /agent/runs/{request_id}` reports `run_expired` (existing behavior).

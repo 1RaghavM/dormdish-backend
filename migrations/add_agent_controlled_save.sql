@@ -6,11 +6,13 @@ SET LOCAL lock_timeout = '5s';
 CREATE OR REPLACE FUNCTION public.agent_save_intent(p_text text, p_meal_type text) RETURNS text
 LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$
     SELECT CASE
-        WHEN t ~ '\?$' OR t ~ '\m(don''t|don’t|dont|do not|never|not|without)\M' THEN NULL
+        -- Any question mark means a preview; any apostrophe variant counts for don't.
+        WHEN t ~ '[?？‽⁇﹖؟]' OR t ~ '\m(don.?t|do\s+not|never|not|without)\M' THEN NULL
         WHEN substring(t from '^(?:please\s+)?(?:replace|overwrite) my (breakfast|lunch|dinner)\M') = p_meal_type THEN 'replace'
         WHEN t ~ '^(please\s+)?(save|generate and save|plan and save|make and save)\M' THEN 'save'
     END
-    FROM (SELECT lower(btrim(p_text, E' \t\r\n')) AS t) input
+    FROM (SELECT lower(regexp_replace(regexp_replace(p_text, '[\u200b-\u200d\u2060\ufeff\ufe0e\ufe0f]', '', 'g'),
+        '^[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+', '')) AS t) input
 $$;
 
 CREATE OR REPLACE FUNCTION public.agent_save_turn(p_user_id uuid, p_conversation_id uuid, p_request_id uuid,
