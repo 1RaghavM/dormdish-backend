@@ -22,6 +22,7 @@ from dormdish_agent.models import (
 )
 from dormdish_agent.runtime import AgentTurn
 from dormdish_agent.tools import FoodContext
+from memory.preference_manager import explicit_memory_enabled, is_memory_instruction
 
 
 class CreateConversation(Contract):
@@ -106,6 +107,18 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
             return StreamingResponse(replay(state.events), media_type='text/event-stream', headers=STREAM_HEADERS)
         finish_attempted = False
         try:
+            if explicit_memory_enabled() and is_memory_instruction(body.text):
+                finish_attempted = True
+                try:
+                    state = await storage_call(owner.apply_memory_turn, conversation_id, body.request_id)
+                except HTTPException as exc:
+                    if exc.status_code != 503:
+                        raise
+                    recovered = await storage_call(owner.get_run, body.request_id)
+                    if recovered.status == 'running':
+                        raise exc
+                    state = recovered
+                return StreamingResponse(replay(state.events), media_type='text/event-stream', headers=STREAM_HEADERS)
             history = await storage_call(owner.load_history, conversation_id)
             if body.context is None or body.context.meal_type is None:
                 text = 'Choose a dining hall, date, and breakfast, lunch, or dinner so I can check the right menu.'
@@ -194,10 +207,12 @@ def build_context(client, user, request, get_targets):
             allergens.append(key)
         else:
             raise ValueError('Unsupported dietary restriction')
-    rows = (client.table('user_preferences').select('category,item_name,item_type,meal_type,reason')
+    rows = (client.table('user_preferences').select('category,item_name,item_type,meal_type,reason' +
+                (',scope,preference_kind,source' if explicit_memory_enabled() else ''))
             .eq('user_id', str(user['id'])).limit(201).execute().data or [])
     if len(rows) > 200 or len(json.dumps(rows).encode()) > 32000:
         raise ValueError('Preference context is too large')
+    rows = [row for row in rows if row.get('meal_type') in ('all', request.context.meal_type)]
     return FoodContext(client, str(user['id']), user['university'], request.context,
                        get_targets(user), tuple(restrictions), tuple(allergens), {'items': rows})
 

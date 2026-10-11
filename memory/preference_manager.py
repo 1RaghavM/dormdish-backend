@@ -4,12 +4,23 @@ Preference Manager for DormDish — stores user preferences in Supabase.
 Handles favorites, dislikes, and preference context building for meal plan personalization.
 """
 
+import os
+import re
+
 from typing import Dict, List, Optional
 from uuid import UUID
 from supabase import Client
 
 
 TABLE = "user_preferences"
+
+
+def explicit_memory_enabled():
+    return os.getenv('DORMDISH_EXPLICIT_MEMORY_ENABLED', 'false') == 'true'
+
+
+def is_memory_instruction(text):
+    return bool(re.match(r'^(?:please\s+)?(?:remember|forget)\b', text.strip(), re.IGNORECASE))
 
 
 def _row_to_memory_format(row: dict) -> dict:
@@ -20,7 +31,12 @@ def _row_to_memory_format(row: dict) -> dict:
     item_type = row["item_type"]
 
     if category == "favorite":
-        memory_text = f"FAVORITE: {item_name} is my favorite {meal_type} {item_type}."
+        if row.get("preference_kind") in ('flavor', 'cuisine', 'texture'):
+            memory_text = f"FAVORITE: My preferred {row['preference_kind']} is {item_name}."
+        elif meal_type == 'all':
+            memory_text = f"FAVORITE: {item_name} is one of my favorite foods."
+        else:
+            memory_text = f"FAVORITE: {item_name} is my favorite {meal_type} {item_type}."
     else:
         memory_text = f"DISLIKE: I do not like {item_name}."
         if row.get("reason"):
@@ -32,11 +48,13 @@ def _row_to_memory_format(row: dict) -> dict:
         "metadata": {
             "category": category,
             "item_type": item_type,
-            "preference_type": item_type,
+            "preference_type": row.get("preference_kind") or item_type,
             "meal_type": meal_type,
             "item_name": item_name,
             "meal_plan_id": row.get("meal_plan_id"),
             "sentiment": "negative" if category == "dislike" else None,
+            **{key: row.get(key) for key in ('scope', 'preference_kind', 'source', 'created_at',
+                'updated_at', 'source_conversation_id', 'source_request_id')},
         },
     }
 
@@ -82,7 +100,8 @@ class PreferenceManager:
             .eq("category", "favorite")
         )
         if meal_type:
-            query = query.eq("meal_type", meal_type)
+            query = (query.in_("meal_type", [meal_type, 'all']) if meal_type in ('breakfast', 'lunch', 'dinner')
+                     else query.eq("meal_type", meal_type))
         result = query.order("created_at", desc=True).execute()
         return [_row_to_memory_format(row) for row in (result.data or [])]
 
@@ -96,7 +115,8 @@ class PreferenceManager:
             .eq("category", "dislike")
         )
         if meal_type:
-            query = query.eq("meal_type", meal_type)
+            query = (query.in_("meal_type", [meal_type, 'all']) if meal_type in ('breakfast', 'lunch', 'dinner')
+                     else query.eq("meal_type", meal_type))
         result = query.order("created_at", desc=True).execute()
         return [_row_to_memory_format(row) for row in (result.data or [])]
 
