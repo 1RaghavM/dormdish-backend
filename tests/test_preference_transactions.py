@@ -296,3 +296,42 @@ def test_unicode_trim_matches_legacy_record_for_update_and_forget(stores, pg):
     assert len(rows(pg, owner.user_id)) == 1
     assert manager.remove_dislike(owner.user_id, '\u3000rice\u2003') == {'status': 'deleted'}
     assert rows(pg, owner.user_id) == []
+
+
+@pytest.mark.parametrize('category,length', [('favorite', 201), ('dislike', 260)])
+def test_http_can_forget_long_legacy_names_atomically_without_widening_new_writes(api, stores, pg, category, length):
+    client, _, owner = api
+    _, other = stores
+    name = 'R' * length
+    opposite = 'dislike' if category == 'favorite' else 'favorite'
+    pg.sql(f"""INSERT INTO user_preferences(user_id,category,item_name,item_type,meal_type) VALUES
+        ('{owner.user_id}','{category}','{name}','food_item','lunch'),
+        ('{owner.user_id}','{category}','{name}','food_item','dinner'),
+        ('{owner.user_id}','{opposite}','{name}','food_item','breakfast'),
+        ('{other.user_id}','{category}','{name}','food_item','dinner');""")
+    conversation, replay = history(owner)
+    foreign_conversation, foreign_replay = history(other)
+    before, foreign_before = rows(pg, owner.user_id), rows(pg, other.user_id)
+    for route in ['favorite', 'dislike']:
+        response = client.post('/preferences/' + route, json=dict(item_name=name, item_type='food_item', meal_type='dinner'))
+        assert response.status_code == 422
+    assert rows(pg, owner.user_id) == before and owner.load_history(conversation.id) == replay
+    pg.sql('''CREATE FUNCTION reject_long_forget_epoch() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'synthetic replay failure'; END $$;
+        CREATE TRIGGER reject_long_forget_epoch BEFORE UPDATE ON agent_conversations
+        FOR EACH ROW EXECUTE FUNCTION reject_long_forget_epoch();''')
+    try:
+        assert client.delete('/preferences/' + category + '/' + name).status_code == 500
+        assert rows(pg, owner.user_id) == before
+        assert owner.load_history(conversation.id) == replay
+    finally:
+        pg.sql('DROP TRIGGER reject_long_forget_epoch ON agent_conversations; DROP FUNCTION reject_long_forget_epoch()')
+    response = client.delete('/preferences/' + category + '/' + name)
+    assert response.status_code == 200
+    assert response.json()['status'] == 'success' and response.json()['was_found'] is True
+    assert rows(pg, owner.user_id) == [row for row in before if row['category'] == opposite]
+    assert owner.load_history(conversation.id) == []
+    assert rows(pg, other.user_id) == foreign_before
+    assert other.load_history(foreign_conversation.id) == foreign_replay
+    response = client.delete('/preferences/' + category + '/' + name)
+    assert response.status_code == 200 and response.json()['was_found'] is False
