@@ -17,7 +17,7 @@ Source PR #13 includes reviewed runtime/menu/search main revision `ebba8ef` and 
 
 ## Actual legacy-schema compatibility
 
-The fixture now starts with the real named index `idx_user_preferences_unique(user_id, category, lower(item_name))`, RLS disabled, and SELECT granted to PUBLIC/anon/authenticated. Before migration, actual anon and authenticated SELECTs each see the two synthetic existing rows. Their complete row contents, IDs, timestamps and contradictory choices are captured before executing the actual migration; all remain byte-for-byte equal after it. No test reads or writes production rows.
+The fixture now starts with the real named index `idx_user_preferences_unique(user_id, category, lower(item_name))`, RLS disabled, and SELECT granted to PUBLIC/anon/authenticated. Before migration, actual anon and authenticated SELECTs each see the two synthetic existing rows. Their complete row contents, IDs, timestamps and contradictory choices are captured before executing the actual migration; all row values remain unchanged after it. No test reads or writes production rows.
 
 New behavior tests confirm the same category/name can coexist at breakfast/lunch/dinner, an opposite choice changes only its meal and preserves both IDs, and case-insensitive duplicate insertion within the same meal still fails. Actual service-role RPCs succeed with RLS enabled. Both untrusted roles are denied direct SELECT, INSERT, UPDATE and DELETE; attempts preserve every owner row. A catalog check confirms RLS is enabled and PUBLIC has no remaining table grants.
 
