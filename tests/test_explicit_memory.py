@@ -510,3 +510,18 @@ def test_typed_json_literal_forget_matches_kind_and_exact_decoded_name(api):
     assert rows(api.pg, api.owner.user_id) == before
     assert changed(send(api, 'Forget my flavor preference: ' + json.dumps(target))[0])
     assert rows(api.pg, api.owner.user_id) == []
+
+
+@pytest.mark.parametrize('target', ['rice on Friday', '"rice" briefly', 'Chef’s rice'])
+def test_rejected_target_preserves_active_conversation_replay(api, target):
+    conversation, replay = history(api.owner)
+    response, _, _ = send(api, 'Remember that I like ' + target, conversation.id)
+    assert not changed(response)
+    assert api.owner.load_history(conversation.id) == replay
+    assert rows(api.pg, api.owner.user_id) == []
+
+
+@pytest.mark.parametrize('target', ['if', 'or', 'and', 'for', 'when', 'remember', 'everything', 'briefly'])
+def test_bare_grammatical_placeholders_are_not_names(api, target):
+    assert not changed(send(api, 'Remember that I like ' + target)[0])
+    assert rows(api.pg, api.owner.user_id) == []
