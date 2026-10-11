@@ -284,7 +284,17 @@ async def run_stream(owner, state, request, context, history, target, expected_p
             append_event(state, 'action_required', {'action': action.action.model_dump(mode='json')})
             append_event(state, terminal.type, terminal.data.model_dump(mode='json'))
         finish_attempted = True
-        result = await storage_call(owner.finish_turn, state, turn.history, turn.assistant_text, action)
+        try:
+            result = await storage_call(owner.finish_turn, state, turn.history, turn.assistant_text, action)
+        except HTTPException as exc:
+            if exc.status_code != 409 or exc.detail != 'Agent request stale_profile':
+                raise
+            # This explicit rejection rolled back; persist a new terminal error, never retry an ambiguous write.
+            state.events = state.events[:emitted]
+            state.status = 'running'
+            append_event(state, 'error', {'code': 'stale_profile',
+                'message': 'Your profile changed. Request a new preview before applying a meal.', 'retryable': True})
+            result = await storage_call(owner.finish_turn, state, [], '')
         if result.events[:emitted] == state.events[:emitted]:
             async for data in replay(result.events[emitted:]):
                 yield data

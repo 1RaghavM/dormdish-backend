@@ -316,9 +316,14 @@ def test_pg_profile_snapshot_excludes_secrets_and_unrelated_changes(profile_stor
 def test_pg_changed_profile_never_applies_old_proposal(profile_store, profile_pg, during_run):
     def change():
         profile_pg.sql(f"UPDATE users SET dietary_restrictions = '[\"Dairy Free\"]' WHERE id = '{profile_store.user_id}'")
-    action = profile_action(profile_store, before_finish=change if during_run else None)
-    if not during_run:
-        change()
+    if during_run:
+        with pytest.raises(routes.StorageError, match='stale_profile'):
+            profile_action(profile_store, before_finish=change)
+        assert profile_pg.sql(f"SELECT count(*) FROM agent_actions WHERE user_id = '{profile_store.user_id}'") == '0'
+        assert profile_pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{profile_store.user_id}'") == '0'
+        return
+    action = profile_action(profile_store)
+    change()
     quota = profile_pg.sql(f"SELECT requests FROM agent_quotas WHERE user_id = '{profile_store.user_id}'")
     request = confirmation()
     with pytest.raises(routes.StorageError, match='stale_profile'):
@@ -345,3 +350,34 @@ def test_pg_legacy_pending_and_missing_new_profile_version_fail_closed(profile_s
     with pytest.raises(routes.StorageError, match='stale_profile'):
         prepared_action(profile_store)
     assert profile_pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{profile_store.user_id}'") == '0'
+
+
+def test_known_profile_rejection_persists_only_recoverable_error(monkeypatch):
+    from dormdish_agent.models import RunState, TurnRequest
+    writes = []
+    class Client:
+        def __init__(self, **kw): pass
+        async def close(self): pass
+    class Turn:
+        def __init__(self, context, request, cid, history, **kw):
+            self.state = RunState(id=request.request_id, conversation_id=cid, status='running')
+            self.history, self.assistant_text = [{'role': 'assistant', 'content': 'Old context'}], 'Old context'
+        async def stream(self):
+            yield routes.append_event(self.state, 'text_delta', {'text': 'Preview'})
+            yield routes.append_event(self.state, 'complete', {'citations': []})
+    class Store:
+        def finish_turn(self, state, history, text, action=None):
+            writes.append((state.model_copy(deep=True), history, text, action))
+            if len(writes) == 1: raise routes.StorageError('stale_profile')
+            return state
+    monkeypatch.setattr(routes, 'AsyncOpenAI', Client)
+    monkeypatch.setattr(routes, 'AgentTurn', Turn)
+    async def run():
+        state = RunState(id=uuid4(), conversation_id=uuid4(), status='running')
+        return [frame async for frame in routes.run_stream(Store(), state,
+            TurnRequest(request_id=state.id, text='hi'), SimpleNamespace(proposal=None), [], None)]
+    frames = asyncio.run(run())
+    assert len(writes) == 2 and writes[0][0].status == 'complete'
+    assert writes[1][0].status == 'error' and writes[1][1:] == ([], '', None)
+    assert writes[1][0].events[-1].data.code == 'stale_profile'
+    assert b'"type":"error"' in frames[-1] and not any(b'"type":"complete"' in frame for frame in frames)
