@@ -1,6 +1,6 @@
-# Explicit conversational memory (contract draft)
+# Explicit conversational memory
 
-Default OFF: `DORMDISH_EXPLICIT_MEMORY_ENABLED=true` is required, in addition to the existing authenticated agent rollout. Apply the new additive migration before enabling. This feature will depend on preference PR13/14, routes PR10/11 and the explicitly stacked completion source PR18; production SQL is not applied.
+Default OFF: `DORMDISH_EXPLICIT_MEMORY_ENABLED=true` is required, in addition to the existing authenticated agent rollout. Apply the new additive migration before enabling. Merge and rollout dependencies are preference PR13/14, routes PR10/11, the explicitly stacked completion source PR18, and companion independent test PR20. Production SQL is not applied.
 
 Memory mutations use the existing conversation message endpoint and run IDs. They are handled before model execution: a server parser reads only the current stored authenticated user turn, then an atomic RPC applies the exact operation and records the complete run. No model-generated write arguments exist. `GET /agent/runs/{request_id}` recovers the committed outcome after a lost response; no write retry or alternate generator is launched.
 
@@ -27,4 +27,8 @@ Existing preference responses retain `{id,memory,metadata}`. Metadata adds the f
 {"category":"dislike","item_type":"food_item","preference_type":"food_item","meal_type":"all","item_name":"mushrooms","scope":"global","preference_kind":"food_item","source":"explicit_chat","created_at":"2026-10-11T12:00:00+00:00","updated_at":"2026-10-11T12:00:00+00:00","source_conversation_id":"00000000-0000-0000-0000-000000000001","source_request_id":"00000000-0000-0000-0000-000000000002"}
 ```
 
-This is an early contract checkpoint; implementation and tests are not yet complete. Keep rollout disabled until independent backend/native tests, fresh source/test reviews, schema-first deployment and existing release gates pass.
+Implementation evidence: production/selftest commit `eee668b0506925896fae90f235389e9959f61d03` passed 578 tests (zero failures/skips) in 165.25s with `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -q -o addopts=''`. The local PostgreSQL run logged to `/private/tmp/dd-explicit-memory-source-fixed-full.log`; its one warning is the existing AnyIO deprecation. The 18 source selfchecks include real SQL authorization, rollback, scoped conflicts, replay invalidation and encoded-slash deletion.
+
+Companion [PR20](https://github.com/1RaghavM/dormdish-backend/pull/20) independently adds 71 cases. Test code `4ab56667cce10f1b2934b2894b291f54eb7be29e` passed the combined 649-test suite (zero failures/skips) in 188.20s against that source commit; see its `docs/explicit-memory-test-evidence.md` and `/private/tmp/dd-explicit-memory-tests-full.log`. Original failing assertions for temporary/quoted instructions, Unicode target preservation and encoded-slash deletion passed unchanged after the fixes. Source/test evidence updates after these SHAs contain documentation only.
+
+Keep rollout disabled until fresh source/test reviews, native acceptance, schema-first deployment and existing release gates pass. Apply `migrations/add_explicit_preference_memory.sql` only after verifying the deployed preference check constraints and prerequisite migrations. Roll back by disabling `DORMDISH_EXPLICIT_MEMORY_ENABLED`; retain the additive schema and existing preference rows so recorded tastes and global read compatibility survive. No production SQL, live model call or deployment was performed by this implementation.
