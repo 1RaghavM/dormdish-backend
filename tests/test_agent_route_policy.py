@@ -1,5 +1,4 @@
 """Independent admission/rollback and transactional daily-plan policy checks."""
-from copy import deepcopy
 import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4

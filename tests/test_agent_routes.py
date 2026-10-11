@@ -2,7 +2,6 @@
 import asyncio
 from ast import literal_eval
 from copy import deepcopy
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +14,6 @@ from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 
 from dormdish_agent import routes
-from dormdish_agent.conversations import AgentStore
 from dormdish_agent.models import Nutrition
 from tests.test_agent_storage_unit import pg, stores, prepared_action, confirmation
 
