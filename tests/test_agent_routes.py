@@ -209,3 +209,177 @@ def test_recoverable_turn_real_sdk_apply_and_duplicate_replay(api, monkeypatch):
     assert plan['date'] == '2026-10-10' and plan['dining_hall'] == 'busch-dining-hall'
     assert plan['meal_plan_data']['meal_plan']['totals'] == dict(calories=300, protein_g=6, fat_g=1.5, carbs_g=66)
     assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '1'
+
+
+def lose_committed_rpc_reply(database, monkeypatch, selected):
+    original = database.rpc
+
+    def rpc(name, parameters):
+        call = original(name, parameters)
+        if name != selected:
+            return call
+
+        def execute():
+            call.execute()
+            raise ConnectionError('synthetic-private-storage-response-lost')
+        return SimpleNamespace(execute=execute)
+
+    monkeypatch.setattr(database, 'rpc', rpc)
+
+
+def test_lost_confirmation_reply_reads_committed_receipt_without_repeating_write(api, monkeypatch):
+    _, action = prepared_action(api.owner)
+    lose_committed_rpc_reply(api.database, monkeypatch, 'agent_confirm_action')
+    body = confirmation().model_dump(mode='json')
+    result = api.client.post(f'/agent/actions/{action.id}/confirm', json=body)
+    assert result.status_code == 200
+    assert [name for name, _ in api.database.calls] == ['agent_confirm_action', 'agent_get_run']
+    assert result.json()['events'][0]['data']['saved_plan_id']
+    assert api.client.get('/agent/runs/' + body['request_id']).json() == result.json()
+    assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '1'
+
+
+def test_lost_terminal_write_reply_ends_without_terminal_then_get_recovers(api, monkeypatch):
+    requests = install_model(monkeypatch)
+    conversation = api.owner.create_conversation()
+    lose_committed_rpc_reply(api.database, monkeypatch, 'agent_finish_turn')
+    body = turn_body()
+    result = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
+    assert result.status_code == 200
+    assert not any(event['type'] in ('complete', 'error', 'action_required') for event in events(result))
+    recovered = api.client.get('/agent/runs/' + body['request_id'])
+    assert recovered.status_code == 200 and recovered.json()['status'] == 'complete'
+    assert recovered.json()['events'][-2]['type'] == 'action_required'
+    assert [name for name, _ in api.database.calls].count('agent_finish_turn') == 1
+    assert len(requests) == 3
+    assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '0'
+
+
+@pytest.mark.parametrize('reason,status', [('running', 409), ('conflict', 409), ('quota', 429)])
+def test_admission_errors_are_http_preflight_and_do_not_load_history(api, reason, status):
+    from dormdish_agent.models import TurnRequest
+    conversation = api.owner.create_conversation()
+    body = turn_body()
+    if reason in ('running', 'conflict'):
+        api.owner.claim_turn(conversation.id, TurnRequest.model_validate(body))
+        if reason == 'conflict':
+            body['text'] = 'Conflicting request body'
+    else:
+        api.pg.sql(f"INSERT INTO agent_quotas(user_id, requests) VALUES ('{api.owner.user_id}', 60)")
+    result = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
+    assert result.status_code == status
+    assert not result.headers['content-type'].startswith('text/event-stream')
+    assert [name for name, _ in api.database.calls] == ['agent_claim_turn']
+
+
+def test_unknown_profile_safety_fails_before_sse_and_persists_error(api):
+    api.profiles['owner']['dietary_restrictions'] = ['mystery-allergen']
+    conversation = api.owner.create_conversation()
+    body = turn_body()
+    result = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=body)
+    assert result.status_code == 422
+    restored = api.owner.get_run(UUID(body['request_id']))
+    assert restored.status == 'error' and restored.events[-1].data.code == 'context_unavailable'
+    assert api.owner.load_history(conversation.id) == []
+
+
+def test_chunked_oversize_body_is_bounded_without_content_length(api):
+    async def request():
+        pieces = iter([b' ' * 20_000, b' ' * 13_000])
+        sent = []
+
+        async def receive():
+            chunk = next(pieces)
+            return {'type': 'http.request', 'body': chunk, 'more_body': len(chunk) == 20_000}
+
+        async def send(message):
+            sent.append(message)
+
+        await api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'},
+            'http_version': '1.1', 'method': 'POST', 'scheme': 'http', 'path': '/agent/conversations',
+            'query_string': b'', 'headers': [(b'authorization', b'Bearer owner'),
+            (b'content-type', b'application/json')], 'server': ('test', 80), 'client': ('test', 1)}, receive, send)
+        assert sent[0]['status'] == 413
+
+    asyncio.run(request())
+    assert api.database.calls == []
+
+
+def test_action_and_terminal_are_committed_before_asgi_delivery(api, monkeypatch):
+    install_model(monkeypatch)
+    conversation = api.owner.create_conversation()
+    body = turn_body()
+
+    async def request():
+        sent = []
+
+        async def receive():
+            return {'type': 'http.request', 'body': json.dumps(body).encode(), 'more_body': False}
+
+        async def send(message):
+            sent.append(message)
+            chunk = message.get('body', b'')
+            if b'"type":"action_required"' in chunk or b'"type":"complete"' in chunk:
+                persisted = api.owner.get_run(UUID(body['request_id']))
+                assert persisted.status == 'complete'
+                assert any(event.type == 'action_required' for event in persisted.events)
+                assert len(api.owner.get_conversation(conversation.id).pending_actions) == 1
+
+        await api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'},
+            'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+            'path': f'/agent/conversations/{conversation.id}/messages', 'query_string': b'',
+            'headers': [(b'authorization', b'Bearer owner'), (b'content-type', b'application/json')],
+            'server': ('test', 80), 'client': ('test', 1)}, receive, send)
+        assert sent[0]['status'] == 200
+        assert b'"type":"complete"' in b''.join(message.get('body', b'') for message in sent)
+
+    asyncio.run(request())
+
+
+def test_real_asgi_disconnect_cancels_sdk_and_persists_reconcilable_outcome(api, monkeypatch):
+    conversation = api.owner.create_conversation()
+    body = turn_body()
+
+    async def request():
+        disconnected, model_closed = asyncio.Event(), asyncio.Event()
+        request_read = False
+
+        class ModelBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                try:
+                    event = {'type': 'response.output_text.delta', 'delta': 'partial ' * 20,
+                        'item_id': 'msg_1', 'output_index': 0, 'content_index': 0, 'sequence_number': 0}
+                    yield ('data: ' + json.dumps(event) + '\n\n').encode()
+                    await asyncio.Event().wait()
+                finally:
+                    model_closed.set()
+
+        monkeypatch.setattr(routes, 'AsyncOpenAI', lambda **kwargs: AsyncOpenAI(api_key='synthetic',
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, headers={'content-type': 'text/event-stream'}, stream=ModelBody()))), **kwargs))
+
+        async def receive():
+            nonlocal request_read
+            if not request_read:
+                request_read = True
+                return {'type': 'http.request', 'body': json.dumps(body).encode(), 'more_body': False}
+            await disconnected.wait()
+            return {'type': 'http.disconnect'}
+
+        async def send(message):
+            if b'"type":"text_delta"' in message.get('body', b''):
+                disconnected.set()
+
+        await asyncio.wait_for(api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.3'},
+            'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+            'path': f'/agent/conversations/{conversation.id}/messages', 'query_string': b'',
+            'headers': [(b'authorization', b'Bearer owner'), (b'content-type', b'application/json')],
+            'server': ('test', 80), 'client': ('test', 1)}, receive, send), 5)
+        assert disconnected.is_set()
+        await asyncio.wait_for(model_closed.wait(), 1)
+
+    asyncio.run(request())
+    recovered = api.client.get('/agent/runs/' + body['request_id']).json()
+    assert recovered['status'] == 'error' and recovered['events'][-1]['data']['code'] == 'cancelled'
+    assert api.owner.load_history(conversation.id) == []
+    assert [name for name, _ in api.database.calls].count('agent_finish_turn') == 1
