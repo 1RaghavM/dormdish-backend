@@ -27,6 +27,10 @@ Tables have RLS enabled, no anon/authenticated grants, service-only RPC executio
 
 ## Verification and dependencies
 
-Based on `integration/dd-agent/combined` at ded498899ac5cea4237c428e86581dd90b65bc7a, explicitly stacking backend PRs 10/11, 13/14, 15/16. Companion independent test PR and native implementation remain required before enabling. Two initial implementation self-checks ran against disposable local PostgreSQL 17: trusted amounts/duplicate selection/nonfinite values, version guard, frozen intake, undo and exact receipt replay. Full-suite results and exact commit evidence follow in the PR.
+Based on `integration/dd-agent/combined` at ded498899ac5cea4237c428e86581dd90b65bc7a, explicitly stacking backend PRs 10/11, 13/14, 15/16. Source PR [18](https://github.com/1RaghavM/dormdish-backend/pull/18) and independent companion test PR [17](https://github.com/1RaghavM/dormdish-backend/pull/17) require fresh reviews and native acceptance before enabling.
+
+Final production-code SHA `68d493e346647792f31a82d4c93111ccf55201a3`: `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -q -o addopts=''` passed **560, failed 0, skipped 0** in 98.39s against disposable PostgreSQL 17. One existing AnyIO deprecation warning. Log: `/private/tmp/dd-completion-source-final-full.log`. The following documentation-only commit leaves tested production/test files unchanged.
+
+The dedicated author independently passed **59 completion cases, failed 0, skipped 0** in 26.45s at combined test SHA `ed9c6c8307a783a312de682f36d0767714f81c48` over the same source SHA. Four malformed saved-shape cases genuinely failed with 503 before the 422 validation fix; a concurrent original-commit/plan-delete race genuinely failed with 404 before receipt recovery returned the original 200. Conflicting retry bodies still return 409. Coverage includes authentication, owner/date/version guards, SQL rollback/concurrency/privileges, account deletion, stable intake source deduplication, frozen undo/recheck and exact aged receipts. The companion PR owns final combined full-suite evidence.
 
 No production SQL, live model calls, deployment, native acceptance, or account-specific limits were verified by this feature.
