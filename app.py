@@ -6071,7 +6071,8 @@ async def get_meal_plan_history(
     """Get list of user's saved meal plans, ordered by date (most recent first)"""
     try:
         response = supabase.table("saved_meal_plans")\
-            .select("id, dining_hall, date, created_at, updated_at, meal_plan_data")\
+            .select("id, dining_hall, date, created_at, updated_at, meal_plan_data" +
+                    (", completion_version" if completion_enabled() else ""))\
             .eq("user_id", current_user["id"])\
             .order("date", desc=True)\
             .range(offset, offset + limit - 1)\
@@ -8247,6 +8248,8 @@ def agent_daily_targets(user):
 
 from dormdish_agent.routes import create_router as create_agent_router
 app.include_router(create_agent_router(get_current_user, require_premium, lambda: supabase, agent_daily_targets))
+from services.meal_completion import create_router as create_completion_router, enabled as completion_enabled
+app.include_router(create_completion_router(get_current_user, lambda: supabase))
 
 
 if __name__ == '__main__':
