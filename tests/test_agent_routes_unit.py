@@ -258,3 +258,90 @@ def test_registered_legacy_hall_alias_uses_original_target(saved_hall):
         with pytest.raises(HTTPException) as caught:
             routes.read_target(owner, context)
         assert caught.value.status_code == 409
+
+
+# A separate database keeps the historical migration selfchecks unchanged.
+from tests.test_agent_storage_unit import pg as profile_base_pg
+
+
+@pytest.fixture(scope='module')
+def profile_pg(profile_base_pg):
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    profile_base_pg.sql('''ALTER TABLE users ADD university text, ADD dietary_restrictions jsonb,
+        ADD custom_calories integer, ADD email text, ADD password_hash text;''')
+    for name in ('enforce_agent_daily_save_policy.sql', 'enforce_agent_profile_safety.sql'):
+        profile_base_pg.sql((root / 'migrations' / name).read_text())
+    return profile_base_pg
+
+
+@pytest.fixture
+def profile_store(profile_pg):
+    owner = str(uuid4())
+    profile_pg.sql(f"INSERT INTO users(id, university, dietary_restrictions, email, password_hash) VALUES ('{owner}', 'rutgers', '[]', 'private@example.test', 'secret')")
+    return routes.AgentStore(profile_pg, owner)
+
+
+def profile_action(store, *, version=None, before_finish=None):
+    from pathlib import Path
+    from datetime import datetime, timedelta, timezone
+    import json
+    from dormdish_agent.models import PendingAction, RunState, TurnRequest
+    version = version if version is not None else store.get_profile()['version']
+    conversation = store.create_conversation()
+    _, run = store.claim_turn(conversation.id, TurnRequest(request_id=uuid4(), text='Synthetic dinner'))
+    data = json.loads((Path(__file__).resolve().parents[1] / 'contracts/agent-v1.json').read_text())['conversation']['pending_actions'][0]
+    data.update(id=str(uuid4()), expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+    action = PendingAction.model_validate(data)
+    routes.append_event(run, 'action_required', {'action': action.model_dump(mode='json')})
+    routes.append_event(run, 'complete', {'citations': []})
+    if before_finish:
+        before_finish()
+    store.finish_turn(run, [], 'Preview', routes.StoredAction(action, {'trusted': True}, expected_profile_version=version))
+    return action
+
+
+def test_pg_profile_snapshot_excludes_secrets_and_unrelated_changes(profile_store, profile_pg):
+    snapshot = profile_store.get_profile()
+    assert snapshot['profile']['university'] == 'rutgers'
+    assert not {'email', 'password_hash', 'id'} & snapshot['profile'].keys()
+    assert len(snapshot['version']) == 64
+    action = profile_action(profile_store)
+    profile_pg.sql(f"UPDATE users SET email = 'changed@example.test', password_hash = 'changed' WHERE id = '{profile_store.user_id}'")
+    assert profile_store.get_profile() == snapshot
+    assert profile_store.confirm_action(action.id, confirmation()).status == 'complete'
+
+
+@pytest.mark.parametrize('during_run', [False, True])
+def test_pg_changed_profile_never_applies_old_proposal(profile_store, profile_pg, during_run):
+    def change():
+        profile_pg.sql(f"UPDATE users SET dietary_restrictions = '[\"Dairy Free\"]' WHERE id = '{profile_store.user_id}'")
+    action = profile_action(profile_store, before_finish=change if during_run else None)
+    if not during_run:
+        change()
+    quota = profile_pg.sql(f"SELECT requests FROM agent_quotas WHERE user_id = '{profile_store.user_id}'")
+    request = confirmation()
+    with pytest.raises(routes.StorageError, match='stale_profile'):
+        profile_store.confirm_action(action.id, request)
+    assert profile_pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{profile_store.user_id}'") == '0'
+    assert profile_pg.sql(f"SELECT count(*) FROM agent_runs WHERE id = '{request.request_id}'") == '0'
+    assert profile_pg.sql(f"SELECT requests FROM agent_quotas WHERE user_id = '{profile_store.user_id}'") == quota
+
+
+def test_pg_profile_change_after_apply_keeps_idempotent_result(profile_store, profile_pg):
+    action = profile_action(profile_store)
+    request = confirmation()
+    applied = profile_store.confirm_action(action.id, request)
+    profile_pg.sql(f"UPDATE users SET custom_calories = 1900 WHERE id = '{profile_store.user_id}'")
+    assert profile_store.confirm_action(action.id, request) == applied
+    assert profile_store.confirm_action(action.id, confirmation()).events[0].data.saved_plan_id == applied.events[0].data.saved_plan_id
+
+
+def test_pg_legacy_pending_and_missing_new_profile_version_fail_closed(profile_store, profile_pg):
+    action = profile_action(profile_store)
+    profile_pg.sql(f"UPDATE agent_actions SET expected_profile_version = NULL WHERE id = '{action.id}'")
+    with pytest.raises(routes.StorageError, match='stale_profile'):
+        profile_store.confirm_action(action.id, confirmation())
+    with pytest.raises(routes.StorageError, match='stale_profile'):
+        prepared_action(profile_store)
+    assert profile_pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{profile_store.user_id}'") == '0'
