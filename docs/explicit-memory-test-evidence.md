@@ -4,10 +4,10 @@ This dedicated test PR verifies [source PR19](https://github.com/1RaghavM/dormdi
 
 ## Revisions and checks
 
-- Source tested: `eee668b0506925896fae90f235389e9959f61d03`.
-- Combined test/source code: `4ab56667cce10f1b2934b2894b291f54eb7be29e` on `tests/dd-agent/explicit-memory`.
+- Source tested: `60a14f2928bbb9fbdeba093b5c7079926389ab56` (fresh review parser fix).
+- Combined test/source code: `a82df6127f8af5690b6a6bd0bd5859d96bbe1052` on `tests/dd-agent/explicit-memory`.
 - Original 65 dedicated cases: **65 passed, 0 failed, 0 skipped**, 28.67 seconds. The six additional typed-forget cases: **6 passed, 0 failed, 0 skipped** (65 deselected), 8.32 seconds.
-- Complete backend suite at the combined code revision: **649 passed, 0 failed, 0 skipped**, 188.20 seconds, including all **71 dedicated memory cases**. Later changes to this evidence document do not change the tested code.
+- Complete backend suite at the combined code revision: **668 passed, 0 failed, 0 skipped**, 135.70 seconds, including all **71 dedicated memory cases**. The coordinator explicitly merged the reviewed parser fix and reran the complete suite; the 71 independent test cases remain unchanged. Later changes to this evidence document do not change the tested code.
 - Python runtime: `/private/tmp/dd-agent-runtime-uv/bin/python`; local Docker PostgreSQL container `dd-agent-migration-db`; every test module uses a disposable randomly named database. No production database, user records, or paid models are used. Model construction is forbidden for memory-command API cases.
 
 Commands:
@@ -28,7 +28,9 @@ Tests ran against source `f8a51d9add17ceeb08f479ed7779e81757956dfc` before the f
 - Exact-name check: **1 failed** (63 deselected), 5.38 seconds. `Chef’s rice` was incorrectly stored as `Chef's rice`.
 - All of these behavioral assertions passed unchanged against `eee668b`. Failures were actual HTTP/SQL outcomes, not import errors, missing contracts or weakened fixtures.
 
-Local logs: `/private/tmp/dd-explicit-memory-tests-expanded.log`, `/private/tmp/dd-explicit-memory-parser-red.log`, `/private/tmp/dd-explicit-memory-unicode-red.log`, `/private/tmp/dd-explicit-memory-tests-fixed.log`, `/private/tmp/dd-explicit-memory-typed-forget.log`, `/private/tmp/dd-explicit-memory-tests-full.log`. The existing AnyIO deprecation warning is not a test failure.
+Latest full-suite log: `/private/tmp/dd-explicit-memory-review-fix-integrated.log`.
+
+Earlier regression logs: `/private/tmp/dd-explicit-memory-tests-expanded.log`, `/private/tmp/dd-explicit-memory-parser-red.log`, `/private/tmp/dd-explicit-memory-unicode-red.log`, `/private/tmp/dd-explicit-memory-tests-fixed.log`, `/private/tmp/dd-explicit-memory-typed-forget.log`, `/private/tmp/dd-explicit-memory-tests-full.log`. The existing AnyIO deprecation warning is not a test failure.
 
 ## Dependencies and limits
 
