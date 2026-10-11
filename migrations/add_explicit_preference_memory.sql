@@ -93,7 +93,7 @@ BEGIN
     text_value := regexp_replace(preference_item_name(p_text), '^please +', '', 'i');
     text_value := regexp_replace(text_value, '[.!]$', '');
     IF lower(text_value) = 'forget that preference' THEN RETURN jsonb_build_object('operation','reference'); END IF;
-    IF text_value ~ E'[\\n\\r;"?.!`“”]' THEN RETURN NULL; END IF;
+    IF p_text ~ '[[:cntrl:]]' THEN RETURN NULL; END IF;
     found := regexp_match(text_value, '^remember(?: that)? i (like|love|prefer|dislike|don[''’]t like|do not like) (.+)$', 'i');
     IF found IS NOT NULL THEN
         operation := 'set'; item := found[2];
@@ -115,22 +115,26 @@ BEGIN
             END IF;
         END IF;
     END IF;
-    IF operation = 'set' THEN
-        found := regexp_match(item, '^(.+) for (breakfast|lunch|dinner)$', 'i');
-        IF found IS NOT NULL THEN item := found[1]; meal := lower(found[2]); END IF;
+    -- A JSON string closes the target boundary; free multiword text is ambiguous.
+    found := regexp_match(item, '^("(?:[^"\\]|\\.)*")(?: for (breakfast|lunch|dinner))?$', 'i');
+    IF found IS NOT NULL THEN
+        BEGIN
+            item := found[1]::jsonb #>> '{}';
+        EXCEPTION WHEN data_exception THEN RETURN NULL;
+        END;
+    ELSE
+        found := regexp_match(item, '^([[:alnum:]]+([''’-][[:alnum:]]+)*)(?: for (breakfast|lunch|dinner))?$', 'i');
+        IF found IS NULL THEN RETURN NULL; END IF;
+        item := found[1]; found := ARRAY[found[1],found[3]];
+        IF item ~* '\m(tonight|today|tomorrow|temporarily|temporary|briefly|now|never|not|no|maybe|perhaps|probably|that|it|this|everything|allergies|allergy|allergic|restriction|restrictions)\M'
+            THEN RETURN NULL; END IF;
+    END IF;
+    IF found[2] IS NOT NULL THEN
+        IF operation <> 'set' THEN RETURN NULL; END IF;
+        meal := lower(found[2]);
     END IF;
     item := preference_item_name(item);
-    -- Accept a bounded bare name, never an arbitrary trailing sentence or clause.
-    IF length(item) NOT BETWEEN 1 AND 200
-        OR item !~ '^[[:alnum:]]+([''’-][[:alnum:]]+)*( [[:alnum:]]+([''’-][[:alnum:]]+)*){0,5}$'
-        OR item ~* '\m(i|me|my|mine|we|us|our|you|your|he|she|they|their|it|its|that|these|those)\M'
-        OR item ~* '\m(am|is|are|was|were|be|been|being|do|does|did|have|has|had|can|could|will|would|shall|should|must|may|might|cannot)\M'
-        OR item ~* '\m(don|doesn|didn|won|wouldn|isn|aren|wasn|weren|haven|hasn|hadn|couldn|shouldn|mustn|can)[''’]?t\M'
-        OR item ~* '\m(never|not|no|without|unless|if|then|but|except|only|just|maybe|perhaps|probably|and|or|nor|when|whenever|while|because|although|though|whether|otherwise|instead|despite)\M'
-        OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|for|now|this|during|next|current|until|till|through|before|after|since|once|permanently)\M'
-        OR item ~* '\m(save|saved|saving|store|stored|storing|persist|persisted|persisting|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
-        OR lower(item) IN ('everything','all preferences')
-        THEN RETURN NULL; END IF;
+    IF length(item) NOT BETWEEN 1 AND 200 OR item ~ '[[:cntrl:]]' THEN RETURN NULL; END IF;
     RETURN jsonb_build_object('operation',operation,'item_name',item,'category',category,'preference_kind',kind,'meal_type',meal,'exact_kind',kind<>'food_item');
 END $$;
 
@@ -166,7 +170,7 @@ BEGIN
     IF text_value IS NOT NULL THEN
         NULL; -- A stale in-flight instruction cannot resurrect a forgotten preference.
     ELSIF intent IS NULL THEN
-        text_value := 'Which preference should I remember or forget? Say "Remember that I don''t like mushrooms" or "Forget mushrooms". Temporary requests stay temporary; change allergies and nutrition goals in your profile.';
+        text_value := 'Which preference should I remember or forget? Say Remember that I like "brown rice" or Forget "brown rice". Use a single name or a JSON-quoted literal, with an optional meal such as for dinner. Temporary requests stay temporary; change allergies and nutrition goals in your profile.';
     ELSIF intent->>'operation'='set' THEN
         PERFORM preference_apply(p_user_id,intent->>'category',intent->>'item_name',intent->>'preference_kind',
             intent->>'meal_type','explicit_chat',p_conversation_id,p_request_id);

@@ -36,11 +36,14 @@ def test_candidate_gate_does_not_authorize_quoted_or_negated_commands():
 @pytest.mark.parametrize('text,expected', [
     ("Remember that I don't like mushrooms", ('dislike','mushrooms','all')),
     ("Remember that I don’t like mushrooms", ('dislike','mushrooms','all')),
-    ("Remember that I don’t like Chef’s rice", ('dislike','Chef’s rice','all')),
+    ('Remember that I don’t like "Chef’s rice"', ('dislike','Chef’s rice','all')),
+    ('Remember that I don’t like Chef’s rice', None),
     ('Remember that I like rice for dinner', ('favorite','rice','dinner')),
     ('Remember my flavor preference: spicy', ('favorite','spicy','all')),
-    ('Remember that I like Crème brûlée', ('favorite','Crème brûlée','all')),
-    ('Remember that I like stir-fried rice', ('favorite','stir-fried rice','all')),
+    ('Remember that I like "Crème brûlée"', ('favorite','Crème brûlée','all')),
+    ('Remember that I like Crème brûlée', None),
+    ('Remember that I like "stir-fried rice"', ('favorite','stir-fried rice','all')),
+    ('Remember that I like stir-fried rice', None),
     ('Remember that I like 香菇', ('favorite','香菇','all')),
     ('Remember that I like one two three four five six seven', None),
     ('Remember that I like mushrooms tonight', None),
@@ -160,6 +163,11 @@ def test_typed_taste_changes_and_forget_keep_kind_and_category(memory_pg):
     'Forget mushrooms until Friday',
     'Remember that I like rice when available',
     'Remember that I like rice or pasta',
+    'Remember that I like rice on Friday',
+    'Remember that I like rice briefly',
+    'Remember that I like rice assuming availability',
+    'Remember my flavor preference: spicy on weekends',
+    'Forget mushrooms briefly',
 ])
 def test_trailing_clauses_cannot_authorize_actual_memory_mutation(memory_pg, text):
     owner = uuid4()
@@ -178,3 +186,29 @@ def test_trailing_clauses_cannot_authorize_actual_memory_mutation(memory_pg, tex
     assert 'Which preference' in result.events[0].data.text
     assert memory_pg.sql(f"SELECT row_to_json(p)::text FROM user_preferences p WHERE user_id='{owner}'") == before
     assert store.apply_memory_turn(conversation.id, request.request_id) == result
+
+
+@pytest.mark.parametrize('name', ['Chef’s rice', 'Crème brûlée', 'Mac/Cheese? #%', 'Chef "A" rice', 'rice\\beans', '香菇', 'e\u0301clair'])
+def test_json_literal_target_preserves_exact_name_and_forgets(memory_pg, name):
+    import json
+    owner = uuid4()
+    memory_pg.sql(f"INSERT INTO users VALUES ('{owner}')")
+    store = AgentStore(memory_pg, owner)
+    conversation = store.create_conversation()
+    for prefix in ['Remember that I like ', 'Forget ']:
+        request = TurnRequest(request_id=uuid4(), text=prefix + json.dumps(name, ensure_ascii=False))
+        store.claim_turn(conversation.id, request)
+        result = store.apply_memory_turn(conversation.id, request.request_id)
+        assert result.events[-1].data.preferences_changed
+        stored = memory_pg.sql(f"SELECT item_name FROM user_preferences WHERE user_id='{owner}'")
+        assert stored == (name if prefix.startswith('Remember') else '')
+
+
+@pytest.mark.parametrize('target', [
+    '"rice" on Friday', '"rice" briefly', '"rice" assuming availability',
+    '"rice" for dinner tonight', '"rice" "soup"', '"rice', '""', '"  "',
+    '"rice\\nbeans"', '"rice\\u0000beans"', '"rice\\ud800"', '"rice\\q"',
+    '"rice"; forget soup', '"rice" for all', 'rice briefly for dinner',
+])
+def test_json_target_requires_complete_command_and_safe_decoding(memory_pg, target):
+    assert memory_pg.rpc('agent_memory_intent', {'p_text': 'Remember that I like ' + target}).execute().data is None
