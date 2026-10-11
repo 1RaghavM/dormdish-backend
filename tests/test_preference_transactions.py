@@ -20,14 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope='module', autouse=True)
 def preference_schema(pg):
-    # Deliberately support legacy contradictory rows and a deployed category-scoped unique index.
+    # Match the inspected legacy index and public read grants before applying the migration.
     pg.sql('''CREATE TABLE user_preferences (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         category text NOT NULL CHECK (category IN ('favorite', 'dislike')), item_name text NOT NULL,
         item_type text NOT NULL CHECK (item_type IN ('meal_plan', 'food_item')),
         meal_type text NOT NULL CHECK (meal_type IN ('breakfast', 'lunch', 'dinner')),
         meal_plan_id text, reason text, created_at timestamptz NOT NULL DEFAULT now());
-        CREATE UNIQUE INDEX ON user_preferences(user_id, category, lower(item_name), meal_type);
+        CREATE UNIQUE INDEX idx_user_preferences_unique ON user_preferences(user_id, category, lower(item_name));
+        GRANT SELECT ON user_preferences TO PUBLIC, anon, authenticated;
         GRANT SELECT, INSERT, UPDATE, DELETE ON user_preferences TO service_role;''')
     legacy = str(uuid4())
     pg.sql(f"""INSERT INTO users VALUES ('{legacy}');
@@ -35,12 +36,85 @@ def preference_schema(pg):
         VALUES ('{legacy}','favorite','Rice','food_item','dinner'),
                ('{legacy}','dislike','Rice','food_item','dinner');""")
     before = rows(pg, legacy)
+    assert pg.sql("SELECT relrowsecurity FROM pg_class WHERE oid='user_preferences'::regclass") == 'f'
+    assert pg.sql("SET ROLE anon; SELECT count(*) FROM user_preferences") == '2'
+    assert pg.sql("SET ROLE authenticated; SELECT count(*) FROM user_preferences") == '2'
     pg.sql((ROOT / 'migrations/atomic_preferences.sql').read_text())
-    assert rows(pg, legacy) == before  # Additive migration must not silently rewrite legacy choices.
+    assert rows(pg, legacy) == before  # Migration must not silently rewrite legacy choices or IDs.
+    return legacy, before
 
 
 def rows(pg, owner):
     return json.loads(pg.sql(f"SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY id),'[]') FROM user_preferences p WHERE user_id='{owner}'"))
+
+
+def test_legacy_schema_upgrade_preserves_rows_and_enables_private_storage(preference_schema, pg):
+    legacy, before = preference_schema
+    assert rows(pg, legacy) == before
+    assert len({row['id'] for row in before}) == 2
+    assert {row['category'] for row in before} == {'favorite', 'dislike'}
+    assert pg.sql("SELECT relrowsecurity FROM pg_class WHERE oid='user_preferences'::regclass") == 't'
+    assert pg.sql("""SELECT count(*) FROM pg_class c,
+        LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+        WHERE c.oid='user_preferences'::regclass AND a.grantee=0""") == '0'
+    service_rows = json.loads(pg.sql(f"SET ROLE service_role; SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM user_preferences p WHERE user_id='{legacy}'"))
+    assert service_rows == before
+
+
+@pytest.mark.parametrize('category', ['favorite', 'dislike'])
+def test_legacy_index_upgrade_allows_same_choice_for_every_meal(stores, pg, category):
+    owner, other = stores
+    manager = PreferenceManager(pg)
+    values = dict(p_user_id=owner.user_id, p_category=category, p_item_name='Rice', p_item_type='food_item')
+    created = [pg.rpc('preference_set', {**values, 'p_meal_type': meal}).execute().data['data'][0]
+               for meal in ['breakfast', 'lunch', 'dinner']]
+    assert len({row['id'] for row in created}) == 3
+    assert {row['meal_type'] for row in rows(pg, owner.user_id)} == {'breakfast', 'lunch', 'dinner'}
+    assert {row['category'] for row in rows(pg, owner.user_id)} == {category}
+    assert rows(pg, other.user_id) == []
+    assert getattr(manager, 'remove_' + category)(owner.user_id, 'rice') == {'status': 'deleted'}
+    assert rows(pg, owner.user_id) == []
+
+
+def test_choice_replacement_keeps_other_meals_and_stable_ids_after_index_upgrade(stores, pg):
+    owner, _ = stores
+    manager = PreferenceManager(pg)
+    lunch = manager.add_favorite_food_item(owner.user_id, 'Rice', 'lunch')['data'][0]
+    dinner = manager.add_dislike(owner.user_id, 'Rice', 'food_item', 'dinner')['data'][0]
+    changed = manager.add_favorite_food_item(owner.user_id, 'rice', 'dinner')['data'][0]
+    assert changed['id'] == dinner['id'] and changed['category'] == 'favorite'
+    assert next(row for row in rows(pg, owner.user_id) if row['meal_type'] == 'lunch') == lunch
+    reversed_choice = manager.add_dislike(owner.user_id, 'RICE', 'food_item', 'lunch')['data'][0]
+    assert reversed_choice['id'] == lunch['id'] and reversed_choice['category'] == 'dislike'
+    assert next(row for row in rows(pg, owner.user_id) if row['meal_type'] == 'dinner') == changed
+
+
+def test_upgraded_index_still_rejects_case_insensitive_duplicates_within_one_meal(stores, pg):
+    owner, _ = stores
+    PreferenceManager(pg).add_favorite_food_item(owner.user_id, 'Rice', 'dinner')
+    before = rows(pg, owner.user_id)
+    with pytest.raises(RuntimeError, match='duplicate key value violates unique constraint "idx_user_preferences_unique"'):
+        pg.sql(f"""SET ROLE service_role;
+            INSERT INTO user_preferences(user_id,category,item_name,item_type,meal_type)
+            VALUES ('{owner.user_id}','favorite','RICE','food_item','dinner')""")
+    assert rows(pg, owner.user_id) == before
+
+
+@pytest.mark.parametrize('role', ['anon', 'authenticated'])
+@pytest.mark.parametrize('operation', ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
+def test_upgraded_storage_denies_public_client_reads_and_mutations(stores, pg, role, operation):
+    owner, _ = stores
+    PreferenceManager(pg).add_favorite_food_item(owner.user_id, 'Private rice', 'dinner')
+    before = rows(pg, owner.user_id)
+    statements = {
+        'SELECT': 'SELECT * FROM user_preferences',
+        'INSERT': f"INSERT INTO user_preferences(user_id,category,item_name,item_type,meal_type) VALUES ('{owner.user_id}','favorite','Other','food_item','lunch')",
+        'UPDATE': "UPDATE user_preferences SET reason='unauthorized'",
+        'DELETE': 'DELETE FROM user_preferences',
+    }
+    with pytest.raises(RuntimeError, match='permission denied for table user_preferences'):
+        pg.sql(f'SET ROLE {role}; {statements[operation]}')
+    assert rows(pg, owner.user_id) == before
 
 
 def history(store, text='Synthetic remembered taste'):
