@@ -39,6 +39,10 @@ def test_candidate_gate_does_not_authorize_quoted_or_negated_commands():
     ("Remember that I don’t like Chef’s rice", ('dislike','Chef’s rice','all')),
     ('Remember that I like rice for dinner', ('favorite','rice','dinner')),
     ('Remember my flavor preference: spicy', ('favorite','spicy','all')),
+    ('Remember that I like Crème brûlée', ('favorite','Crème brûlée','all')),
+    ('Remember that I like stir-fried rice', ('favorite','stir-fried rice','all')),
+    ('Remember that I like 香菇', ('favorite','香菇','all')),
+    ('Remember that I like one two three four five six seven', None),
     ('Remember that I like mushrooms tonight', None),
     ('Remember that I am allergic to peanuts', None),
     ('Do not remember that I like peanuts', None),
@@ -138,3 +142,39 @@ def test_typed_taste_changes_and_forget_keep_kind_and_category(memory_pg):
     store.claim_turn(conversation.id, request)
     store.apply_memory_turn(conversation.id, request.request_id)
     assert memory_pg.sql(f"SELECT count(*) FROM user_preferences WHERE user_id='{owner}'") == '0'
+
+
+@pytest.mark.parametrize('text', [
+    "Remember that I like rice, don't save it",
+    'Remember that I like rice without saving it',
+    'Remember that I like rice until Friday',
+    'Remember that I like rice dont save it',
+    'Remember that I like rice do not store it',
+    'Remember that I like rice while on vacation',
+    'Remember that I like rice through Friday',
+    'Remember that I like rice unless I change my mind',
+    'Remember that I like rice but never persist it',
+    'Remember that I like rice I am only trying it',
+    'Remember that I like rice (temporarily)',
+    'Remember my flavor preference: spicy without saving it',
+    'Forget mushrooms until Friday',
+    'Remember that I like rice when available',
+    'Remember that I like rice or pasta',
+])
+def test_trailing_clauses_cannot_authorize_actual_memory_mutation(memory_pg, text):
+    owner = uuid4()
+    memory_pg.sql(f"INSERT INTO users VALUES ('{owner}')")
+    store = AgentStore(memory_pg, owner)
+    conversation = store.create_conversation()
+    initial = TurnRequest(request_id=uuid4(), text="Remember that I don't like mushrooms")
+    store.claim_turn(conversation.id, initial)
+    store.apply_memory_turn(conversation.id, initial.request_id)
+    before = memory_pg.sql(f"SELECT row_to_json(p)::text FROM user_preferences p WHERE user_id='{owner}'")
+    request = TurnRequest(request_id=uuid4(), text=text)
+    store.claim_turn(conversation.id, request)
+    result = store.apply_memory_turn(conversation.id, request.request_id)
+    assert result.status == 'complete'
+    assert not result.events[-1].data.preferences_changed
+    assert 'Which preference' in result.events[0].data.text
+    assert memory_pg.sql(f"SELECT row_to_json(p)::text FROM user_preferences p WHERE user_id='{owner}'") == before
+    assert store.apply_memory_turn(conversation.id, request.request_id) == result
