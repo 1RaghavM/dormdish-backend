@@ -7,7 +7,7 @@ CREATE OR REPLACE FUNCTION public.agent_save_intent(p_text text, p_meal_type tex
 LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$
     SELECT CASE
         -- Any question mark means a preview; any apostrophe variant counts for don't.
-        WHEN t ~ '[?？‽⁇﹖؟]' OR t ~ '\m(don.?t|do\s+not|never|not|without)\M' THEN NULL
+        WHEN t ~ '[?？‽⁇﹖؟]' OR t ~ '\m(don([^[:alnum:]]|ʼ)?t|do\s+not|never|not|without)\M' THEN NULL
         WHEN substring(t from '^(?:please\s+)?(?:replace|overwrite) my (breakfast|lunch|dinner)\M') = p_meal_type THEN 'replace'
         WHEN t ~ '^(please\s+)?(save|generate and save|plan and save|make and save)\M' THEN 'save'
     END

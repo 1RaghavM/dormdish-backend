@@ -22,8 +22,8 @@ the turn produced a validated proposal.
 U+2060, U+FEFF, U+FE0E/U+FE0F), trims leading whitespace including Unicode spaces, lowercases, then:
 
 - returns `NULL` if the text contains any of `? ？ ‽ ⁇ ﹖ ؟` anywhere (questions are previews), or a
-  whole-word negation `\m(don.?t|do\s+not|never|not|without)\M` (any apostrophe variant; also
-  conservatively the single word `donut`);
+  whole-word negation `\m(don([^[:alnum:]]|ʼ)?t|do\s+not|never|not|without)\M` (any apostrophe
+  variant, including the letter-class U+02BC; `donut`/`donuts` are not negations);
 - `replace` if it matches `^(please\s+)?(replace|overwrite) my (breakfast|lunch|dinner)` (word
   boundary) and the named meal equals the request's `context.meal_type`;
 - `save` if it matches `^(please\s+)?(save|generate and save|plan and save|make and save)` (word
