@@ -100,7 +100,7 @@ def changed(response):
     ('Remember my flavor preference: spicy', 'favorite', 'spicy', 'all', 'flavor'),
     ('Remember my cuisine preference: Indian', 'favorite', 'Indian', 'all', 'cuisine'),
     ('Remember my texture preference: crunchy', 'favorite', 'crunchy', 'all', 'texture'),
-    ('Remember that I like Chef’s rice', 'favorite', 'Chef’s rice', 'all', 'food_item'),
+    ('Remember that I like "Chef’s rice"', 'favorite', 'Chef’s rice', 'all', 'food_item'),
 ])
 def test_literal_instruction_persists_typed_provenance_without_model(api, text, category, name, meal, kind):
     response, conversation, request = send(api, text)
@@ -401,4 +401,112 @@ def test_typed_forget_matches_kind_and_category(api, kind, value, other_kind, se
     send(api, f'Forget my {kind} {opposite}: {value}')
     assert rows(api.pg, api.owner.user_id) == before
     assert changed(send(api, f'Forget my {kind} {sentiment}: {value}')[0])
+    assert rows(api.pg, api.owner.user_id) == []
+
+
+@pytest.mark.parametrize('text,target', [
+    ('Remember that I like rice on Friday', 'rice on Friday'),
+    ('Remember that I like rice briefly', 'rice briefly'),
+    ('Remember that I like rice assuming availability', 'rice assuming availability'),
+    ('Remember my flavor preference: spicy on weekends', 'spicy on weekends'),
+    ('Forget rice on Friday', 'rice on Friday'),
+    ('Forget my flavor preference: spicy on weekends', 'spicy on weekends'),
+    ('Remember that I like Chef’s rice', 'Chef’s rice'),
+])
+def test_unquoted_clauses_and_multiword_names_clarify_without_memory_or_history_mutation(api, text, target):
+    api.pg.rpc('preference_set', dict(p_user_id=api.owner.user_id, p_category='favorite',
+        p_item_name=target, p_item_type='food_item', p_meal_type='dinner')).execute()
+    retained, replay = history(api.owner)
+    before = rows(api.pg, api.owner.user_id)
+    response, _, _ = send(api, text)
+    assert not changed(response)
+    assert rows(api.pg, api.owner.user_id) == before
+    assert api.owner.load_history(retained.id) == replay
+    assert 'Which preference' in events(response)[0]['data']['text']
+
+
+@pytest.mark.parametrize('literal,name', [
+    ('"Chef’s rice"', 'Chef’s rice'),
+    (r'"Chef\u2019s rice"', 'Chef’s rice'),
+    (r'"Mac\/Cheese? #%"', 'Mac/Cheese? #%'),
+    (r'"He said \"rice\""', 'He said "rice"'),
+    (r'"Rice\\beans"', 'Rice\\beans'),
+    ('"お米 🌶️"', 'お米 🌶️'),
+    (r'"\ud83c\udf36\ufe0f rice"', '🌶️ rice'),
+    ('"on Friday"', 'on Friday'),
+    ('"rice for dinner"', 'rice for dinner'),
+    ('"rice; forget soup"', 'rice; forget soup'),
+    ('"  Rice  with  beans  "', 'Rice  with  beans'),
+    ('"' + 'é' * 200 + '"', 'é' * 200),
+])
+def test_json_literal_preserves_decoded_identity_and_forgets_exactly(api, literal, name):
+    response, _, _ = send(api, 'Remember that I like ' + literal)
+    assert changed(response)
+    [saved] = rows(api.pg, api.owner.user_id)
+    assert saved['item_name'] == name and saved['meal_type'] == 'all'
+    assert changed(send(api, 'Forget ' + literal)[0])
+    assert rows(api.pg, api.owner.user_id) == []
+
+
+@pytest.mark.parametrize('name', ['Chef’s', "Chef's", 'stir-fry', '123', 'お米'])
+def test_bare_single_token_accepts_internal_apostrophe_hyphen_and_unicode(api, name):
+    assert changed(send(api, 'Remember that I like ' + name)[0])
+    assert rows(api.pg, api.owner.user_id)[0]['item_name'] == name
+
+
+@pytest.mark.parametrize('meal', ['breakfast', 'lunch', 'dinner'])
+def test_json_literal_meal_suffix_is_only_scope_when_outside_string(api, meal):
+    name = 'rice for ' + meal
+    assert changed(send(api, 'Remember that I like ' + json.dumps(name))[0])
+    assert rows(api.pg, api.owner.user_id)[0]['meal_type'] == 'all'
+    assert changed(send(api, 'Remember that I like "rice" for ' + meal)[0])
+    assert {(r['item_name'], r['meal_type']) for r in rows(api.pg, api.owner.user_id)} == {
+        (name, 'all'), ('rice', meal)}
+    before = rows(api.pg, api.owner.user_id)
+    retained, replay = history(api.owner)
+    assert not changed(send(api, 'Forget "rice" for ' + meal)[0])
+    assert rows(api.pg, api.owner.user_id) == before
+    assert api.owner.load_history(retained.id) == replay
+    assert changed(send(api, 'Forget ' + json.dumps(name))[0])
+    assert [(r['item_name'], r['meal_type']) for r in rows(api.pg, api.owner.user_id)] == [('rice', meal)]
+
+
+@pytest.mark.parametrize('target', [
+    '"rice" on Friday', '"rice" briefly', '"rice" assuming availability',
+    '"rice" for weekends', '"rice" for dinner and lunch', '"rice" trailing',
+    '"rice" "soup"', '"rice', 'rice"', r'"bad\x20escape"',
+    r'"bad\uZZZZ"', r'"bad\ud800"', r'"bad\u0000"', r'"bad\nname"',
+    r'"bad\tname"', r'"bad\u001fname"', '"bad\nname"',
+    '[]', '{}', '["rice"]', '{"name":"rice"}', '""', '"   "',
+    '"' + 'é' * 201 + '"', '“rice”', '`rice`',
+])
+def test_invalid_json_literal_or_trailing_clause_does_not_mutate_or_clear_history(api, target):
+    assert changed(send(api, 'Remember that I like soup')[0])
+    retained, replay = history(api.owner)
+    before = rows(api.pg, api.owner.user_id)
+    response, _, _ = send(api, 'Remember that I like ' + target)
+    assert not changed(response)
+    assert rows(api.pg, api.owner.user_id) == before
+    assert api.owner.load_history(retained.id) == replay
+
+
+@pytest.mark.parametrize('text', [
+    json.dumps('Remember that I like "rice"'),
+    '“Remember that I like rice”', '`Remember that I like rice`',
+])
+def test_quoting_entire_command_does_not_authorize_memory(api, text):
+    retained, replay = history(api.owner)
+    assert not changed(send(api, text)[0])
+    assert rows(api.pg, api.owner.user_id) == []
+    assert api.owner.load_history(retained.id) == replay
+
+
+def test_typed_json_literal_forget_matches_kind_and_exact_decoded_name(api):
+    target = 'spicy on weekends'
+    assert changed(send(api, 'Remember my flavor preference: ' + json.dumps(target))[0])
+    before = rows(api.pg, api.owner.user_id)
+    assert before[0]['item_name'] == target and before[0]['preference_kind'] == 'flavor'
+    send(api, 'Forget my cuisine preference: ' + json.dumps(target))
+    assert rows(api.pg, api.owner.user_id) == before
+    assert changed(send(api, 'Forget my flavor preference: ' + json.dumps(target))[0])
     assert rows(api.pg, api.owner.user_id) == []

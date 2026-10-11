@@ -37,3 +37,11 @@ Earlier regression logs: `/private/tmp/dd-explicit-memory-tests-expanded.log`, `
 PR19 is the test PR's base. Routes PR10/11, preference PR13/14 and completion source PR18 are upstream dependencies. Retarget only after dependencies land, then validate the resulting combined tree. Fresh independent reviews are required for source and tests. Keep rollout disabled until additive schema deployment, all companion PRs, compatibility checks and release gates pass. Rollback disables the feature without deleting memory or run receipts.
 
 Not checked here: production SQL, live OpenAI calls, deployment limits, staging streams, native UI or manual accessibility. These local tests do not authorize activation or claim successful deployment.
+
+## Literal-name grammar review follow-up (in progress)
+
+The agreed contract now accepts a bare single Unicode/alphanumeric token (internal apostrophe/hyphen permitted), or an explicit JSON string for a multiword or punctuation-bearing name. SET may have an exact outside-string breakfast/lunch/dinner suffix; FORGET may not. Decoded names retain internal spelling, punctuation and spaces, with existing surrounding-whitespace trimming and the 1–200 character limit. Malformed JSON and control characters are rejected. Whole-command quotes never authorize writes.
+
+This deliberately changes the earlier unquoted `Chef’s rice` positive case to `"Chef’s rice"`; the unquoted form now has its own negative test. That prior expectation was changed for the approved grammar contract, not to conceal a failing invariant.
+
+Before the source fix, source `60a14f2928bbb9fbdeba093b5c7079926389ab56` produced **7 actual assertion failures**, 71 deselected, 0 skipped in 4.93s. Reported `rice on Friday`, `rice briefly`, `rice assuming availability`, typed `spicy on weekends`, and forget variants all claimed a memory change; the deliberately tightened unquoted multiword case also wrote. Raw log: `/private/tmp/dd-explicit-memory-grammar-red.log`. The seven regression assertions remain unchanged. Strict JSON positives/negatives are authored; source merge and green/full runs pending.
