@@ -257,8 +257,8 @@ def agent_on(legacy, monkeypatch):
 
 
 def install_model(monkeypatch):
-    """Scripted Responses API at the HTTP transport: retrieve_menu, then preview_meal (preferred names first,
-    one repair), then a final message whose text falsely claims nutrition. Never reaches the network."""
+    """Scripted Responses API at the HTTP transport: retrieve_menu, read_intake, then preview_meal (preferred
+    names first, one repair), then a final message whose text falsely claims nutrition. Never reaches the network."""
     model = SimpleNamespace(requests=[], prefer=SAFE, mode='ok')
 
     def output_for(payload):
@@ -270,9 +270,10 @@ def install_model(monkeypatch):
         menu = next((out for name, out in outputs if name == 'retrieve_menu'), None)
         previews = [out for name, out in outputs if name == 'preview_meal']
         number = len(model.requests)
-        if model.mode == 'loop' or menu is None:
-            return [{'type': 'function_call', 'name': 'retrieve_menu', 'call_id': f'call_{number}',
-                     'id': f'fc_{number}', 'arguments': '{}', 'status': 'completed'}]
+        for tool in ('retrieve_menu', 'read_intake'):
+            if model.mode == 'loop' or tool not in [name for name, _ in outputs]:
+                return [{'type': 'function_call', 'name': tool, 'call_id': f'call_{number}',
+                         'id': f'fc_{number}', 'arguments': '{}', 'status': 'completed'}]
         if not previews or ('could not verify' in str(previews[-1]) and len(previews) < 2):
             menu_items = literal_eval(menu)['items'] if isinstance(menu, str) else menu['items']
             ordered = [i for name in model.prefer for i in menu_items if i['name'] == name] + menu_items
@@ -351,11 +352,10 @@ def result(legacy, route, **changes):
 
 def assert_error_shape(response, route):
     """Existing failure shapes: the app's HTTP error envelope or the in-stream terminal error chunk."""
-    if response.status_code != 200:
-        body = response.json()
-        assert body == http_error(response.status_code, body.get('message')) and isinstance(body['message'], str)
+    if route in STREAMS:
+        assert response.status_code == 200 and events(response)[-1] == {'type': 'error', 'error': 'Please try again.'}
     else:
-        assert route in STREAMS and events(response)[-1] == {'type': 'error', 'error': 'Please try again.'}
+        assert response.json() == http_error(500, 'Please try again.')
 
 
 def http_error(status, message):
@@ -485,7 +485,9 @@ def test_flag_on_single_meal_uses_agent_and_keeps_legacy_shape(agent_on, route):
     assert row['id'] == body['saved_plan_id'] and row['user_id'] == agent_on.owner.user_id
     assert row['date'] == DAY and row['meal_plan_data']['meal'] == 'dinner'
     assert close(row['meal_plan_data']['meal_plan']['totals'], trusted('Rice 🌶'))
-    if route not in STREAMS:
+    if route in STREAMS:
+        assert row['meal_plan_data']['date'] == DAY
+    else:
         assert UUID(body['generation_id']) and row['meal_plan_data']['generation_id'] == body['generation_id']
 
 
@@ -503,7 +505,9 @@ def test_flag_on_full_plan_uses_agent_and_saves_requested_date(agent_on, route):
     [row] = plans(agent_on)
     assert row['id'] == body['saved_plan_id'] and row['date'] == DAY and 'meal' not in row['meal_plan_data']
     assert close(row['meal_plan_data']['meal_plan']['totals'], trusted(*SAFE))
-    if route not in STREAMS:
+    if route in STREAMS:
+        assert row['meal_plan_data']['date'] == DAY
+    else:
         assert body['ask_feedback'] == 'Please rate this meal plan' and UUID(body['generation_id'])
         assert row['meal_plan_data']['generation_id'] == body['generation_id']
     assert agent_on.referrals == [agent_on.owner.user_id]
@@ -563,14 +567,32 @@ def test_flag_on_model_failure_before_write_returns_existing_error_without_gemin
     assert agent_on.gemini == [] and plans(agent_on) == []
 
 
-@pytest.mark.parametrize('route', ['/generate-meal-plan', '/generate-meal-plan-stream'])
-def test_flag_on_full_day_shares_one_bounded_model_budget(agent_on, route):
+@pytest.mark.parametrize('route,cap', [('/generate-meal', 8), ('/generate-meal-stream', 8),
+                                       ('/generate-meal-plan', 16), ('/generate-meal-plan-stream', 16)])
+def test_flag_on_model_budget_is_bounded_per_request(agent_on, route, cap):
     agent_on.model.mode = 'loop'
     response = post(agent_on, route)
     assert_error_shape(response, route)
-    # Three independent per-meal budgets of eight would allow 24 model requests.
-    assert 0 < len(agent_on.model.requests) <= 8
+    # A full day shares one budget; three independent per-meal budgets would allow 24 model requests.
+    assert 0 < len(agent_on.model.requests) <= cap
     assert agent_on.gemini == [] and plans(agent_on) == []
+
+
+@pytest.mark.parametrize('route', ['/generate-meal-plan', '/generate-meal-plan-stream'])
+def test_flag_on_full_day_shares_one_validation_repair(agent_on, route):
+    agent_on.profiles['owner']['dietary_restrictions'] = ['peanut']
+    agent_on.pg.sql(f"""UPDATE users SET dietary_restrictions = '["peanut"]' WHERE id = '{agent_on.owner.user_id}'""")
+    agent_on.model.prefer = ['Peanut Pancakes', 'Oatmeal', 'Chicken Bowl', 'Peanut Noodles', 'Rice 🌶']
+    response = post(agent_on, route)
+    assert_error_shape(response, route)
+    assert agent_on.gemini == [] and plans(agent_on) == []
+
+
+def test_kill_switch_keeps_gemini_path(agent_on, monkeypatch):
+    monkeypatch.setenv('DORMDISH_AGENT_KILL_SWITCH', 'true')
+    body = result(agent_on, '/generate-meal')
+    assert [kind for kind, _ in agent_on.gemini] == ['agent'] and agent_on.model.requests == []
+    assert body['meal_plan']['meals'] == gemini_plan(['dinner'])['meals']
 
 
 @pytest.mark.parametrize('route', ['/generate-meal', '/generate-meal-stream'])
