@@ -120,10 +120,16 @@ BEGIN
         IF found IS NOT NULL THEN item := found[1]; meal := lower(found[2]); END IF;
     END IF;
     item := preference_item_name(item);
-    IF length(item) NOT BETWEEN 1 AND 200 OR item ~ '^["'']|["'']$'
-        OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|unless|if|then|but|except|only|just|for|now|this|during|next|current|maybe|perhaps|probably|not|no|and|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
-        OR item ~* '\mand (also|i|do|don''t|never)\M' OR item ~* '\mfor (breakfast|lunch|dinner)\M'
-        OR lower(item) IN ('that','it','this','that preference','my preference','everything','all preferences')
+    -- Accept a bounded bare name, never an arbitrary trailing sentence or clause.
+    IF length(item) NOT BETWEEN 1 AND 200
+        OR item !~ '^[[:alnum:]]+([''’-][[:alnum:]]+)*( [[:alnum:]]+([''’-][[:alnum:]]+)*){0,5}$'
+        OR item ~* '\m(i|me|my|mine|we|us|our|you|your|he|she|they|their|it|its|that|these|those)\M'
+        OR item ~* '\m(am|is|are|was|were|be|been|being|do|does|did|have|has|had|can|could|will|would|shall|should|must|may|might|cannot)\M'
+        OR item ~* '\m(don|doesn|didn|won|wouldn|isn|aren|wasn|weren|haven|hasn|hadn|couldn|shouldn|mustn|can)[''’]?t\M'
+        OR item ~* '\m(never|not|no|without|unless|if|then|but|except|only|just|maybe|perhaps|probably|and|or|nor|when|whenever|while|because|although|though|whether|otherwise|instead|despite)\M'
+        OR item ~* '\m(tonight|today|tomorrow|temporarily|temporary|for|now|this|during|next|current|until|till|through|before|after|since|once|permanently)\M'
+        OR item ~* '\m(save|saved|saving|store|stored|storing|persist|persisted|persisting|allergy|allergic|allergies|restriction|restrictions|remember|forget|ignore|instructions)\M'
+        OR lower(item) IN ('everything','all preferences')
         THEN RETURN NULL; END IF;
     RETURN jsonb_build_object('operation',operation,'item_name',item,'category',category,'preference_kind',kind,'meal_type',meal,'exact_kind',kind<>'food_item');
 END $$;
