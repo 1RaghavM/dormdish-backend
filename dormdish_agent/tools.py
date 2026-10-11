@@ -25,6 +25,9 @@ class FoodContext:
     restrictions: tuple[str, ...] = ()
     allergens: tuple[str, ...] = ()
     preferences: dict = field(default_factory=dict)
+    restaurant: str | None = None
+    model_limit: int = 8
+    validation_limit: int = 2
     snapshot: MenuSnapshot | None = field(default=None, init=False)
     proposal: MealProposal | None = field(default=None, init=False)
     validation_attempts: int = field(default=0, init=False)
@@ -51,7 +54,7 @@ class FoodContext:
 
     def claim_model(self):
         self.model_calls += 1
-        if self.model_calls > 8:
+        if self.model_calls > self.model_limit:
             raise ValueError('Model request budget exhausted')
 
     async def menu(self) -> MenuSnapshot:
@@ -63,6 +66,10 @@ class FoodContext:
         for row in rows:
             if row.get('meal') not in (None, self.planning.meal_type):
                 continue
+            if self.restaurant:
+                items = (row.get('menu_data') or {}).get('items') or []
+                row = {**row, 'menu_data': {'items': [i for i in items if isinstance(i, dict)
+                       and str(i.get('restaurant') or '').lower() == self.restaurant.lower()]}}
             self.snapshot = build_menu_snapshot(row, university=self.university, context=self.planning,
                                                 now=datetime.now(timezone.utc), max_age=timedelta(hours=24))
             if len(json.dumps(self.snapshot.items).encode()) > 128_000:
@@ -95,7 +102,7 @@ class FoodContext:
     def preview(self, selections: list[Selection]) -> dict:
         self.validation_attempts += 1
         self.proposal = None
-        if self.validation_attempts > 2:
+        if self.validation_attempts > self.validation_limit:
             raise ValueError('The single meal-validation repair attempt was exhausted')
         if self.snapshot is None:
             raise ValueError('Retrieve the current menu before selecting a meal')
