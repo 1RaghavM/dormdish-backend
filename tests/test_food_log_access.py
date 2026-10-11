@@ -47,7 +47,7 @@ def schema(pg):
     migration = Path(os.environ.get('DD_FOOD_LOG_MIGRATION', ROOT / 'migrations/secure_food_log_access.sql')).read_text()
     pg.sql(migration)
     pg.sql(migration)
-    return before
+    return before, pg.sql('SELECT jsonb_agg(to_jsonb(f)) FROM food_log f')
 
 
 @pytest.fixture
@@ -62,7 +62,7 @@ def rows(pg, schema):
 
 
 def test_existing_rows_survive_repeated_migration(pg, schema):
-    assert pg.sql('SELECT jsonb_agg(to_jsonb(f)) FROM food_log f') == schema
+    assert schema[0] == schema[1]
     assert pg.sql("SELECT relrowsecurity FROM pg_class WHERE oid='food_log'::regclass") == 't'
     assert pg.sql("SELECT count(*) FROM pg_policies WHERE tablename='food_log' AND policyname='Allow service role full access'") == '0'
 
