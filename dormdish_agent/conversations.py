@@ -75,6 +75,10 @@ class AgentStore:
                          p_request_id=str(request.request_id), p_request=request.model_dump(mode="json"))
         return data["claimed"], RunState.model_validate(data["run"])
 
+    def apply_memory_turn(self, conversation_id: UUID, request_id: UUID) -> RunState:
+        return RunState.model_validate(self._rpc("memory_turn", p_conversation_id=str(conversation_id),
+                                                 p_request_id=str(request_id)))
+
     def get_run(self, request_id: UUID) -> RunState:
         return RunState.model_validate(self._rpc("get_run", p_request_id=str(request_id)))
 

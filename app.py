@@ -6956,7 +6956,7 @@ async def debug_all_preferences(
         raise HTTPException(status_code=500, detail="Failed to retrieve debug preferences")
 
 
-@app.delete("/preferences/favorite/{item_name}", summary="Remove from favorites")
+@app.delete("/preferences/favorite/{item_name:path}", summary="Remove from favorites")
 async def remove_favorite(
     item_name: str,
     current_user=Depends(require_premium)
@@ -6989,7 +6989,7 @@ async def remove_favorite(
         raise HTTPException(status_code=500, detail="Failed to remove favorite")
 
 
-@app.delete("/preferences/dislike/{item_name}", summary="Remove from dislikes")
+@app.delete("/preferences/dislike/{item_name:path}", summary="Remove from dislikes")
 async def remove_dislike(
     item_name: str,
     current_user=Depends(require_premium)
