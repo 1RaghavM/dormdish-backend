@@ -23,6 +23,7 @@ dependencies = [
     "supabase",
     "stripe",
     "openai-agents==0.8.1",
+    "openai==2.26.0",
     "google-genai==1.68.0",
     "PyJWT==2.10.1",
     "email-validator==2.2.0",
