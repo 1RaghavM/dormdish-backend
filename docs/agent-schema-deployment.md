@@ -31,3 +31,20 @@ Compatibility gate, checked through the authenticated Vercel CLI without logging
 `secure_food_log_access.sql` (identical to main; SHA-256 `68a1d71c79a81583f9b088ce26f84d05157eb6df55f8a95a0cc7d4f3d9932919`) was then applied via the CLI (`/private/tmp/dd-food-log-apply.json`). Verification (`/private/tmp/dd-food-log-verify.json`): RLS enabled, no policies, anon/authenticated have no privileges, service-role CRUD retained with `rolbypassrls` true. A `limit=0` anon REST probe returned 401; `https://api.dormdish.ai/health` stayed 200. No rows were read or changed.
 
 Backend main `d5292a5` (meal completion PR17/18 and explicit memory PR19/20) is deployed to production and serving `/health` 200 with both features off: `DORMDISH_COMPLETION_ENABLED` and `DORMDISH_EXPLICIT_MEMORY_ENABLED` are unset in Vercel. `add_meal_completion.sql` and `add_explicit_preference_memory.sql` remain undeployed.
+
+## Meal completion and explicit memory schema
+
+With the user's approval, applied after the stack merged (main `d5292a5`, 863 tests), each with a prepended session `lock_timeout = '5s'` and otherwise the file as merged:
+
+| File | SHA-256 | Result |
+|---|---|---|
+| `add_meal_completion.sql` | `c9e03bffcbb7c2a4a0b52cbb735359eeec01730fb8600458a62b1d87ca6e2250` | Applied successfully |
+| `add_explicit_preference_memory.sql` | `752e695dace9c533b407788ed88df89e9aaa95dc65c52d0ca6de9c9456230b51` | Applied successfully |
+
+Tables were small (saved_meal_plans 197, food_log 814, user_preferences 44 estimated rows), so the `completion_version` volatile-default rewrite was brief. Verification (`/private/tmp/dd-stack-schema-verify.json`): new columns present; `user_preferences_meal_type_check` allows `all`; all 25 agent/preference/completion functions are security-invoker, executable by service_role only; `meal_completions` and `meal_completion_requests` have RLS with no client access. `/health` stayed 200. Both features remain off (flags unset in Vercel). Preflight: `/private/tmp/dd-stack-schema-preflight.json`; apply output `/private/tmp/dd-agent-apply-add_*.json`.
+
+## Sensitive public tables
+
+The post-deploy audit found 20 public tables with RLS disabled and full anon/authenticated privileges, reachable through the Supabase REST API (zero-row anon probes returned 200). With the user's approval, `restrict_sensitive_public_tables.sql` (SHA-256 `16c293b515365a5b3fb703bb218de949999d6ba61279594338719f8b4ca94b10`) locked the three most sensitive: `password_reset_codes`, `push_tokens`, `users_backup_users_backup_20251021` (kept, not dropped). Their only code consumers are the backend and admin dashboard, both verified service_role. After: RLS on, no anon/authenticated privileges, service-role CRUD retained; anon probes return 401; `/health` 200 (`/private/tmp/dd-sensitive-{preflight,apply,verify}.json`).
+
+Still exposed pending an independent compatibility audit: announcement_interactions, announcements, app_store_metrics, cleanup_logs, gemini_caches, instagram_analysis, instagram_insights, instagram_posts, instagram_sync_status, menus, referral_codes, referral_events, referral_rewards, school_requests, universities, user_meal_plans, waitlist_users. `barcode_cache` has a public `true` policy. `saved_meal_plans` grants client roles all privileges but its RLS policies require `auth.uid()`, which custom sessions never provide.
