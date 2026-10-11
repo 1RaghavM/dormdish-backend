@@ -5,6 +5,7 @@ Handles favorites, dislikes, and preference context building for meal plan perso
 """
 
 from typing import Dict, List, Optional
+from uuid import UUID
 from supabase import Client
 
 
@@ -46,93 +47,28 @@ class PreferenceManager:
     def __init__(self, supabase: Client):
         self.supabase = supabase
 
-    # ========== FAVORITES ==========
-
-    def add_favorite_meal_plan(
-        self,
-        user_id: str,
-        meal_plan_id: str,
-        meal_plan_name: str,
-        meal_type: str,
-    ) -> Dict:
+    def _mutate(self, operation: str, user_id: str, **values) -> Dict:
+        owner = str(UUID(str(user_id)))
         try:
-            result = (
-                self.supabase.table(TABLE)
-                .insert(
-                    {
-                        "user_id": user_id,
-                        "category": "favorite",
-                        "item_name": meal_plan_name,
-                        "item_type": "meal_plan",
-                        "meal_type": meal_type,
-                        "meal_plan_id": meal_plan_id,
-                    }
-                )
-                .execute()
-            )
-            return {"status": "success", "data": result.data}
-        except Exception as e:
-            # Unique constraint violation = already favorited, treat as success
-            if "23505" in str(e) or "duplicate" in str(e).lower():
-                return {"status": "already_exists"}
-            raise
+            return self.supabase.rpc("preference_" + operation,
+                {"p_user_id": owner, **{"p_" + key: value for key, value in values.items()}}).execute().data
+        except Exception:
+            # No fallback: a lost response may follow a committed write and history invalidation.
+            raise RuntimeError("Preference update unavailable; refresh preferences before retrying") from None
 
-    def add_favorite_food_item(
-        self,
-        user_id: str,
-        food_item_name: str,
-        meal_type: str,
-    ) -> Dict:
-        try:
-            result = (
-                self.supabase.table(TABLE)
-                .insert(
-                    {
-                        "user_id": user_id,
-                        "category": "favorite",
-                        "item_name": food_item_name,
-                        "item_type": "food_item",
-                        "meal_type": meal_type,
-                    }
-                )
-                .execute()
-            )
-            return {"status": "success", "data": result.data}
-        except Exception as e:
-            if "23505" in str(e) or "duplicate" in str(e).lower():
-                return {"status": "already_exists"}
-            raise
+    def add_favorite_meal_plan(self, user_id: str, meal_plan_id: str,
+                              meal_plan_name: str, meal_type: str) -> Dict:
+        return self._mutate("set", user_id, category="favorite", item_name=meal_plan_name,
+                            item_type="meal_plan", meal_type=meal_type, meal_plan_id=meal_plan_id)
 
-    # ========== DISLIKES ==========
+    def add_favorite_food_item(self, user_id: str, food_item_name: str, meal_type: str) -> Dict:
+        return self._mutate("set", user_id, category="favorite", item_name=food_item_name,
+                            item_type="food_item", meal_type=meal_type)
 
-    def add_dislike(
-        self,
-        user_id: str,
-        item_name: str,
-        item_type: str,
-        meal_type: str,
-        reason: Optional[str] = None,
-    ) -> Dict:
-        try:
-            result = (
-                self.supabase.table(TABLE)
-                .insert(
-                    {
-                        "user_id": user_id,
-                        "category": "dislike",
-                        "item_name": item_name,
-                        "item_type": item_type,
-                        "meal_type": meal_type,
-                        "reason": reason,
-                    }
-                )
-                .execute()
-            )
-            return {"status": "success", "data": result.data}
-        except Exception as e:
-            if "23505" in str(e) or "duplicate" in str(e).lower():
-                return {"status": "already_exists"}
-            raise
+    def add_dislike(self, user_id: str, item_name: str, item_type: str,
+                    meal_type: str, reason: Optional[str] = None) -> Dict:
+        return self._mutate("set", user_id, category="dislike", item_name=item_name,
+                            item_type=item_type, meal_type=meal_type, reason=reason)
 
     # ========== RETRIEVAL ==========
 
@@ -190,30 +126,10 @@ class PreferenceManager:
     # ========== DELETION ==========
 
     def remove_favorite(self, user_id: str, item_name: str) -> Dict:
-        result = (
-            self.supabase.table(TABLE)
-            .delete()
-            .eq("user_id", user_id)
-            .eq("category", "favorite")
-            .eq("item_name", item_name)
-            .execute()
-        )
-        if result.data:
-            return {"status": "deleted"}
-        return {"status": "not_found"}
+        return self._mutate("forget", user_id, category="favorite", item_name=item_name)
 
     def remove_dislike(self, user_id: str, item_name: str) -> Dict:
-        result = (
-            self.supabase.table(TABLE)
-            .delete()
-            .eq("user_id", user_id)
-            .eq("category", "dislike")
-            .eq("item_name", item_name)
-            .execute()
-        )
-        if result.data:
-            return {"status": "deleted"}
-        return {"status": "not_found"}
+        return self._mutate("forget", user_id, category="dislike", item_name=item_name)
 
 
 def build_preference_context(
