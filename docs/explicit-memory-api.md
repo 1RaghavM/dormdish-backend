@@ -9,6 +9,8 @@ Accepted literal examples:
 - `Remember that I don't like mushrooms` (curly apostrophe also accepted): global soft dislike.
 - `Remember that I like rice for dinner`: meal-scoped favorite.
 - `Remember my flavor preference: spicy`, `Remember my cuisine preference: Indian`, `Remember my texture preference: crunchy`: typed global tastes, all soft.
+- `Remember my flavor dislike: spicy` (also cuisine/texture), optionally `for dinner`: change the typed taste category without recasting it as a food.
+- `Forget my flavor preference: spicy` or `Forget my flavor dislike: spicy` (also cuisine/texture): remove only the named kind/category.
 - `Forget mushrooms`: remove the named soft preference across meals/categories.
 - `Forget my dislike of mushrooms`: remove that category only.
 - `Forget that preference`: resolve only an unambiguous preference written by the immediately preceding conversation turn; otherwise ask which.
