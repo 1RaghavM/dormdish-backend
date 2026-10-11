@@ -4278,6 +4278,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
     Rate limit: One meal plan per day. Meal plans reset at the start of each new day.
     """
     from meal_plan_agent import generate_meal_plan_with_agent
+    from dormdish_agent import legacy
+    agent_generation = legacy.enabled()
     t_start = time.time()
     menu_fetch_start = t_start
     try:
@@ -4313,9 +4315,10 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         existing_plan_check = supabase.table("saved_meal_plans")\
             .select("id, created_at")\
-            .eq("user_id", authenticated_user["id"])\
-            .eq("date", today)\
-            .execute()
+            .eq("user_id", authenticated_user["id"])
+        # The agent path saves to the requested date, so that date must also be free.
+        existing_plan_check = (existing_plan_check.in_("date", [today, meal_plan_request.date]) if agent_generation
+                               else existing_plan_check.eq("date", today)).execute()
         
         if existing_plan_check.data and len(existing_plan_check.data) > 0:
             existing = existing_plan_check.data[0]
@@ -4553,24 +4556,31 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             logger.debug(f"Meal plan cache lookup skipped: {e}")
 
         ai_start = time.time()
-        try:
-            agent_result, agent_raw_text = await generate_meal_plan_with_agent(
-                user_payload=agent_user_payload,
-                menu_payload=agent_menu_payload,
-                nutrition_targets=agent_nutrition_targets,
-                user_preferences_context=user_preferences_context,
-                exclude_meals=meal_plan_request.exclude_meals,
-                cached_content=cache_name,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=500, detail="Please try again.")
+        if agent_generation:
+            excluded = {m.lower() for m in meal_plan_request.exclude_meals or []}
+            plan_json, agent_raw_text = await legacy.generate(
+                supabase, authenticated_user, agent_daily_targets, meal_plan_request.dining_hall, meal_plan_request.date,
+                {m: _calculate_meal_targets(agent_nutrition_targets, {}, m) for m in ("breakfast", "lunch", "dinner") if m not in excluded},
+                meal_plan_request.restaurant)
+        else:
+            try:
+                agent_result, agent_raw_text = await generate_meal_plan_with_agent(
+                    user_payload=agent_user_payload,
+                    menu_payload=agent_menu_payload,
+                    nutrition_targets=agent_nutrition_targets,
+                    user_preferences_context=user_preferences_context,
+                    exclude_meals=meal_plan_request.exclude_meals,
+                    cached_content=cache_name,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=500, detail="Please try again.")
+            plan_json = agent_result.model_dump()
         ai_end = time.time()
-
-        plan_json = agent_result.model_dump()
 
         unknown_items: List[str] = []
         used_names_global = set()
-        for meal_key in ["breakfast", "lunch", "dinner"]:
+        # Agent meals are already validated canonical items; name matching could only drop them.
+        for meal_key in ([] if agent_generation else ["breakfast", "lunch", "dinner"]):
             meal = plan_json.get("meals", {}).get(meal_key)
             if not isinstance(meal, dict):
                 continue
@@ -4735,7 +4745,7 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
                 "id": plan_id,
                 "user_id": authenticated_user["id"],
                 "dining_hall": meal_plan_request.dining_hall,
-                "date": today,
+                "date": meal_plan_request.date if agent_generation else today,
                 "meal_plan_data": response_payload,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
@@ -4783,6 +4793,8 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
     Auto-saves the result to saved_meal_plans with a ``meal`` key.
     """
     from meal_plan_agent import generate_meal_plan_with_agent
+    from dormdish_agent import legacy
+    agent_generation = legacy.enabled()
     t_start = time.time()
     menu_fetch_start = t_start
     try:
@@ -5061,25 +5073,30 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
             logger.debug(f"Meal plan cache lookup skipped: {e}")
 
         ai_start = time.time()
-        try:
-            agent_result, agent_raw_text = await generate_meal_plan_with_agent(
-                user_payload=agent_user_payload,
-                menu_payload=agent_menu_payload,
-                nutrition_targets=agent_nutrition_targets,
-                user_preferences_context=user_preferences_context,
-                exclude_meals=exclude_meals,
-                cached_content=cache_name,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=500, detail="Please try again.")
+        if agent_generation:
+            plan_json, agent_raw_text = await legacy.generate(
+                supabase, authenticated_user, agent_daily_targets, req.dining_hall, req.date,
+                {meal_name: meal_targets}, req.restaurant)
+        else:
+            try:
+                agent_result, agent_raw_text = await generate_meal_plan_with_agent(
+                    user_payload=agent_user_payload,
+                    menu_payload=agent_menu_payload,
+                    nutrition_targets=agent_nutrition_targets,
+                    user_preferences_context=user_preferences_context,
+                    exclude_meals=exclude_meals,
+                    cached_content=cache_name,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=500, detail="Please try again.")
+            plan_json = agent_result.model_dump()
         ai_end = time.time()
-
-        plan_json = agent_result.model_dump()
 
         # --- Post-process: fuzzy match items (only for the requested meal) ---
         unknown_items: List[str] = []
         used_names_global = set()
-        meal = plan_json.get("meals", {}).get(meal_name)
+        # Agent meals are already validated canonical items; name matching could only drop them.
+        meal = None if agent_generation else plan_json.get("meals", {}).get(meal_name)
         if isinstance(meal, dict):
             new_items = []
             for item in meal.get("items", []) or []:
@@ -5227,7 +5244,7 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
                 "id": plan_id,
                 "user_id": authenticated_user["id"],
                 "dining_hall": req.dining_hall,
-                "date": today,
+                "date": req.date if agent_generation else today,
                 "meal_plan_data": {**response_payload, "meal": meal_name},
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
@@ -5269,6 +5286,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
     """Generate a meal plan with streaming updates. Streams thinking and response generation in real-time."""
     try:
         from meal_plan_agent import generate_meal_plan_with_streaming
+        from dormdish_agent import legacy
+        agent_generation = legacy.enabled()
         
         authenticated_user = None
         if authorization and authorization.startswith('Bearer '):
@@ -5457,6 +5476,7 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
 
         # Get today's date for auto-save (same timezone as other endpoints)
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        save_date = meal_plan_request.date if agent_generation else today
 
         # Look up Gemini cache handle
         cache_name = None
@@ -5478,14 +5498,22 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
         async def event_generator():
             """Generator function for Server-Sent Events"""
             try:
-                async for chunk in generate_meal_plan_with_streaming(
-                    user_payload=user_payload,
-                    menu_payload=menu_payload,
-                    nutrition_targets=nutrition_targets,
-                    user_preferences_context=user_preferences_context,
-                    exclude_meals=meal_plan_request.exclude_meals,
-                    cached_content=cache_name,
-                ):
+                if agent_generation:
+                    excluded = {m.lower() for m in meal_plan_request.exclude_meals or []}
+                    source = legacy.events(
+                        supabase, authenticated_user, agent_daily_targets, meal_plan_request.dining_hall, meal_plan_request.date,
+                        {m: _calculate_meal_targets(nutrition_targets, {}, m) for m in ("breakfast", "lunch", "dinner") if m not in excluded},
+                        meal_plan_request.restaurant)
+                else:
+                    source = generate_meal_plan_with_streaming(
+                        user_payload=user_payload,
+                        menu_payload=menu_payload,
+                        nutrition_targets=nutrition_targets,
+                        user_preferences_context=user_preferences_context,
+                        exclude_meals=meal_plan_request.exclude_meals,
+                        cached_content=cache_name,
+                    )
+                async for chunk in source:
                     if isinstance(chunk, dict) and chunk.get("type") == "complete":
                         chunk["preferences_snapshot"] = preferences_snapshot
 
@@ -5498,13 +5526,13 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
                                 "meal_plan": chunk.get("meal_plan"),
                                 "nutrition_targets": nutrition_targets,
                                 "dining_hall": meal_plan_request.dining_hall,
-                                "date": today,
+                                "date": save_date,
                             }
                             save_data = {
                                 "id": plan_id,
                                 "user_id": authenticated_user["id"],
                                 "dining_hall": meal_plan_request.dining_hall,
-                                "date": today,
+                                "date": save_date,
                                 "meal_plan_data": response_payload,
                                 "created_at": datetime.now().isoformat(),
                                 "updated_at": datetime.now().isoformat(),
@@ -5566,6 +5594,8 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
     """
     try:
         from meal_plan_agent import generate_meal_plan_with_streaming
+        from dormdish_agent import legacy
+        agent_generation = legacy.enabled()
 
         # --- Validate meal name ---
         meal_name = req.meal.lower().strip()
@@ -5584,6 +5614,7 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
             raise HTTPException(status_code=401, detail="Authentication required.")
 
         today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        save_date = req.date if agent_generation else today
 
         # --- Rate limit: check if this specific meal was already generated ---
         already_planned = await _get_existing_individual_meals(str(authenticated_user["id"]), req.date)
@@ -5811,14 +5842,19 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
                 thinking_msg = {"type": "thinking", "content": f"Analyzing menu items for {meal_name}..."}
                 yield f"data: {json.dumps(thinking_msg)}\n\n"
 
-                async for chunk in generate_meal_plan_with_streaming(
-                    user_payload=user_payload,
-                    menu_payload=menu_payload,
-                    nutrition_targets=nutrition_targets,
-                    user_preferences_context=user_preferences_context,
-                    exclude_meals=exclude_meals,
-                    cached_content=cache_name,
-                ):
+                if agent_generation:
+                    source = legacy.events(supabase, authenticated_user, agent_daily_targets, req.dining_hall, req.date,
+                                           {meal_name: meal_targets}, req.restaurant)
+                else:
+                    source = generate_meal_plan_with_streaming(
+                        user_payload=user_payload,
+                        menu_payload=menu_payload,
+                        nutrition_targets=nutrition_targets,
+                        user_preferences_context=user_preferences_context,
+                        exclude_meals=exclude_meals,
+                        cached_content=cache_name,
+                    )
+                async for chunk in source:
                     if isinstance(chunk, dict) and chunk.get("type") == "thinking":
                         # Make thinking messages meal-specific
                         content = chunk.get("content", "")
@@ -5833,7 +5869,8 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
                         if isinstance(plan_data, dict):
                             unknown_items: List[str] = []
                             used_names_global = set()
-                            meal_obj = plan_data.get("meals", {}).get(meal_name)
+                            # Agent meals are already validated canonical items; name matching could only drop them.
+                            meal_obj = None if agent_generation else plan_data.get("meals", {}).get(meal_name)
                             if isinstance(meal_obj, dict):
                                 new_items = []
                                 for item in meal_obj.get("items", []) or []:
@@ -5900,13 +5937,13 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
                                 "nutrition_targets": nutrition_targets,
                                 "daily_targets": daily_targets,
                                 "dining_hall": req.dining_hall,
-                                "date": today,
+                                "date": save_date,
                             }
                             save_data = {
                                 "id": plan_id,
                                 "user_id": authenticated_user["id"],
                                 "dining_hall": req.dining_hall,
-                                "date": today,
+                                "date": save_date,
                                 "meal_plan_data": {**response_payload, "meal": meal_name},
                                 "created_at": datetime.now().isoformat(),
                                 "updated_at": datetime.now().isoformat(),
