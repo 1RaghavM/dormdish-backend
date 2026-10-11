@@ -9,3 +9,7 @@ Actual pinned Agents/Responses execution uses synthetic HTTP and existing read-o
 Two genuine assertion failures reproduce missing source persistence and uncited partial answers on the feature revision: `test_search_sources_survive_persisted_assistant_text_without_model_supplied_links` and `test_failed_search_continuation_never_emits_uncited_web_claims`. The owner received the defects; assertions remain unchanged pending a fix.
 
 Full-suite integration and fresh independent review remain pending. No paid model, production data, deployed endpoint, native UI, real hosted-search accuracy, or rollout checks were run. Backend rollout remains disabled; model credentials, deployment limits, schema order, and native citation compatibility remain separate release gates.
+
+Expanded independent coverage: **30 passed, 2 failed** across 32 cases, `/private/tmp/dd-public-search-independent-red.log`. Additional checks submit forged model search scope/query and actual save/remember/forget function attempts after malicious search content. The source remains unchanged at `f718156`.
+
+The first full-suite checkpoint `c1db7fa7485d789afc71bff3a6cb9e929fbfb341` produced **377 passed, 2 failed, 0 skipped** in 26.80s with `DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -q -o addopts=''`; `/private/tmp/dd-public-search-independent-full-red.log`. Both failures are the same citation assertions, not fixture/import failures. Four subsequent security cases passed in the focused run; their full-suite integration awaits the feature fix.
