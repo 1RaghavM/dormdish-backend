@@ -19,8 +19,8 @@ def preference_schema(pg):
         item_type text NOT NULL CHECK (item_type IN ('meal_plan', 'food_item')),
         meal_type text NOT NULL CHECK (meal_type IN ('breakfast', 'lunch', 'dinner')),
         meal_plan_id text, reason text, created_at timestamptz NOT NULL DEFAULT now());
-        CREATE UNIQUE INDEX ON user_preferences(user_id, category, lower(item_name), meal_type);
-        GRANT SELECT, INSERT, UPDATE, DELETE ON user_preferences TO service_role;''')
+        CREATE UNIQUE INDEX idx_user_preferences_unique ON user_preferences(user_id, category, lower(item_name));
+        GRANT SELECT, INSERT, UPDATE, DELETE ON user_preferences TO service_role, anon, authenticated;''')
     pg.sql((Path(__file__).resolve().parents[1] / 'migrations/atomic_preferences.sql').read_text())
 
 
@@ -88,6 +88,8 @@ def test_legacy_long_name_can_be_forgotten(stores):
 def test_untrusted_database_roles_cannot_select_another_owner(stores):
     owner, _ = stores
     for role in ('anon', 'authenticated'):
+        with pytest.raises(RuntimeError, match='permission denied'):
+            owner.client.sql(f"SET ROLE {role}; SELECT * FROM user_preferences")
         with pytest.raises(RuntimeError, match='permission denied'):
             owner.client.sql(f"SET ROLE {role}; SELECT preference_forget('{owner.user_id}', 'favorite', 'Rice')")
 
