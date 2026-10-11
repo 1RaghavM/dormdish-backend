@@ -278,3 +278,59 @@ def test_search_content_cannot_enable_write_tools(tool):
     turn, events, requests = exercise(respond)
     assert len(requests) == 3 and events[-1].type == 'error'
     assert turn.context.client.queries == [] and turn.context.proposal is None and turn.history == []
+
+
+@pytest.mark.parametrize('mode', ['deadline', 'cancel'])
+def test_buffered_web_answer_is_discarded_when_continuation_is_interrupted(mode):
+    async def run():
+        started, closed = asyncio.Event(), asyncio.Event()
+        requests, visible = [], []
+        class PartialAnswer(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                delta = {'type': 'response.output_text.delta', 'delta': 'Unfinished web claim. ' * 12,
+                    'item_id': 'partial', 'output_index': 0, 'content_index': 0, 'sequence_number': 0}
+                try:
+                    yield ('data: ' + json.dumps(delta) + '\n\n').encode()
+                    started.set()
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+        def respond(request):
+            payload = json.loads(request.content)
+            requests.append(payload)
+            if len(requests) == 1:
+                return response([tool_call('search_public_dining', {'topic': 'location'})])
+            if is_search(payload):
+                return search_result()
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=PartialAnswer())
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async with AsyncOpenAI(api_key='synthetic', http_client=http) as client:
+                turn = AgentTurn(food_context(), TurnRequest(request_id=uuid4(), text='Hall hours'),
+                    uuid4(), [], client=client, deadline_seconds=.1 if mode == 'deadline' else 45)
+                async def consume():
+                    async for event in turn.stream():
+                        visible.append(event)
+                task = asyncio.create_task(consume())
+                await asyncio.wait_for(started.wait(), 2)
+                if mode == 'cancel':
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    await task
+                await asyncio.wait_for(closed.wait(), 2)
+                assert not any(event.type == 'text_delta' for event in visible)
+                assert turn.assistant_text == '' and turn.history == [] and len(requests) == 3
+                assert turn.state.events[-1].data.code == ('deadline' if mode == 'deadline' else 'cancelled')
+                RunState.model_validate(turn.state.model_dump())
+    asyncio.run(run())
+
+
+def test_citation_suffix_cannot_overflow_answer_limit_or_expose_uncited_text():
+    def respond(payload, number):
+        if number == 1:
+            return response([tool_call('search_public_dining', {'topic': 'location'})])
+        return search_result() if is_search(payload) else answer('x' * 16000)
+    turn, events, _ = exercise(respond)
+    assert events[-1].type == 'error' and turn.assistant_text == '' and turn.history == []
+    assert not any(event.type == 'text_delta' for event in events)
