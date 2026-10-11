@@ -45,7 +45,8 @@ DECLARE removed integer;
 BEGIN
     p_item_name := preference_item_name(p_item_name);
     IF p_category IS NULL OR p_category NOT IN ('favorite', 'dislike')
-        OR p_item_name IS NULL OR length(p_item_name) NOT BETWEEN 1 AND 200
+        -- Legacy rows have no name-length limit; the new-write cap must not prevent forgetting them.
+        OR p_item_name IS NULL OR length(p_item_name) = 0
         THEN RAISE EXCEPTION 'preference_invalid'; END IF;
     PERFORM 1 FROM users WHERE id = p_user_id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'preference_not_found'; END IF;

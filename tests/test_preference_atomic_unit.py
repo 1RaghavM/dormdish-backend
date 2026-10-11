@@ -76,6 +76,15 @@ def test_concurrent_opposite_buttons_leave_one_choice(stores):
     assert owner.client.sql(f"SELECT count(*) FROM user_preferences WHERE user_id = '{owner.user_id}'") == '1'
 
 
+def test_legacy_long_name_can_be_forgotten(stores):
+    owner, _ = stores
+    name = 'x' * 201
+    owner.client.sql(f"""INSERT INTO user_preferences(user_id, category, item_name, item_type, meal_type)
+        VALUES ('{owner.user_id}', 'favorite', '{name}', 'food_item', 'dinner')""")
+    assert PreferenceManager(owner.client).remove_favorite(owner.user_id, name)['status'] == 'deleted'
+    assert owner.client.sql(f"SELECT count(*) FROM user_preferences WHERE user_id = '{owner.user_id}'") == '0'
+
+
 def test_untrusted_database_roles_cannot_select_another_owner(stores):
     owner, _ = stores
     for role in ('anon', 'authenticated'):
