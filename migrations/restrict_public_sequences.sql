@@ -1,0 +1,5 @@
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO service_role;
+COMMIT;
