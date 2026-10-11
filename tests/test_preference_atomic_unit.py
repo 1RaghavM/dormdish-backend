@@ -83,11 +83,12 @@ def test_untrusted_database_roles_cannot_select_another_owner(stores):
             owner.client.sql(f"SET ROLE {role}; SELECT preference_forget('{owner.user_id}', 'favorite', 'Rice')")
 
 
-def test_invalid_preferences_do_not_write_or_leak_sql(stores):
+@pytest.mark.parametrize('name', [' ', '\t', '\u00a0', '\u0085', '\u202f'])
+def test_invalid_preferences_do_not_write_or_leak_sql(stores, name):
     owner, _ = stores
     manager = PreferenceManager(owner.client)
     with pytest.raises(RuntimeError) as failure:
-        manager.add_dislike(owner.user_id, ' ', 'food_item', 'dinner')
+        manager.add_dislike(owner.user_id, name, 'food_item', 'dinner')
     assert 'SQL' not in str(failure.value) and 'preference_invalid' not in str(failure.value)
     assert owner.client.sql(f"SELECT count(*) FROM user_preferences WHERE user_id = '{owner.user_id}'") == '0'
 
