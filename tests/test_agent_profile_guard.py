@@ -193,3 +193,56 @@ def test_database_profile_is_owner_scoped_private_and_not_auth_cache(api, monkey
     for role in ['anon', 'authenticated']:
         with pytest.raises(RuntimeError, match='permission denied'):
             api.pg.sql(f"SET ROLE {role}; SELECT agent_get_profile('{api.owner.user_id}')")
+
+
+@pytest.fixture
+def dietary_menu(api):
+    original = api.pg.sql('SELECT menu_data FROM menus LIMIT 1')
+    yield
+    api.pg.sql("UPDATE menus SET menu_data = '" + original.replace("'", "''") + "'")
+
+
+def set_stored_diet(api, diet, tags):
+    api.profiles['owner']['dietary_preference'] = 'omnivore'  # Deliberately stale auth cache.
+    api.pg.sql(f"UPDATE users SET dietary_preference = '{diet}' WHERE id = '{api.owner.user_id}'")
+    if tags == 'absent':
+        api.pg.sql("UPDATE menus SET menu_data = menu_data #- '{items,0,dietary_tags}'")
+    else:
+        encoded = json.dumps(tags)
+        api.pg.sql(f"UPDATE menus SET menu_data = jsonb_set(menu_data, '{{items,0,dietary_tags}}', '{encoded}')")
+
+
+@pytest.mark.parametrize('diet,tag', [('vegan', 'vegan'), ('vegetarian', 'vegetarian'),
+    ('pescetarian', 'pescatarian'), ('keto', 'keto'), ('gluten_free', None), ('dairy_free', None)])
+def test_current_profile_diet_enum_can_preview_and_apply(api, monkeypatch, dietary_menu, diet, tag):
+    set_stored_diet(api, diet, [tag] if tag else [])
+    action = preview(api, monkeypatch)
+    assert action['proposal']['totals']['carbs_g'] == 66  # Exact menu math, including for Keto.
+    assert side_effects(api)['plans'] == []
+    applied = api.client.post(f"/agent/actions/{action['id']}/confirm", json=confirmation().model_dump(mode='json'))
+    assert applied.status_code == 200, applied.text
+    saved = applied.json()['events'][-1]['data']['saved_plan_id']
+    payload = api.owner.get_saved_plan(saved)['plan']['meal_plan_data']
+    assert payload['nutrition_targets']['carbs_g'] == 200  # Keep current target; no guessed diet target.
+    assert payload['meal_plan']['totals']['carbs_g'] == 66
+    assert api.owner.get_profile()['profile']['dietary_preference'] == diet
+
+
+@pytest.mark.parametrize('diet', ['pescetarian', 'keto'])
+@pytest.mark.parametrize('tags', ['absent', None, [], ['unverified-diet-label']])
+def test_profile_diet_unknown_or_missing_menu_evidence_never_creates_action(
+    api, monkeypatch, dietary_menu, diet, tags
+):
+    set_stored_diet(api, diet, tags)
+    requests = install_model(monkeypatch)
+    conversation = api.owner.create_conversation()
+    response = api.client.post(f'/agent/conversations/{conversation.id}/messages', json=turn_body())
+    assert response.status_code == 200, response.text  # Accepted profile, rejected food evidence.
+    assert len(requests) == 3
+    result = next(item['output'] for item in requests[-1]['input']
+                  if item.get('type') == 'function_call_output' and item['call_id'] == 'call_2')
+    assert result == 'This tool could not verify the requested data. Do not invent an answer; explain the limitation.'
+    assert not any(event['type'] in ('meal_preview', 'action_required') for event in events(response))
+    assert api.owner.get_conversation(conversation.id).pending_actions == []
+    state = side_effects(api)
+    assert state['plans'] == state['actions'] == []
