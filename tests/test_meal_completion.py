@@ -566,3 +566,82 @@ def test_duplicate_recovers_when_original_commits_and_plan_disappears_after_rece
         assert response.json() == committed[0]
     assert recorded(api) == committed
     assert api.client.get(f"/meal-completion-requests/{request['request_id']}").json() == committed[0]
+
+
+def test_rolling_write_quota_accepts_1000th_replays_and_rejects_without_mutation(api):
+    plan = seed(api)
+    original = body(api, plan)
+    first = put(api, plan, original)
+    # Bulk synthetic receipts represent earlier writes; one aged receipt is outside the rolling window.
+    api.pg.sql(f"""INSERT INTO meal_completion_requests(user_id, request_id, request, state)
+        SELECT '{api.owner}', gen_random_uuid(), request, state FROM meal_completion_requests,
+            generate_series(1, 998) WHERE request_id = '{original['request_id']}';
+        INSERT INTO meal_completion_requests(user_id, request_id, request, state, created_at)
+        SELECT '{api.owner}', gen_random_uuid(), request, state, now() - interval '25 hours'
+            FROM meal_completion_requests WHERE request_id = '{original['request_id']}';
+        INSERT INTO meal_completion_requests(user_id, request_id, request, state)
+        SELECT '{api.other}', gen_random_uuid(), request, state FROM meal_completion_requests,
+            generate_series(1, 500) WHERE request_id = '{original['request_id']}';""")
+    last = {**original, 'request_id': str(uuid4()), 'expected_revision': 1, 'selected_items': []}
+    final = put(api, plan, last)
+    assert final['revision'] == 2 and final['totals'] == ZERO
+    before = recorded(api)
+    receipts = api.pg.sql(f"SELECT count(*) FROM meal_completion_requests WHERE user_id = '{api.owner}'")
+    assert receipts == '1001'  # 1,000 recent, one expired.
+    rejected = {**original, 'request_id': str(uuid4()), 'expected_revision': 2}
+    put(api, plan, rejected, 429)
+    assert recorded(api) == before
+    assert api.pg.sql(f"SELECT count(*) FROM meal_completion_requests WHERE user_id = '{api.owner}'") == receipts
+    assert api.client.get(f"/meal-completion-requests/{rejected['request_id']}").status_code == 404
+    assert put(api, plan, original) == first and put(api, plan, last) == final
+    # The rolling write budget belongs to the owner, not the selected meal date.
+    tomorrow = seed(api, day='2026-10-11')
+    tomorrow_request = body(api, tomorrow, date='2026-10-11')
+    put(api, tomorrow, tomorrow_request, 429)
+    assert recorded(api, '2026-10-11') == []
+    assert api.client.get(f"/meal-completion-requests/{tomorrow_request['request_id']}").status_code == 404
+    api.client.headers['Authorization'] = 'Bearer other'
+    other_plan = seed(api, owner=api.other)
+    assert put(api, other_plan, body(api, other_plan))['revision'] == 1
+    # Aging one counted receipt opens exactly one slot without deleting its replay history.
+    api.client.headers['Authorization'] = 'Bearer owner'
+    api.pg.sql(f"UPDATE meal_completion_requests SET created_at = now() - interval '25 hours' "
+               f"WHERE user_id = '{api.owner}' AND request_id = '{original['request_id']}'")
+    assert put(api, plan, rejected)['revision'] == 3
+    assert put(api, plan, original) == first
+    put(api, plan, {**original, 'request_id': str(uuid4()), 'expected_revision': 3}, 429)
+
+
+def test_version_quota_accepts_100th_allows_updates_and_is_owner_date_scoped(api):
+    # Deleted historical plans legitimately retain completion rows without a saved-plan FK.
+    api.pg.sql(f"""INSERT INTO meal_completions(user_id, plan_id, plan_version, date,
+            revision, recorded_items, selected_items)
+        SELECT '{api.owner}', gen_random_uuid(), gen_random_uuid(), '{DAY}', 1, '[]', '[]'
+            FROM generate_series(1, 99);
+        INSERT INTO meal_completions(user_id, plan_id, plan_version, date,
+            revision, recorded_items, selected_items)
+        SELECT '{api.other}', gen_random_uuid(), gen_random_uuid(), '{DAY}', 1, '[]', '[]'
+            FROM generate_series(1, 50);""")
+    plan = seed(api)
+    request = body(api, plan)
+    first = put(api, plan, request)
+    assert len(recorded(api)) == 100
+    update = {**request, 'request_id': str(uuid4()), 'expected_revision': 1, 'selected_items': []}
+    final = put(api, plan, update)
+    assert final['revision'] == 2 and final['totals'] == ZERO
+    before = recorded(api)
+    overflow = seed(api)
+    rejected = body(api, overflow)
+    put(api, overflow, rejected, 429)
+    assert recorded(api) == before
+    assert current(api, overflow)['state']['revision'] == 0
+    assert api.pg.sql(f"SELECT count(*) FROM meal_completion_requests WHERE user_id = '{api.owner}'") == '2'
+    assert api.client.get(f"/meal-completion-requests/{rejected['request_id']}").status_code == 404
+    assert put(api, plan, request) == first and put(api, plan, update) == final
+    tomorrow = seed(api, day='2026-10-11')
+    assert put(api, tomorrow, body(api, tomorrow, date='2026-10-11'))['revision'] == 1
+    assert len(recorded(api)) == 100 and len(recorded(api, '2026-10-11')) == 1
+    api.client.headers['Authorization'] = 'Bearer other'
+    other_plan = seed(api, owner=api.other)
+    assert put(api, other_plan, body(api, other_plan))['revision'] == 1
+    assert len(recorded(api)) == 51
