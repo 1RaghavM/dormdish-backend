@@ -45,6 +45,8 @@ def test_public_search_isolated_from_private_context_and_carries_citations():
     assert events[-1].type == 'complete' and str(events[-1].data.citations[0].url) == URL
     assert events[-1].data.saved_plan_id is None and context.proposal is None
     assert context.client.queries == []
+    assert URL in turn.assistant_text and '](' in turn.assistant_text
+    assert ''.join(event.data.text for event in events if event.type == 'text_delta') == turn.assistant_text
 
 
 @pytest.mark.parametrize('options', [{'status': 'incomplete'}, {'url': 'file:///private/secret'},
