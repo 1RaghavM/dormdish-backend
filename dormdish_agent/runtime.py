@@ -131,6 +131,8 @@ class AgentTurn:
     def _error(self, code: str, message: str, retryable: bool = False):
         # Failed or cancelled partial tool histories must not be replayed next turn.
         self.history = []
+        if self.citations:
+            self.assistant_text = ''
         return self._event('error', {'code': code, 'message': message, 'retryable': retryable})
 
     async def stream(self):
@@ -165,7 +167,8 @@ class AgentTurn:
                             buffer += raw.delta
                             if len(self.assistant_text) > 16000:
                                 raise ValueError('Output budget exceeded')
-                            if len(buffer) >= 128:
+                            # Keep web-derived text with its verified links, including on interruption.
+                            if len(buffer) >= 128 and not self.citations:
                                 yield self._event('text_delta', {'text': buffer})
                                 buffer = ''
                     elif sdk_event.type == 'run_item_stream_event':
@@ -184,6 +187,13 @@ class AgentTurn:
                             if proposal and proposal.id != shown_proposal:
                                 shown_proposal = proposal.id
                                 yield self._event('meal_preview', {'proposal': proposal.model_dump(mode='json')})
+                if self.citations:
+                    sources = '\n\nSources: ' + ' '.join(
+                        f'[{index}](<{citation["url"]}>)' for index, citation in enumerate(self.citations, 1))
+                    if len(self.assistant_text) + len(sources) > 16000:
+                        raise ValueError('Output budget exceeded')
+                    self.assistant_text += sources
+                    buffer += sources
                 if buffer:
                     yield self._event('text_delta', {'text': buffer})
                 history = result.to_input_list()
