@@ -90,3 +90,28 @@ async def test_same_name_with_different_portions_remains_selectable(api, monkeyp
     menu = await api.fetch_nutrislice_menu("rutgers", "busch-dining-hall", "Busch", "2026-10-10")
     assert len(menu["items"]) == 6
     assert [item["calories"] for item in menu["items"] if item["meal"] == "dinner"] == [100, 200]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('flat', [False, True])
+async def test_scheduled_writer_preserves_same_menu_contract(monkeypatch, flat):
+    import refresh_menus as cron
+    item = {**food(), 'g_protein': 0, 'g_fat': 0, 'g_carbs': 0,
+            'allergens': [], 'dietary_tags': ['vegan'], 'nutrition_url': 'https://dining.example/rice'}
+    second = {**item, 'serving_size': '2 cups', 'calories': 200}
+    def parse(_html, meal, day, _url):
+        foods = [item, second, item]
+        return {'items': foods} if flat else {meal: {day: [{'foods': foods}]}}
+    monkeypatch.setattr(cron, 'fp_parse_menu', parse)
+    monkeypatch.setattr(cron, '_fetch_with_retries', AsyncMock(return_value='synthetic'))
+    menu = await cron.fetch_foodpro_menu(None, 'busch-dining-hall', '2026-10-09')
+    assert len(menu['items']) == 8
+    assert {i['meal'] for i in menu['items']} == {'breakfast', 'brunch', 'lunch', 'dinner'}
+    assert all(i['protein_g'] == i['fat_g'] == 0 for i in menu['items'])
+    assert all(i['allergens'] == [] and i['nutrition_url'] == item['nutrition_url'] for i in menu['items'])
+    assert datetime.fromisoformat(menu['fetched_at']).utcoffset() == timedelta(0)
+    database = MagicMock()
+    assert cron.save_menu_to_supabase(database, 'rutgers', 'busch-dining-hall', '2026-10-09', menu)
+    row = database.table.return_value.upsert.call_args.args[0]
+    assert row['fetched_at'] == menu['fetched_at']
+    assert datetime.fromisoformat(row['created_at']).utcoffset() == timedelta(0)
