@@ -168,6 +168,7 @@ class Query:
 @pytest.fixture(scope='module')
 def legacy_pg(route_pg):
     route_pg.sql((ROOT / 'migrations/add_agent_controlled_save.sql').read_text())
+    route_pg.sql((ROOT / 'migrations/add_agent_legacy_save.sql').read_text())
     route_pg.sql('''ALTER TABLE users ADD COLUMN IF NOT EXISTS age integer, ADD COLUMN IF NOT EXISTS height_feet integer,
         ADD COLUMN IF NOT EXISTS height_inches integer, ADD COLUMN IF NOT EXISTS weight_lbs numeric,
         ADD COLUMN IF NOT EXISTS gender text, ADD COLUMN IF NOT EXISTS activity_level text,
@@ -625,10 +626,9 @@ def test_flag_on_lost_write_reply_never_falls_back_or_writes_twice(agent_on, rou
     response = post(agent_on, route)
     [row] = plans(agent_on)
     assert row['date'] == DAY and agent_on.gemini == []
-    if response.status_code == 200:
-        body = complete(response)[1] if route in STREAMS else response.json()
-        if body.get('auto_saved'):
-            assert body['saved_plan_id'] == row['id']
+    assert response.status_code == 200
+    body = complete(response)[1] if route in STREAMS else response.json()
+    assert body['auto_saved'] is True and body['saved_plan_id'] == row['id']
     post(agent_on, route)
     assert len(plans(agent_on)) == 1 and agent_on.gemini == []
 

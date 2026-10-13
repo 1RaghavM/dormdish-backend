@@ -137,6 +137,13 @@ class Storage:
     def __init__(self):
         self.inserts, self.filters = [], []
 
+    def rpc(self, name, params):
+        assert name == 'agent_save_legacy_plan'
+        row = {'id': params['p_plan_id'], 'user_id': params['p_user_id'],
+               'dining_hall': params['p_dining_hall'], 'date': params['p_date'],
+               'meal_plan_data': params['p_payload']}
+        return self.table('saved_meal_plans').insert(row)
+
     def table(self, name):
         storage = self
 
