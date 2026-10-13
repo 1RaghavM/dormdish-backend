@@ -70,6 +70,22 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
         admit(user['id'])
         return user
 
+    @router.get('/availability')
+    async def availability(response: Response, user=Depends(require_premium)):
+        response.headers['Cache-Control'] = 'no-store'
+        available = False
+        try:
+            admit(user['id'])
+            available = True
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+        return {
+            'conversation_enabled': available,
+            'completion_enabled': available and os.getenv('DORMDISH_COMPLETION_ENABLED', 'false') == 'true',
+            'preference_editing_enabled': available and explicit_memory_enabled(),
+        }
+
     @router.post('/conversations', status_code=201)
     async def create(body: CreateConversation, user=Depends(enabled_user), owner=Depends(store)):
         return await storage_call(owner.create_conversation)
