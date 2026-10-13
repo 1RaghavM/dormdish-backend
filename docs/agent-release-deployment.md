@@ -46,10 +46,12 @@ Both second-round accounts were deleted200; exact-ID SQL foundzero remaining. Al
 
 SourcePR36 and testPR37 merged after separate independent reviews at `ab6330c4da6967af574545c1ca24a95b815b3530` and `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`. Final release code exactly matches tested head `6c762c6aa5ababd9cb44188b86552280920d699c`, tree `a5df6c14e600776f6b6c747b03266710f4f465a4`: **1116 passed, zero failures/skips**,309.97s, real local PostgreSQL, one existing Starlette/AnyIO deprecation warning. Log: `/private/tmp/dd-hosted-search-final-full.log`. Final deployment health is checked after merge separately from these tests.
 
-## Remaining gates
+## Core feature delivery and internal activation
 
-- Production-key execution.
-- Luna latency/cost acceptance before cohort increases. The user explicitly removed Gemini comparison/build/testing from scope; draft PR34/35 were closed unmerged without live Gemini calls.
-- Manual native VoiceOver, Dynamic Type, keyboard, purchase/restore and end-to-end app checks.
+The user explicitly approved internal production activation after requesting only the working iOS/backend feature. Production agent, explicit-memory, controlled-save and meal-completion switches are enabled; chat admission remains0% public rollout with only the approved internal account. Memory/completion switches are global as disclosed in approval. No production OpenAI key was read or replaced.
 
-Keep rollout off. Preserve additive schema and user records during rollback; reconcile ambiguous writes before retrying any generator.
+BackendPR38/39 merged atfc913a00cb1d83d1d22896d12f04b862e5fe4df6 and deployed READY asdpl_AbE6AdKxonuMXuvMUxYKHbi7eWyH. Their authenticated availability endpoint drives native presentation.97focused tests passed, including23new availability cases and real PostgreSQL route checks, after fresh independent source/test reviews. NativePR15/16 merged at3535872e2534b55ce199999ebe7d563150abbe80 with155passing native tests; the separate reviewer reran all8new availability tests. Both merged trees exactly match their tested candidates.
+
+The actual production key generated a menu-grounded meal in11.951s. Persistent dislike, Apply200, idempotent confirmation replay, and completion200 with saved-item nutrition passed on a disposable account. The first attempt failed safely withruntime_unavailable after31.445s; one explicit new request passed. This is functional verification, not a latency reliability claim. The test account was deleted200 and removed from production configuration. Final documentation deployment adopts the reduced one-account allowlist. Sanitized evidence `/private/tmp/dd-production-core-result.json`.
+
+The original iOS checkout's41user modifications remain intact. Use the tested project `.migration-worktrees/ios-app-availability-tests/DormDish.xcodeproj` or an updated clean main checkout. No App Store/TestFlight publication was performed. Manual device/accessibility/purchase checks and acceptance monitoring remain before broader release; Gemini build/testing is explicitly excluded by the user. Keep the existing kill switch and additive records for rollback.

@@ -23,6 +23,17 @@ Latest release code is backend main `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`, 
 - Dedicated hosted_search_tests, worktree backend-hosted-search-tests, branch tests/dd-agent/hosted-search-cap, [PR37](https://github.com/1RaghavM/dormdish-backend/pull/37), head6c762c6, mergeb7e8182. Owns new regression tests/docs; source36 explicit dependency. [Fresh test review](https://github.com/1RaghavM/dormdish-backend/pull/37#pullrequestreview-5509943351),77independent tests and genuine old-source1failed/9passed. Both branches pushed before handoff, exact-head merges after fullsuite and reviews.
 - The live API's completed response can include one completed search plus a trailing searching attempt at max_tool_calls1. Official documentation caps processed calls and ignores further attempts; the minimal compatibility fix retains one completed search, overall completion, citation, privacy and request-limit checks. Local and deployed live checks passed. No Gemini changes merged.
 
+## Core app activation — delivered
+
+The user requested only the working backend/iOS feature, removed Gemini work, and explicitly approved production agent, memory, controlled-save and meal-completion activation. Chat has0% public rollout and one approved internal account. Memory/completion switches are global; this was included in approval. Existing production OpenAI credentials were exercised successfully without reading or replacing them.
+
+- Backend sourcePR38 f76cf6a and dedicated testPR39 9d63280 merged at d5b11a30bdab81aeacd32d7295961ec7315768dd / **fc913a00cb1d83d1d22896d12f04b862e5fe4df6**. Exact tested-tree parity;97focused tests including real PostgreSQL passed,23newcases genuinely failed404 on old source. Fresh source/test reviews [38](https://github.com/1RaghavM/dormdish-backend/pull/38#pullrequestreview-5510633058), [39](https://github.com/1RaghavM/dormdish-backend/pull/39#pullrequestreview-5510651646). Authenticated availability now tells iOS which features the backend admits, with no independent Statsig requirement.
+- Native sourcePR15 0be532c and dedicated testPR16 d9d69ff merged at57aa6aa01febe4014736b56a1fbf62ce011896e3 / **3535872e2534b55ce199999ebe7d563150abbe80**. Exact final-tree parity; **155native tests passed,0failed/0skipped**, executable d39f633ad165c1f85d7fc3ccbad454032bf3e05d. Fresh reviews [15](https://github.com/1RaghavM/dormdish-app-u/pull/15#pullrequestreview-5510651532), [16](https://github.com/1RaghavM/dormdish-app-u/pull/16#pullrequestreview-5510673284); reviewer reran8availability tests. Build caught and source author fixed the actor-default-argument compile error before the successful run. Logs/bundles `/private/tmp/dd-ios-availability-full3.log`, `.xcresult`, and `/private/tmp/dd-ios-availability-independent-review.xcresult`.
+- Correct-project production deployment dpl_AbE6AdKxonuMXuvMUxYKHbi7eWyH reachedREADY atfc913a0. The actual production flow passed conversation creation, persistent dislike, menu-grounded preview, Apply200, identical duplicate-save receipt, and completion200 with exact saved-item nutrition. Successful generation11.951s. First attempt failed safely withruntime_unavailable31.445s; one explicit new request succeeded. No key change. Sanitized `/private/tmp/dd-production-core-result.json`.
+- Synthetic account was deleted200 with its test data; its ID was removed from production configuration, leaving only the user's approved account. Final documentation deployment picks up that reduced allowlist. No temporary key remains. The original native checkout has41pre-existing modified/untracked entries including overlapping app edits; it remains untouched. Tested app project is in `.migration-worktrees/ios-app-availability-tests/DormDish.xcodeproj`.
+
+No App Store/TestFlight publication or public cohort expansion is claimed. Further manual accessibility/device checks can precede public release; they do not prevent using this approved internal build. No extra Gemini benchmarks or unrelated features are planned.
+
 ## Verified evidence and dependencies
 
 - Full backend log `/private/tmp/dd-release-final-full.log`; offline smoke `/private/tmp/dd-release-final-offline-smoke.json`. One existing Starlette/AnyIO deprecation warning. Native `/private/tmp/dd-ios-release-final.xcresult`, negative control `/private/tmp/dd-ios-release-negative.xcresult`, independent review `/private/tmp/dd-ios-release-independent-review.xcresult`.
@@ -42,7 +53,7 @@ All three synthetic accounts were deleted through `/auth/account` (each200); exa
 
 User scope change: Gemini comparison/build/testing is no longer required. Draft PR34/35 were closed without merging; no live Gemini calls were made. Existing Gemini fallback behavior remains unchanged.
 
-Remaining gates: production-key execution, Luna latency/cost acceptance, manual native VoiceOver/DynamicType/keyboard/purchase checks. Production rollout stays off until applicable gates pass. No production live evaluation or app release is claimed.
+Public-release follow-up: manual native accessibility/device/purchase checks and acceptance monitoring. Production core flow is verified and the explicitly approved internal account is enabled; public rollout remains0%. No store release is claimed.
 
 ---
 
