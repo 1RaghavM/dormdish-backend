@@ -1,4 +1,4 @@
-"""Shared agent generation behind the four legacy Generate Meal routes; callers keep their own saves."""
+"""Shared agent generation behind the four legacy Generate Meal routes; atomic legacy autosave."""
 import asyncio
 from contextlib import aclosing
 import os
@@ -76,3 +76,18 @@ async def generate(*args, **kwargs):
     async for chunk in events(*args, **kwargs):
         pass
     return chunk['meal_plan'], chunk['raw_response']
+
+
+def save(client, row):
+    """Save once; reconcile only this candidate after a missing or ambiguous reply."""
+    try:
+        response = client.rpc('agent_save_legacy_plan', {
+            'p_user_id': row['user_id'], 'p_plan_id': row['id'],
+            'p_dining_hall': row['dining_hall'], 'p_date': row['date'],
+            'p_payload': row['meal_plan_data'],
+        }).execute()
+        if response.data:
+            return response
+    except Exception:
+        pass
+    return client.table('saved_meal_plans').select('id').eq('user_id', row['user_id']).eq('id', row['id']).execute()

@@ -4752,7 +4752,8 @@ async def generate_meal_plan_route(meal_plan_request: MealPlanRequest, authoriza
             }
 
             logger.info(f"[MealPlan] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
-            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
+            save_response = (await asyncio.to_thread(legacy.save, supabase, save_data) if agent_generation
+                             else supabase.table("saved_meal_plans").insert(save_data).execute())
 
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
@@ -5251,7 +5252,8 @@ async def generate_single_meal_route(req: SingleMealRequest, authorization: Opti
             }
 
             logger.info(f"[SingleMeal] Attempting to auto-save {meal_name} for user {authenticated_user['id']} on {today}")
-            save_response = supabase.table("saved_meal_plans").insert(save_data).execute()
+            save_response = (await asyncio.to_thread(legacy.save, supabase, save_data) if agent_generation
+                             else supabase.table("saved_meal_plans").insert(save_data).execute())
 
             if save_response.data:
                 response_payload["saved_plan_id"] = plan_id
@@ -5553,7 +5555,8 @@ async def generate_meal_plan_stream_route(meal_plan_request: MealPlanRequest, au
 
                             logger.info(f"[MealPlan-Stream] Attempting to auto-save meal plan for user {authenticated_user['id']} on {today}")
                             save_response = await asyncio.to_thread(
-                                lambda: supabase.table("saved_meal_plans").insert(save_data).execute()
+                                lambda: legacy.save(supabase, save_data) if agent_generation
+                                else supabase.table("saved_meal_plans").insert(save_data).execute()
                             )
 
                             if save_response.data:
@@ -5964,7 +5967,8 @@ async def generate_single_meal_stream_route(req: SingleMealRequest, authorizatio
 
                             logger.info(f"[SingleMeal-Stream] Attempting to auto-save {meal_name} for user {authenticated_user['id']} on {today}")
                             save_response = await asyncio.to_thread(
-                                lambda: supabase.table("saved_meal_plans").insert(save_data).execute()
+                                lambda: legacy.save(supabase, save_data) if agent_generation
+                                else supabase.table("saved_meal_plans").insert(save_data).execute()
                             )
 
                             if save_response.data:
