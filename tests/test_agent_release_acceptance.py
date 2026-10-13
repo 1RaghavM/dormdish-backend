@@ -11,7 +11,7 @@ from tests.test_agent_routes import api, route_pg, pg, stores, install_model, tu
 from tests.test_controlled_save import plans
 from tests.test_legacy_adapters_unit import turns, HINT  # noqa: F401
 from tests.test_legacy_adapters import (  # noqa: F401
-    legacy, legacy_pg, agent_on, Query, post, plans as legacy_plans, ROUTES,
+    legacy, legacy_pg, agent_on, Query, post, plans as legacy_plans, ROUTES, DAY,
 )
 
 
@@ -204,14 +204,18 @@ def test_concurrent_legacy_generation_never_saves_two_plans_for_same_owner_date(
                     "FROM menus WHERE dining_hall = 'busch-dining-hall' AND NOT EXISTS "
                     "(SELECT 1 FROM menus WHERE dining_hall = 'livingston-dining-commons')")
     arrivals = Barrier(2)
-    original = Query.execute
+    original = agent_on.db.rpc
 
-    def overlap_writes(query):
-        if query.table == 'saved_meal_plans' and query.kind == 'insert':
+    def overlap_writes(name, params):
+        call = original(name, params)
+        if name != 'agent_save_legacy_plan':
+            return call
+        def execute():
             arrivals.wait(timeout=20)
-        return original(query)
+            return call.execute()
+        return SimpleNamespace(execute=execute)
 
-    monkeypatch.setattr(Query, 'execute', overlap_writes)
+    monkeypatch.setattr(agent_on.db, 'rpc', overlap_writes)
     def request(hall):
         import app
         from fastapi.testclient import TestClient
@@ -251,3 +255,80 @@ def test_smoke_rejects_incorrect_remaining_intake_targets(monkeypatch):
     monkeypatch.setattr(smoke.SyntheticContext, 'intake', wrong_intake)
     report = asyncio.run(smoke.run_smoke())
     assert report['outcome'] == 'error' and report['error_code']
+
+
+def candidate(owner, *, meal='dinner', hall='busch', plan_id=None):
+    return {'id': str(plan_id or uuid4()), 'user_id': owner.user_id, 'date': DAY,
+            'dining_hall': hall, 'meal_plan_data': {} if meal is None else {'meal': meal}}
+
+
+@pytest.mark.parametrize('role', ['anon', 'authenticated'])
+def test_atomic_save_rpc_rejects_client_roles_before_writing(agent_on, role):
+    with pytest.raises(RuntimeError, match='permission denied for function agent_save_legacy_plan'):
+        agent_on.pg.sql(f"SET ROLE {role}; SELECT agent_save_legacy_plan('{agent_on.owner.user_id}', "
+                        f"'{uuid4()}', 'busch', '{DAY}', '{{\"meal\":\"dinner\"}}')")
+    assert legacy_plans(agent_on) == []
+    assert agent_on.pg.sql("SELECT has_function_privilege('service_role', "
+        "'agent_save_legacy_plan(uuid,uuid,text,date,jsonb)', 'EXECUTE')") == 't'
+
+
+@pytest.mark.parametrize('response', ['lost', 'empty'])
+def test_atomic_save_recovers_own_exact_candidate_without_repeating_rpc(agent_on, monkeypatch, response):
+    row = candidate(agent_on.owner)
+    original = agent_on.db.rpc
+    writes = []
+
+    def rpc(name, params):
+        call = original(name, params)
+        def execute():
+            writes.append(params['p_plan_id'])
+            call.execute()
+            if response == 'lost':
+                raise ConnectionError('synthetic committed reply lost')
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(execute=execute)
+
+    monkeypatch.setattr(agent_on.db, 'rpc', rpc)
+    assert legacy_runtime.save(agent_on.db, row).data == [{'id': row['id']}]
+    assert writes == [row['id']]
+    [stored] = legacy_plans(agent_on)
+    assert stored['id'] == row['id'] and stored['user_id'] == row['user_id']
+    assert stored['meal_plan_data'] == row['meal_plan_data']
+
+
+def test_atomic_save_replay_never_duplicates_or_returns_another_candidate(agent_on):
+    row = candidate(agent_on.owner)
+    assert legacy_runtime.save(agent_on.db, row).data == [{'id': row['id']}]
+    before = legacy_plans(agent_on)
+    assert legacy_runtime.save(agent_on.db, row).data == [{'id': row['id']}]
+    assert legacy_runtime.save(agent_on.db, candidate(agent_on.owner, hall='livingston')).data == []
+    # A colliding ID owned by someone else cannot become a successful reconciliation.
+    assert legacy_runtime.save(agent_on.db, candidate(agent_on.other, plan_id=row['id'])).data == []
+    assert legacy_plans(agent_on) == before and legacy_plans(agent_on, agent_on.other) == []
+
+
+@pytest.mark.parametrize('first,second,allowed', [
+    ('dinner', 'dinner', False), ('lunch', 'dinner', True),
+    ('dinner', None, False), (None, None, False), (None, 'dinner', True),
+])
+def test_atomic_save_preserves_legacy_plan_and_individual_meal_policy(agent_on, first, second, allowed):
+    row = candidate(agent_on.owner, meal=first)
+    assert legacy_runtime.save(agent_on.db, row).data == [{'id': row['id']}]
+    next_row = candidate(agent_on.owner, meal=second, hall='livingston')
+    result = legacy_runtime.save(agent_on.db, next_row)
+    assert result.data == ([{'id': next_row['id']}] if allowed else [])
+    saved = legacy_plans(agent_on)
+    assert len(saved) == 1 + allowed and saved[0]['id'] == row['id']
+    assert saved[0]['meal_plan_data'] == row['meal_plan_data']
+
+
+def test_atomic_migration_reapplication_preserves_existing_plans_and_is_invoker(agent_on):
+    row = candidate(agent_on.owner)
+    legacy_runtime.save(agent_on.db, row)
+    before = legacy_plans(agent_on)
+    migration = (Path(__file__).resolve().parents[1] / 'migrations/add_agent_legacy_save.sql').read_text()
+    agent_on.pg.sql(migration)
+    agent_on.pg.sql(migration)
+    assert legacy_plans(agent_on) == before
+    assert agent_on.pg.sql("SELECT prosecdef FROM pg_proc WHERE oid = "
+                          "'agent_save_legacy_plan(uuid,uuid,text,date,jsonb)'::regprocedure") == 'f'
