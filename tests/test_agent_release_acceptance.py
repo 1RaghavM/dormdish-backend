@@ -6,10 +6,13 @@ from uuid import uuid4
 
 import pytest
 
-from dormdish_agent import legacy
+from dormdish_agent import legacy as legacy_runtime
 from tests.test_agent_routes import api, route_pg, pg, stores, install_model, turn_body, events  # noqa: F401
 from tests.test_controlled_save import plans
 from tests.test_legacy_adapters_unit import turns, HINT  # noqa: F401
+from tests.test_legacy_adapters import (  # noqa: F401
+    legacy, legacy_pg, agent_on, Query, post, plans as legacy_plans, ROUTES,
+)
 
 
 @pytest.fixture(scope='module')
@@ -59,19 +62,19 @@ def test_rollback_preserves_saved_receipt_and_owner_only_recovery(api, monkeypat
 def test_full_day_context_loading_consumes_shared_deadline(turns, monkeypatch):
     stub = turns(model_calls=4)
     now = [100.0]
-    original = legacy.build_context
+    original = legacy_runtime.build_context
 
     def load(*args):
         now[0] += 20
         return original(*args)
 
-    monkeypatch.setattr(legacy, 'time', SimpleNamespace(monotonic=lambda: now[0]))
-    monkeypatch.setattr(legacy, 'build_context', load)
+    monkeypatch.setattr(legacy_runtime, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(legacy_runtime, 'build_context', load)
 
     async def run():
         seen = []
         with pytest.raises(ValueError, match='Generation budget exhausted'):
-            async for event in legacy.events(None, {}, None, 'busch', '2026-10-12',
+            async for event in legacy_runtime.events(None, {}, None, 'busch', '2026-10-12',
                                               {meal: HINT for meal in ('breakfast', 'lunch', 'dinner')}):
                 seen.append(event)
         return seen
@@ -187,3 +190,64 @@ def test_smoke_usage_survives_byte_boundaries_and_multiple_response_frames():
 
     assert asyncio.run(read()) == encoded
     assert metrics == dict(input_tokens=14, output_tokens=6, total_tokens=20, responses_with_usage=2)
+
+
+@pytest.mark.parametrize('route', ROUTES)
+@pytest.mark.parametrize('other_hall', ['busch', 'livingston'])
+def test_concurrent_legacy_generation_never_saves_two_plans_for_same_owner_date(agent_on, monkeypatch, route, other_hall):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    agent_on.pg.sql('CREATE UNIQUE INDEX IF NOT EXISTS saved_meal_plans_user_date_hall '
+                    'ON saved_meal_plans(user_id, date, dining_hall)')
+    agent_on.pg.sql("INSERT INTO menus(university, dining_hall, date, fetched_at, menu_data, id) "
+                    "SELECT university, 'livingston-dining-commons', date, fetched_at, menu_data, 'rutgers_livingston-dining-commons_' || date "
+                    "FROM menus WHERE dining_hall = 'busch-dining-hall' AND NOT EXISTS "
+                    "(SELECT 1 FROM menus WHERE dining_hall = 'livingston-dining-commons')")
+    arrivals = Barrier(2)
+    original = Query.execute
+
+    def overlap_writes(query):
+        if query.table == 'saved_meal_plans' and query.kind == 'insert':
+            arrivals.wait(timeout=20)
+        return original(query)
+
+    monkeypatch.setattr(Query, 'execute', overlap_writes)
+    def request(hall):
+        import app
+        from fastapi.testclient import TestClient
+        # Separate ASGI workers allow synchronous inserts to actually overlap.
+        with TestClient(app.app) as client:
+            client.headers['Authorization'] = 'Bearer owner'
+            return post(SimpleNamespace(client=client), route, dining_hall=hall)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(request, ['busch', other_hall]))
+    assert all(response.status_code in (200, 409, 429) for response in responses)
+    saved = legacy_plans(agent_on)
+    assert len(saved) == 1, [row['id'] for row in saved]
+
+
+def test_smoke_rejects_failed_intake_tool_instead_of_counting_the_attempt(monkeypatch):
+    from scripts import agent_release_smoke as smoke
+
+    async def unavailable(self):
+        raise RuntimeError('synthetic-intake-private-details')
+
+    monkeypatch.setattr(smoke.SyntheticContext, 'intake', unavailable)
+    report = asyncio.run(smoke.run_smoke())
+    assert report['outcome'] == 'error'
+    assert report['error_code'] and 'synthetic-intake-private-details' not in str(report)
+
+
+def test_smoke_rejects_incorrect_remaining_intake_targets(monkeypatch):
+    from scripts import agent_release_smoke as smoke
+    original = smoke.SyntheticContext.intake
+
+    async def wrong_intake(self):
+        result = await original(self)
+        result['remaining_after_food_logs']['calories'] = 2000
+        return result
+
+    monkeypatch.setattr(smoke.SyntheticContext, 'intake', wrong_intake)
+    report = asyncio.run(smoke.run_smoke())
+    assert report['outcome'] == 'error' and report['error_code']
