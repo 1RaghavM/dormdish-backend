@@ -36,3 +36,10 @@ Initial helper check: `python -m pytest -o addopts='' -q tests/test_agent_legacy
 4 passed. Companion PR #28 owns real PostgreSQL concurrent cross-hall requests, storage permissions,
 lost-response recovery and legacy-route compatibility. Source merge depends on those tests and a
 fresh independent review. No production migration or flag change was performed by this PR.
+
+SQL selfcheck on implementation `de9e12e03540618c38979f9518f0eef8019eb05e`:
+`PYTHONPATH=. /private/tmp/dd-agent-runtime-uv/bin/python /private/tmp/dd-atomic-legacy-sql-check.py`
+passed against a disposable local PostgreSQL database. It applied the migration twice, verified
+same-meal cross-hall rejection, different-meal persistence, full-day conflict, preserved full-day /
+individual-meal behavior, and denied execution for both client roles. This is sequential SQL evidence;
+independent concurrent route tests remain a separate gate.
