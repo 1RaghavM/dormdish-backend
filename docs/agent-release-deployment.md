@@ -1,6 +1,6 @@
 # Release deployment checks — October 13, 2026
 
-Starting backend source: `e364f45a4ca9a318116c838930321732cd95428c`. Final merged release code: `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`. Final native: `967dd4b056165953fe2b6b7bd3399f22139d17c2`. These checks do not enable rollout.
+Starting backend source: `e364f45a4ca9a318116c838930321732cd95428c`. Final merged release code: `fc913a00cb1d83d1d22896d12f04b862e5fe4df6`. Final native: `3535872e2534b55ce199999ebe7d563150abbe80`. Initial checks kept rollout off; the final section records the user-approved internal activation.
 
 ## Verified deployment and limits
 
