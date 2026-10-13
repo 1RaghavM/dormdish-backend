@@ -35,12 +35,15 @@ def admit(user_id):
         enabled = os.getenv('DORMDISH_AGENT_ENABLED', 'false')
         killed = os.getenv('DORMDISH_AGENT_KILL_SWITCH', 'false')
         percent = int(os.getenv('DORMDISH_AGENT_ROLLOUT_PERCENT', '0'))
+        internal = os.getenv('DORMDISH_AGENT_INTERNAL_USER_IDS', '').strip()
+        internal_users = {UUID(value.strip()) for value in internal.split(',')} if internal else set()
+        user_id = UUID(str(user_id))
         if enabled not in ('true', 'false') or killed not in ('true', 'false') or not 0 <= percent <= 100:
             raise ValueError()
-        bucket = int.from_bytes(sha256(('dormdish-agent-v1:' + str(UUID(str(user_id)))).encode()).digest()[:4], 'big') % 100
+        bucket = int.from_bytes(sha256(('dormdish-agent-v1:' + str(user_id)).encode()).digest()[:4], 'big') % 100
     except ValueError:
         raise HTTPException(503, 'Agent rollout configuration is unavailable') from None
-    if enabled != 'true' or killed == 'true' or bucket >= percent:
+    if enabled != 'true' or killed == 'true' or (user_id not in internal_users and bucket >= percent):
         raise HTTPException(503, 'DormDish conversation is currently unavailable')
 
 
