@@ -12,4 +12,12 @@ DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -o add
 
 Result: **7 failed, 15 passed, 0 skipped** in 5.17s. Genuine failures: allowed internal UUID and authenticated owner still received 503 at zero percent; all five malformed internal lists were silently accepted at 100 percent. Log: `/private/tmp/dd-internal-rollout-red.log`.
 
-Combined implementation validation pending. Keep rollout disabled until implementation and companion tests receive independent reviews and all release gates pass. These tests do not verify live Vercel deployment, SDK/model access, or production configuration. No schema migration or dependency changes.
+Combined implementation `1b43297c13c5dc74b68d2dd908be86907438c3ed` was explicitly merged into this branch. Final test-code commit: `84402e4ad4c8deffc6c23fa894d81debaab2aaad`.
+
+```sh
+DD_AGENT_LOCAL_PG=1 /private/tmp/dd-agent-runtime-uv/bin/python -m pytest -o addopts='' -q tests/test_agent_internal_rollout.py tests/test_agent_routes.py tests/test_agent_routes_unit.py
+```
+
+Result: **74 passed, 0 failed, 0 skipped** in 16.97s, including 23 new focused cases. Existing Starlette/AnyIO deprecation warning only. Log: `/private/tmp/dd-internal-rollout-green-final.log`. The same suite before the final natural-language spoof and independent legacy-gate additions passed 73 tests on combined commit `66190beb9c4e57e0b708f1e24c40a142af047681`.
+
+[Test PR #33](https://github.com/1RaghavM/dormdish-backend/pull/33) is stacked on source PR #32; fresh independent review remains required for both. Full backend suite was not rerun for this isolated gate; the focused suite exercises unchanged auth, storage, cancellation, duplication, and ownership boundaries. Keep rollout disabled until implementation and companion tests receive independent reviews and all release gates pass. These tests do not verify live Vercel deployment, SDK/model access, or production configuration. No schema migration or dependency changes.
