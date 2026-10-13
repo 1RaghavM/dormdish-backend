@@ -1,5 +1,6 @@
 """Bounded synthetic release smoke. Offline unless explicitly invoked with --live."""
 import argparse
+from ast import literal_eval
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from importlib.metadata import version
@@ -150,12 +151,36 @@ async def run_smoke(*, live=False, deadline_seconds=45):
                     if event.type == 'meal_preview':
                         report['previews'] += 1
                 report['tool_calls'], report['model_calls'] = context.tool_calls, context.model_calls
-                required = {'read_profile', 'retrieve_menu', 'read_intake', 'preview_meal'}
-                called = {item.get('name') for item in turn.history if item.get('type') == 'function_call'}
+                calls = {item['call_id']: item['name'] for item in turn.history
+                         if item.get('type') == 'function_call'}
+                evidence = {}
+                for item in turn.history:
+                    if item.get('type') != 'function_call_output' or item.get('call_id') not in calls:
+                        continue
+                    try:
+                        # The pinned SDK serializes function-return dictionaries with str(), not JSON.
+                        output = literal_eval(item['output'])
+                    except (SyntaxError, ValueError):
+                        continue
+                    if isinstance(output, dict):
+                        evidence[calls[item['call_id']]] = output
+                profile = evidence.get('read_profile', {})
+                intake = evidence.get('read_intake', {})
                 proposal = context.proposal
                 if turn.state.status == 'error':
                     report['error_code'] = turn.state.events[-1].data.code
-                elif (not required <= called or proposal is None or report['previews'] != 1
+                elif (proposal is None or report['previews'] != 1
+                      or profile.get('targets') != context.targets.model_dump()
+                      or profile.get('restrictions') != context.restrictions
+                      or profile.get('allergens') != context.allergens
+                      or profile.get('preferences') != context.preferences
+                      or profile.get('planning') != context.planning.model_dump(mode='json')
+                      or context.snapshot is None
+                      or evidence.get('retrieve_menu', {}).get('items') != context.snapshot.items
+                      or intake.get('remaining_after_food_logs') != dict(
+                          calories=1700, protein_g=85, fat_g=60, carbs_g=160)
+                      or intake.get('completion_records_available') is not False
+                      or evidence.get('preview_meal') != proposal.model_dump(mode='json')
                       or proposal.totals.model_dump() != dict(calories=200, protein_g=4, fat_g=1, carbs_g=44)
                       or report['responses_with_usage'] != report['requests'] or turn.search_attempted
                       or turn.state.events[-1].data.saved_plan_id is not None):
