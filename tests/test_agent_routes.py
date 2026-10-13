@@ -108,6 +108,7 @@ def api(route_pg, stores, monkeypatch):
         lambda: database, lambda _: Nutrition(calories=2000, protein_g=100, fat_g=70, carbs_g=200)))
     with TestClient(app) as client:
         client.headers['Authorization'] = 'Bearer owner'
+        client.headers['X-App-Version'] = '2.2.4'
         yield SimpleNamespace(client=client, owner=owner, other=other, database=database, pg=route_pg, profiles=profiles)
 
 
@@ -311,7 +312,7 @@ def test_chunked_oversize_body_is_bounded_without_content_length(api):
 
         await api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'},
             'http_version': '1.1', 'method': 'POST', 'scheme': 'http', 'path': '/agent/conversations',
-            'query_string': b'', 'headers': [(b'authorization', b'Bearer owner'),
+            'query_string': b'', 'headers': [(b'authorization', b'Bearer owner'), (b'x-app-version', b'2.2.4'),
             (b'content-type', b'application/json')], 'server': ('test', 80), 'client': ('test', 1)}, receive, send)
         assert sent[0]['status'] == 413
 
@@ -342,7 +343,7 @@ def test_action_and_terminal_are_committed_before_asgi_delivery(api, monkeypatch
         await api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'},
             'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
             'path': f'/agent/conversations/{conversation.id}/messages', 'query_string': b'',
-            'headers': [(b'authorization', b'Bearer owner'), (b'content-type', b'application/json')],
+            'headers': [(b'authorization', b'Bearer owner'), (b'x-app-version', b'2.2.4'), (b'content-type', b'application/json')],
             'server': ('test', 80), 'client': ('test', 1)}, receive, send)
         assert sent[0]['status'] == 200
         assert b'"type":"complete"' in b''.join(message.get('body', b'') for message in sent)
@@ -387,7 +388,7 @@ def test_real_asgi_disconnect_cancels_sdk_and_persists_reconcilable_outcome(api,
         await asyncio.wait_for(api.client.app({'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.3'},
             'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
             'path': f'/agent/conversations/{conversation.id}/messages', 'query_string': b'',
-            'headers': [(b'authorization', b'Bearer owner'), (b'content-type', b'application/json')],
+            'headers': [(b'authorization', b'Bearer owner'), (b'x-app-version', b'2.2.4'), (b'content-type', b'application/json')],
             'server': ('test', 80), 'client': ('test', 1)}, receive, send), 5)
         assert disconnected.is_set()
         await asyncio.wait_for(model_closed.wait(), 1)
