@@ -1,12 +1,12 @@
 # Release deployment checks — October 13, 2026
 
-Starting backend source: `e364f45a4ca9a318116c838930321732cd95428c`. Final merged backend: `3609664602267f2a24d4c1ecade3a59be4889697`. Final native: `967dd4b056165953fe2b6b7bd3399f22139d17c2`. These checks do not enable rollout.
+Starting backend source: `e364f45a4ca9a318116c838930321732cd95428c`. Final merged release code: `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`. Final native: `967dd4b056165953fe2b6b7bd3399f22139d17c2`. These checks do not enable rollout.
 
 ## Verified deployment and limits
 
 The initial authenticated Vercel CLI inspection identified production deployment `dpl_FsTPKFkG9Tj7S457Y1vmp8iyfyZy`, project `prj_bV09FcFRwsPnmquVnp08G3bfiQVX`, team `team_JYbLtO4ZaWEF5Bwxe1VYi7s7`. That initial deployment metadata matched starting backend `e364f45a4ca9a318116c838930321732cd95428c` and reported READY. `https://api.dormdish.ai/health` returned HTTP 200. The original checkout's `.vercel/project.json` points to an older project; do not use it for deployment operations.
 
-Build output for that initial deployment (`GET /v1/deployments/{id}/builds`) reports the `api/index.py` Lambda running Python 3.12 in iad1, **300-second timeout**, **2048 MiB memory**, and artifact `size: 59905262` bytes. This size is the API's artifact size, not independently measured uncompressed size. Project metadata has Fluid enabled; deployment plan is Hobby. [Official Vercel limits](https://vercel.com/docs/functions/limitations), rechecked today, state Hobby Fluid has a 300-second maximum and Python's standard uncompressed bundle maximum is 500 MB. The application's 45-second generation bound fits the recorded function deadline; progressive deployed SSE is now verified below; actual client disconnect remains untested.
+Build output for that initial deployment (`GET /v1/deployments/{id}/builds`) reports the `api/index.py` Lambda running Python 3.12 in iad1, **300-second timeout**, **2048 MiB memory**, and artifact `size: 59905262` bytes. This size is the API's artifact size, not independently measured uncompressed size. Project metadata has Fluid enabled; deployment plan is Hobby. [Official Vercel limits](https://vercel.com/docs/functions/limitations), rechecked today, state Hobby Fluid has a 300-second maximum and Python's standard uncompressed bundle maximum is 500 MB. The application's 45-second generation bound fits the recorded function deadline; progressive deployed SSE is now verified below; actual client disconnect and recovery are verified below.
 
 Production environment **names only** were inspected. Agent, generation, controlled-save, explicit-memory and completion enabling flags are absent, retaining their code defaults of off. No production environment value or flag was changed. Temporary branch-only preview configuration is recorded below. A targeted non-secret endpoint check confirmed production `OPENAI_BASE_URL` uses `https://api.openai.com/v1/`. Existing health is not evidence of authenticated agent journeys.
 
@@ -40,10 +40,16 @@ The user authorized temporary test-branch secret storage and synthetic accounts.
 
 Kill-switch preview `dpl_2it3DvUVcrMYjnRx1ucBG7WQDs41` denied new writes503 and retained existing run reads200. All three test accounts were then deleted200 and an exact-ID database count confirmed zero remain. All six temporary branch variables and three key-containing preview deployments were removed; metadata confirms no variables remain on that branch. Production enabling flags remain absent. No secret or session was saved to a local file. Sanitized evidence: `/private/tmp/dd-preview-acceptance-result.json`.
 
+A second Luna-only preview at sourcePR36 `b4934f5c202ecb1020abf434d422b8e09076f5b2` verified a real client disconnect after the first status event (3.361s). The server completed the run; recovery returned the terminal result and retrying the same request returned identical events. Another synthetic account received404 for that run. Total recovery check14.407s. A separate public-hours search streamed status/text/complete with one citation in11.019s. Local bounded hosted search also passed8.207s with a food.rutgers.edu citation. The runtime fix accommodates an observed ignored pending search attempt while requiring exactly one completed search; see PR36 and its companion testPR37.
+
+Both second-round accounts were deleted200; exact-ID SQL foundzero remaining. All five second-round branch variables and the single key-containing deployment were removed; metadata confirmszero branch settings. Thus all five accounts and four temporary secret-containing deployments from both rounds are cleaned up. Evidence: `/private/tmp/dd-preview-disconnect-result.json`, `/private/tmp/dd-live-hosted-search.json`. No Gemini calls or comparison work will continue, per user scope change.
+
+SourcePR36 and testPR37 merged after separate independent reviews at `ab6330c4da6967af574545c1ca24a95b815b3530` and `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`. Final release code exactly matches tested head `6c762c6aa5ababd9cb44188b86552280920d699c`, tree `a5df6c14e600776f6b6c747b03266710f4f465a4`: **1116 passed, zero failures/skips**,309.97s, real local PostgreSQL, one existing Starlette/AnyIO deprecation warning. Log: `/private/tmp/dd-hosted-search-final-full.log`. Final deployment health is checked after merge separately from these tests.
+
 ## Remaining gates
 
-- Production-key execution, hosted search and actual deployed disconnect/recovery.
-- Comparable measured Gemini baseline and explicit latency/cost thresholds before cohort increases.
+- Production-key execution.
+- Luna latency/cost acceptance before cohort increases. The user explicitly removed Gemini comparison/build/testing from scope; draft PR34/35 were closed unmerged without live Gemini calls.
 - Manual native VoiceOver, Dynamic Type, keyboard, purchase/restore and end-to-end app checks.
 
 Keep rollout off. Preserve additive schema and user records during rollback; reconcile ambiguous writes before retrying any generator.

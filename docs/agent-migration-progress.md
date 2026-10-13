@@ -2,20 +2,26 @@
 
 This checkpoint supersedes the historical ledger below. Original checkouts are preserved; all changes use isolated `.migration-worktrees/` branches. Every implementation, testing, integration and review agent reads Ponytail FULL and applicable repository instructions. Commits use verified `1RaghavM <lebrongoated2323@gmail.com>`; no co-author trailers. GitHub merge commits use the account's verified GitHub identity.
 
-Backend started at `e364f45a4ca9a318116c838930321732cd95428c` (PR1–27 already merged). Native started at `a357c7d5fa311b6ee9621b922e7e3b2f15820045`. The old resume handoff is stale. Backend main is now `3609664602267f2a24d4c1ecade3a59be4889697`, with exact tree parity to integration candidate `5a9cc64928b8327d200727654f65b320a7df3ba4`, tree `9b2353e07363cad9326fd697aee1d3115ec676b6`.
+Backend started at `e364f45a4ca9a318116c838930321732cd95428c` (PR1–27 already merged). Native started at `a357c7d5fa311b6ee9621b922e7e3b2f15820045`. The old resume handoff is stale. Earlier combined backend main was `3609664602267f2a24d4c1ecade3a59be4889697`, with exact tree parity to integration candidate `5a9cc64928b8327d200727654f65b320a7df3ba4`, tree `9b2353e07363cad9326fd697aee1d3115ec676b6`.
 
 | Owner / worktree | Branch | PR / final head | Evidence / state |
 |---|---|---|---|
-| root / backend-release-acceptance | chore/dd-agent/release-acceptance | #30 / 472319e initial | Ledger/deployment docs; final refresh and review pending |
-| release_validation / backend-release-validation | feat/dd-agent/release-validation | #29 / 5fd495f | Strict live smoke10.596s,5072tokens; independent review clear; merged |
+| root / backend-release-acceptance | chore/dd-agent/release-acceptance | #30 / final evidence update | Ledger/deployment docs; final refreshed review required |
+| release_validation / backend-release-validation | feat/dd-agent/release-validation | #29 / 5fd495f | Strict live smoke10.596s,5072tokens; independent review clear; merged998dd2181c143d472185a56bb83c9a42dddf2922 |
 | atomic_legacy_save / backend-atomic-legacy-save | fix/dd-agent/atomic-legacy-save | #31 / 311a465 | Shared atomic legacy RPC; independent review clear; merged f3f10f18bf3e395a217315ffd07e8f546ebec443 |
 | release_backend_tests / backend-release-tests | tests/dd-agent/release-acceptance | #28 / c98bc68 | Source29+31 dependencies;1083passed at0977643; reviewer103passed; merged bfe852aa75ac28e01b488ab090ecfb8cb0785665 |
 | root / backend-internal-rollout | feat/dd-agent/internal-rollout | #32 / 1b43297 | Explicit UUID allowlist at0% rollout; independent reviewer74passed; merged3f5e64b751fbd6f3abac02ffc164fd9aee31e179 |
 | internal_rollout_tests / backend-internal-rollout-tests | tests/dd-agent/internal-rollout | #33 /8554a01 | Source32 dependency;23newcases,74combinedpassed; reviewer23passed; merged3609664602267f2a24d4c1ecade3a59be4889697 |
 | release_ios_tests / ios-release-tests | tests/dd-agent/native-release-acceptance | native#14 /1535951 |147fullpassed; genuine ownership mutation1failed/5assertions; reviewer17passed; merged967dd4b056165953fe2b6b7bd3399f22139d17c2 |
 | final_integration / backend-release-final | integration/dd-agent/release-final | pushed5a9cc64928b8327d200727654f65b320a7df3ba4 |1106passed,0failed,0skipped,304.38s; offline SDK smoke passed; exact merged-main tree parity |
-| baseline_acceptance / backend-baseline-validation | feat/dd-agent/baseline-validation | pending | Owns scripts/agent_baseline_compare.py and docs/agent-baseline-validation.md; bounded synthetic Gemini/Luna comparison |
-| baseline_tests / backend-baseline-tests | tests/dd-agent/baseline-validation | pending | Owns tests/test_agent_baseline_compare.py and docs/agent-baseline-tests.md; independent tests, source dependency |
+| baseline_acceptance / backend-baseline-validation | feat/dd-agent/baseline-validation | #35 /594b16c | Closed unmerged: user removed Gemini comparison/build/testing from scope; branch preserved |
+| baseline_tests / backend-baseline-tests | tests/dd-agent/baseline-validation | #34 /40be482 pushed | Closed unmerged on scope change; local8be3830 retained, no active test process |
+
+Latest release code is backend main `b7e8182f6f8d9ff1c945c3e4fbb8dbb8d46a5519`, exact entire-tree parity with tested companion head `6c762c6aa5ababd9cb44188b86552280920d699c`, tree `a5df6c14e600776f6b6c747b03266710f4f465a4`. Full real-PostgreSQL suite: **1116 passed, zero failures/skips, 309.97s**, one existing Starlette deprecation warning; `/private/tmp/dd-hosted-search-final-full.log`.
+
+- Source owner hosted_search_fix, worktree backend-hosted-search-fix, branch fix/dd-agent/hosted-search-cap, [PR36](https://github.com/1RaghavM/dormdish-backend/pull/36), headb4934f5, mergeab6330c4da6967af574545c1ca24a95b815b3530. Owns runtime.py and focused docs; +4/-2 runtime lines. [Fresh source review](https://github.com/1RaghavM/dormdish-backend/pull/36#pullrequestreview-5509930485),96independent tests passed.
+- Dedicated hosted_search_tests, worktree backend-hosted-search-tests, branch tests/dd-agent/hosted-search-cap, [PR37](https://github.com/1RaghavM/dormdish-backend/pull/37), head6c762c6, mergeb7e8182. Owns new regression tests/docs; source36 explicit dependency. [Fresh test review](https://github.com/1RaghavM/dormdish-backend/pull/37#pullrequestreview-5509943351),77independent tests and genuine old-source1failed/9passed. Both branches pushed before handoff, exact-head merges after fullsuite and reviews.
+- The live API's completed response can include one completed search plus a trailing searching attempt at max_tool_calls1. Official documentation caps processed calls and ignores further attempts; the minimal compatibility fix retains one completed search, overall completion, citation, privacy and request-limit checks. Local and deployed live checks passed. No Gemini changes merged.
 
 ## Verified evidence and dependencies
 
@@ -26,13 +32,17 @@ Backend started at `e364f45a4ca9a318116c838930321732cd95428c` (PR1–27 already 
 - Automatic review rejected all-secret env pull and production signup with retained credentials; neither executed. User approved targeted in-memory OpenAI smoke, synthetic accounts and temporary branch-scoped preview secret. No local secret/session files. Existing local key model lookup200; strict live smoke at5fd495f passed10.596s,5requests,4successfultools,1preview,4812input/260output tokens. Production-sensitive key cannot be decrypted by Vercel API and has not been exercised.
 - Native disk exhaustion resolved by removing only reproducible historical dd build caches; package/source/log/xcresult files retained. Unrelated QA process left untouched. Original native checkout's user work preserved.
 
+Final Luna check at sourcePR36 `b4934f5`: local bounded hosted search passed8.207s, one official food.rutgers.edu citation,1request/8898input/221output tokens. Preview `dpl_FjwtbqhyryEoC7aDqGhMZThz2NU6` passed actual stream disconnect afterstatus3.361s; run recoveredcomplete, identical request replay and cross-account404 within14.407s. Separate hosted-search turn streamedstatus/text/complete with1citation, finished11.019s. Both new synthetic accounts deleted200; exact-ID SQL confirmszero. Five temporary branch variables and the key-containing preview deleted; metadata confirmszero variables. Sanitized `/private/tmp/dd-preview-disconnect-result.json`. Production flags remainoff.
+
 ## Preview acceptance and completed cleanup
 
 Internal preview at source `1b43297c13c5dc74b68d2dd908be86907438c3ed` passed create201, outsider503, no-context response, explicit memory update and exact request recovery. Actual meal generation streamed14events progressively: first status3.402s, preview10.677s, terminal complete16.453s. No save was applied. Kill-switch redeployment returned503 for new writes and200 for existing run recovery. Sanitized result `/private/tmp/dd-preview-acceptance-result.json`.
 
 All three synthetic accounts were deleted through `/auth/account` (each200); exact-ID SQL verifies zero remain. All six temporary branch variables were removed and metadata verifies zero remain. All three key-containing disposable previews were deleted: `dpl_ENA1cR9YiHpb977yhwyEnJppippn`, `dpl_5JSNFr2wdQ2EGaoVH1Hox7wvfxwh`, `dpl_2it3DvUVcrMYjnRx1ucBG7WQDs41`. Sessions existed only in process memory; process ended. Production enabling flags remain absent. Initial registration500 was an invalid synthetic attribution value, corrected to existing `other` without product changes.
 
-Remaining gates: production-key execution, hosted search, deployed disconnect recovery, measured Gemini comparison and explicit latency/cost thresholds, manual native VoiceOver/DynamicType/keyboard/purchase checks. Production rollout stays off until applicable gates pass. No production live evaluation or app release is claimed.
+User scope change: Gemini comparison/build/testing is no longer required. Draft PR34/35 were closed without merging; no live Gemini calls were made. Existing Gemini fallback behavior remains unchanged.
+
+Remaining gates: production-key execution, Luna latency/cost acceptance, manual native VoiceOver/DynamicType/keyboard/purchase checks. Production rollout stays off until applicable gates pass. No production live evaluation or app release is claimed.
 
 ---
 
