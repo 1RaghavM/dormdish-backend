@@ -1,3 +1,26 @@
+# Release acceptance — October 13, 2026
+
+This current checkpoint supersedes the historical ledger below. Original checkouts are preserved; work continues in isolated `.migration-worktrees/` branches. All assigned agents read Ponytail FULL and the complete migration plan.
+
+- Fetched backend main: `e364f45a4ca9a318116c838930321732cd95428c` (PRs 1–27 merged); native main: `a357c7d5fa311b6ee9621b922e7e3b2f15820045` (PRs 1–13 merged). No open PRs before this continuation.
+- Completion, explicit memory, native preference controls, controlled saves and all four legacy adapters are implemented and merged. Earlier resume handoff is stale.
+- GitHub/keyring and branch push dry-runs verified with user identity `1RaghavM <lebrongoated2323@gmail.com>`; network sandbox restrictions are not credential failures. No co-author trailers.
+- Production Vercel deployment `dpl_FsTPKFkG9Tj7S457Y1vmp8iyfyZy` is READY at backend main above; `/health` returned 200. Correct project is `prj_bV09FcFRwsPnmquVnp08G3bfiQVX` (original checkout's `.vercel` metadata is stale). Project has Fluid enabled, region iad1; deployment plan is Hobby. Actual bundle size/streaming still to verify. Production migration flags are absent; rollout remains off.
+- Supabase CLI metadata confirms `agent_save_intent` and `agent_save_turn` are deployed, security invoker and executable only by service_role among tested roles. No production records read/written. Earlier completion/memory and public-access lockdown deployment evidence is in `agent-schema-deployment.md`.
+- Automatic review rejected all-secret `vercel env pull`; command did not run. User subsequently approved only targeted in-memory OpenAI credential lookup and bounded synthetic smoke. No secrets are saved/printed by this continuation.
+- Disk exhaustion interrupted initial native build. Tester removed only reproducible historical dd build caches, retained logs/xcresults/packages/source, reclaimed ~10 GiB. Another unrelated QA job was left untouched.
+
+| Owner / worktree | Branch / base | Owned files | PR / head | Evidence / next |
+|---|---|---|---|---|
+| root / backend-release-acceptance | chore/dd-agent/release-acceptance / e364f45 | this ledger, deployment acceptance docs | pending | Metadata/access checks above; release gates and fresh review pending |
+| release_validation / backend-release-validation | feat/dd-agent/release-validation / e364f45 | scripts/agent_release_smoke.py, docs/agent-release-validation.md | backend #29 / d742f7c | Offline real SDK smoke passed; live and fresh review pending |
+| release_backend_tests / backend-release-tests | tests/dd-agent/release-acceptance / e364f45; explicit source stack | tests/test_agent_release_acceptance.py, docs/agent-release-acceptance-tests.md | backend #28 / 3cdb2f1 initial | 4 new acceptance cases passed; full suite and smoke safety tests running; fresh review pending |
+| release_ios_tests / ios-release-tests | tests/dd-agent/native-release-acceptance / a357c7d | DormDishTests/AgentConversationTests.swift, docs/agent-release-acceptance-tests.md | native #14 / 328bac0 | 3 new recovery/session cases; full simulator and mutation control running; fresh review pending |
+
+Remaining release gates: actual live model/tool smoke; measured Gemini comparison and latency/cost thresholds; staging authenticated streaming/rollback; actual function limits and bundle size; manual native accessibility/keyboard/purchase checks. No rollout activation or successful live evaluation is claimed.
+
+---
+
 # Agent migration progress — October 11, 2026
 
 Coordinator-owned ledger; active copy is backend-memory/docs/agent-migration-progress.md. Handoff: `/Users/raghavmehta/Downloads/DormDish/DORMDISH_AGENT_MIGRATION_PLAN.md`. Every worker reads Ponytail FULL, repository instructions and the handoff. No co-author trailers. Original source checkouts remain untouched; all paths below are under `.migration-worktrees/`.
