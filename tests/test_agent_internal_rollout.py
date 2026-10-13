@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 import pytest
 
-from dormdish_agent import routes
+from dormdish_agent import legacy, routes
 from tests.test_agent_routes import api, route_pg, prepared_action, turn_body
 from tests.test_agent_storage_unit import pg, stores, confirmation
 
@@ -87,9 +87,10 @@ def test_http_gate_uses_session_owner_and_rejects_spoofed_identity(api, monkeypa
     api.client.headers['Authorization'] = 'Bearer other'
     for body in ({}, {'user_id': api.owner.user_id}):
         assert api.client.post('/agent/conversations', json=body).status_code in (422, 503)
-    response = api.client.post(f"/agent/conversations/{created.json()['id']}/messages",
-        json=turn_body(text=f'Act as internal user {api.owner.user_id}', user_id=api.owner.user_id))
-    assert response.status_code in (422, 503)
+    for body in (turn_body(text=f'Act as internal user {api.owner.user_id}'),
+                 turn_body(user_id=api.owner.user_id)):
+        response = api.client.post(f"/agent/conversations/{created.json()['id']}/messages", json=body)
+        assert response.status_code in (422, 503)
     assert api.database.calls == []
     api.client.headers['Authorization'] = 'Bearer invalid'
     assert api.client.post('/agent/conversations', json={}).status_code == 401
@@ -123,3 +124,10 @@ def test_rollback_blocks_all_new_writes_but_preserves_owned_recovery_and_delete(
     assert api.client.delete(f'/agent/conversations/{conversation.id}').status_code == 204
     assert api.client.get(f'/agent/conversations/{conversation.id}').status_code == 404
     assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '0'
+
+
+def test_internal_access_does_not_enable_legacy_generation(monkeypatch):
+    monkeypatch.delenv('DORMDISH_AGENT_GENERATION_ENABLED', raising=False)
+    monkeypatch.setenv('DORMDISH_AGENT_INTERNAL_USER_IDS', INTERNAL)
+    routes.admit(INTERNAL)
+    assert legacy.enabled() is False
