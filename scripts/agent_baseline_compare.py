@@ -45,7 +45,7 @@ CONFIG = {'gemini': {'model': GEMINI_MODEL, 'temperature': 0.4, 'max_output_toke
                     'thinking_budget': 512, 'max_requests': 2, 'http_timeout_seconds': 10,
                     'cached_content': None, 'deadline_seconds': 45},
           'luna': {'model': MODEL, 'max_requests': 8, 'max_output_tokens': 2048,
-                   'deadline_seconds': 45, 'http_timeout_seconds': 10}}
+                   'deadline_seconds': 45, 'http_timeout_seconds': 30}}
 
 
 class DinnerContext(FoodContext):
@@ -153,7 +153,7 @@ async def luna_case(ctx, requests, live):
     inner = httpx.AsyncHTTPTransport(retries=0) if live else httpx.MockTransport(offline)
     async with httpx.AsyncClient(transport=LunaTransport(inner, requests), trust_env=False) as http:
         async with AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'] if live else 'synthetic',
-            base_url='https://api.openai.com/v1', http_client=http, max_retries=0, timeout=10) as client:
+            base_url='https://api.openai.com/v1', http_client=http, max_retries=0, timeout=30) as client:
             turn = AgentTurn(ctx, TurnRequest(request_id=uuid4(), text=PROMPT), uuid4(), [], client=client,
                              deadline_seconds=CONFIG['luna']['deadline_seconds'])
             async for _ in turn.stream():
