@@ -66,16 +66,19 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
     def store(user=Depends(get_current_user)):
         return AgentStore(get_client(), user['id'])
 
-    def enabled_user(user=Depends(require_premium)):
+    def enabled_user(request: Request, user=Depends(require_premium)):
         admit(user['id'])
+        current_version = os.getenv('DORMDISH_AGENT_APP_VERSION', '2.2.4').strip()
+        if not current_version or request.headers.get('X-App-Version') != current_version:
+            raise HTTPException(503, 'DormDish conversation requires the current app version')
         return user
 
     @router.get('/availability')
-    async def availability(response: Response, user=Depends(require_premium)):
+    async def availability(request: Request, response: Response, user=Depends(require_premium)):
         response.headers['Cache-Control'] = 'no-store'
         available = False
         try:
-            admit(user['id'])
+            enabled_user(request, user)
             available = True
         except HTTPException as exc:
             if exc.status_code != 503:
