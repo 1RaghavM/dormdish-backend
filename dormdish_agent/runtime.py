@@ -99,8 +99,10 @@ class AgentTurn:
             tools=[{'type': 'web_search', 'search_context_size': 'low'}],
             tool_choice={'type': 'web_search'}, max_tool_calls=1, max_output_tokens=2048,
             store=False, timeout=15)
-        searches = [item for item in result.output if item.type == 'web_search_call']
-        if result.status != 'completed' or len(searches) != 1 or searches[0].status != 'completed':
+        searches = [item.status for item in result.output if item.type == 'web_search_call']
+        # A capped response can retain unprocessed search attempts after its completed search.
+        if (result.status != 'completed' or not searches or searches[0] != 'completed'
+                or any(status != 'searching' for status in searches[1:])):
             raise ValueError('Public search was not completed')
         answer = result.output_text
         if not answer or len(answer) > 4000:
