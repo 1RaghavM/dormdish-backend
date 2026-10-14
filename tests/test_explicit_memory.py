@@ -74,7 +74,7 @@ def api(pg, stores, monkeypatch):
     app.router.routes.extend(route for route in application.app.routes if getattr(route, 'path', '').startswith('/preferences/'))
     with TestClient(app) as client:
         client.headers['Authorization'] = 'Bearer owner'
-        client.headers['X-App-Version'] = '2.2.4'
+        client.headers['X-App-Version'] = '2.2.5'
         yield SimpleNamespace(client=client, owner=owner, other=other, database=database, pg=pg)
 
 

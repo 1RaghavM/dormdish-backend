@@ -182,7 +182,7 @@ def test_database_profile_is_owner_scoped_private_and_not_auth_cache(api, monkey
         lambda: api.database, application.agent_daily_targets))
     with TestClient(app) as client:
         client.headers['Authorization'] = 'Bearer owner'
-        client.headers['X-App-Version'] = '2.2.4'
+        client.headers['X-App-Version'] = '2.2.5'
         action = preview(SimpleNamespace(**(vars(api) | {'client': client})), monkeypatch)
     assert 'expected_profile_version' not in action
     stored = api.pg.sql(f"SELECT expected_profile_version FROM agent_actions WHERE id = '{action['id']}'")
