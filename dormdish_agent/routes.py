@@ -68,7 +68,7 @@ def create_router(get_current_user, require_premium, get_client, get_targets):
 
     def enabled_user(request: Request, user=Depends(require_premium)):
         admit(user['id'])
-        current_version = os.getenv('DORMDISH_AGENT_APP_VERSION', '2.2.4').strip()
+        current_version = os.getenv('DORMDISH_AGENT_APP_VERSION', '2.2.5').strip()
         if not current_version or request.headers.get('X-App-Version') != current_version:
             raise HTTPException(503, 'DormDish conversation requires the current app version')
         return user

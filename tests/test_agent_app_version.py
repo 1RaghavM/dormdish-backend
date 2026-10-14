@@ -20,7 +20,7 @@ def version_configuration(monkeypatch):
     monkeypatch.setenv('DORMDISH_EXPLICIT_MEMORY_ENABLED', 'true')
 
 
-@pytest.mark.parametrize('version', [None, '', '2.2.3', '2.2.5', '2.2.40', 'v2.2.4', ' 2.2.4', '2.2.4 '])
+@pytest.mark.parametrize('version', [None, '', '2.2.3', '2.2.4', '2.2.6', '2.2.50', 'v2.2.5', ' 2.2.5', '2.2.5 '])
 def test_wrong_version_hides_capabilities_and_blocks_all_mutations_before_storage(api, version):
     conversation, action = prepared_action(api.owner)
     api.client.headers.pop('X-App-Version', None)
@@ -38,7 +38,7 @@ def test_wrong_version_hides_capabilities_and_blocks_all_mutations_before_storag
     assert api.pg.sql(f"SELECT count(*) FROM saved_meal_plans WHERE user_id = '{api.owner.user_id}'") == '0'
 
 
-@pytest.mark.parametrize('version', [None, '2.2.3'])
+@pytest.mark.parametrize('version', [None, '2.2.3', '2.2.4', '2.2.6'])
 def test_outdated_client_can_recover_and_delete_only_its_own_data(api, version):
     conversation, _ = prepared_action(api.owner)
     run_id = api.pg.sql(f"SELECT id FROM agent_runs WHERE conversation_id = '{conversation.id}'")
@@ -59,7 +59,7 @@ def test_outdated_client_can_recover_and_delete_only_its_own_data(api, version):
 
 @pytest.mark.parametrize('token', ['owner', 'other'])
 def test_current_version_admits_all_authenticated_owners_at_full_rollout(api, token):
-    api.client.headers.update({'Authorization': 'Bearer ' + token, 'X-App-Version': '2.2.4'})
+    api.client.headers.update({'Authorization': 'Bearer ' + token, 'X-App-Version': '2.2.5'})
     assert api.client.get('/agent/availability').json() == dict.fromkeys(DISABLED, True)
     created = api.client.post('/agent/conversations', json={})
     assert created.status_code == 201
@@ -74,10 +74,10 @@ def test_current_version_admits_all_authenticated_owners_at_full_rollout(api, to
     assert applied.status_code == 200 and applied.json()['events'][-1]['data']['saved_plan_id']
 
 
-@pytest.mark.parametrize('configured', ['', ' ', '2.3.0'])
+@pytest.mark.parametrize('configured', ['', ' ', '2.2.4', '2.3.0'])
 def test_configured_version_is_exact_and_blank_fails_closed(api, monkeypatch, configured):
     monkeypatch.setenv('DORMDISH_AGENT_APP_VERSION', configured)
-    api.client.headers['X-App-Version'] = '2.2.4'
+    api.client.headers['X-App-Version'] = '2.2.5'
     assert api.client.get('/agent/availability').json() == DISABLED
     assert api.client.post('/agent/conversations', json={}).status_code == 503
     api.client.headers['X-App-Version'] = configured
@@ -89,7 +89,7 @@ def test_configured_version_is_exact_and_blank_fails_closed(api, monkeypatch, co
 @pytest.mark.parametrize('gate', ['auth', 'premium', 'kill', 'disabled', 'cohort'])
 def test_matching_version_does_not_bypass_existing_admission(api, monkeypatch, gate):
     import app as application
-    api.client.headers['X-App-Version'] = '2.2.4'
+    api.client.headers['X-App-Version'] = '2.2.5'
     if gate == 'auth':
         api.client.headers['Authorization'] = 'Bearer invalid'
     elif gate == 'premium':
