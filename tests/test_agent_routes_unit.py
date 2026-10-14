@@ -92,7 +92,7 @@ def test_missing_planning_context_persists_clarification_and_duplicate_replays(m
     monkeypatch.setattr(routes, 'admit', lambda _: None)
     app = FastAPI()
     app.include_router(routes.create_router(lambda: {'id': user}, lambda: {'id': user}, lambda: None, lambda u: None))
-    with TestClient(app, headers={'X-App-Version': '2.2.4'}) as client:
+    with TestClient(app, headers={'X-App-Version': '2.2.5'}) as client:
         first = client.post(f'/agent/conversations/{conversation}/messages', json={'request_id': str(request), 'text': 'hello'})
         duplicate = client.post(f'/agent/conversations/{conversation}/messages', json={'request_id': str(request), 'text': 'hello'})
     assert first.status_code == 200

@@ -40,7 +40,7 @@ def client(monkeypatch):
         application.require_premium, unexpected, unexpected))
     with TestClient(app) as client:
         client.headers['Authorization'] = 'Bearer owner'
-        client.headers['X-App-Version'] = '2.2.4'
+        client.headers['X-App-Version'] = '2.2.5'
         yield client
 
 
